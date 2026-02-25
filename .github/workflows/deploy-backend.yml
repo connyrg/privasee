@@ -1,0 +1,72 @@
+# Deploy PrivaSee FastAPI backend to Posit Connect
+#
+# Trigger: push to main that touches the backend/ directory, or manual dispatch.
+#
+# What it does (TODO — implement each step):
+#   1. Install Python dependencies
+#   2. Run pytest
+#   3. Publish the FastAPI app to Posit Connect using rsconnect-python
+#
+# Required GitHub secrets:
+#   POSIT_CONNECT_URL        — e.g. https://connect.example.com
+#   POSIT_CONNECT_TOKEN      — API key with publisher permissions
+#   DATABRICKS_HOST          — injected as an env var on the Connect content item
+#   DATABRICKS_TOKEN         — injected as an env var on the Connect content item
+#   DATABRICKS_MODEL_ENDPOINT
+#   UC_VOLUME_PATH
+#   ALLOWED_ORIGINS
+#
+# TODO: confirm that Posit Connect supports FastAPI (ASGI) apps and choose
+#       the correct rsconnect deploy sub-command / manifest format.
+
+name: Deploy Backend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # TODO: uncomment once real tests exist
+      # - name: Run tests
+      #   run: pytest tests/ -v
+
+      # TODO: publish to Posit Connect
+      # - name: Install rsconnect
+      #   run: pip install rsconnect-python
+      #
+      # - name: Deploy to Posit Connect
+      #   env:
+      #     CONNECT_SERVER: ${{ secrets.POSIT_CONNECT_URL }}
+      #     CONNECT_API_KEY: ${{ secrets.POSIT_CONNECT_TOKEN }}
+      #   run: |
+      #     rsconnect deploy fastapi \
+      #       --server "$CONNECT_SERVER" \
+      #       --api-key "$CONNECT_API_KEY" \
+      #       --title "PrivaSee API" \
+      #       app/
+
+      - name: TODO placeholder
+        run: echo "Backend install succeeded — Posit Connect deployment not yet configured"

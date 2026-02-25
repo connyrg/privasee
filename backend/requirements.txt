@@ -1,0 +1,40 @@
+# PrivaSee backend dependencies
+# Generated from PoC requirements; review versions before deploying to Posit Connect.
+
+# --- Web framework ---
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9       # multipart form uploads
+
+# --- Data validation ---
+pydantic>=2.5.0
+
+# --- HTTP client (for Databricks Model Serving calls) ---
+httpx>=0.26.0
+
+# --- Image processing (MaskingService) ---
+Pillow>=10.2.0
+opencv-python-headless>=4.9.0
+
+# --- PDF processing ---
+pdf2image>=1.17.0             # requires poppler system package
+
+# --- Entity replacement (MappingManager) ---
+Faker>=22.0.0
+python-dateutil>=2.9.0
+gender-guesser>=0.4.0
+
+# --- Databricks connectivity (SessionManager) ---
+databricks-sdk>=0.20.0
+
+# --- Environment / configuration ---
+python-dotenv>=1.0.0
+
+# --- Testing ---
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+jsonschema>=4.19.0
+pymupdf>=1.23.0           # fitz — creates test PDFs with known text positions
+
+# --- TODO: pin exact versions once the environment is validated ---

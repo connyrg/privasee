@@ -1,0 +1,61 @@
+# Register and deploy the PrivaSee MLflow model to Databricks Model Serving
+#
+# Trigger: push to main that touches the databricks/ directory, or manual dispatch.
+#
+# What it does (TODO — implement each step):
+#   1. Run Databricks model tests
+#   2. Upload model source to Databricks (DBFS or a Repo)
+#   3. Execute register_model.py notebook via the Databricks Jobs API
+#   4. Execute deploy_endpoint.py notebook to update the serving endpoint
+#
+# Required GitHub secrets:
+#   DATABRICKS_HOST   — workspace URL
+#   DATABRICKS_TOKEN  — PAT with Jobs and Model Registry permissions
+#
+# TODO: decide whether to use the Databricks CLI (v2), the databricks-sdk,
+#       or the official Databricks GitHub Actions for notebook execution.
+
+name: Deploy Databricks Model
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "databricks/**"
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # TODO: install and configure Databricks CLI v2
+      # - name: Install Databricks CLI
+      #   run: pip install databricks-cli
+
+      # TODO: run model tests locally before deploying
+      # - name: Run model tests
+      #   run: pytest databricks/tests/ -v
+
+      # TODO: upload model source to Databricks workspace
+      # - name: Upload model source
+      #   env:
+      #     DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      #     DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+      #   run: |
+      #     databricks workspace import_dir databricks/model \
+      #       /Repos/privasee/model --overwrite
+
+      # TODO: trigger register_model notebook
+      # TODO: trigger deploy_endpoint notebook
+
+      - name: TODO placeholder
+        run: echo "Databricks deployment not yet configured"
