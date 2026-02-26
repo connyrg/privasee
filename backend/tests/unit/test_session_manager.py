@@ -220,7 +220,7 @@ def test_get_entities_reads_from_correct_path(session_manager_instance):
 
 
 @pytest.mark.unit
-def test_get_entities_returns_parsed_dict(session_manager_instance):
+def test_get_entities_returns_entities_list(session_manager_instance):
     session_id = "abc-session-123"
     payload = {
         "session_id": session_id,
@@ -232,8 +232,8 @@ def test_get_entities_returns_parsed_dict(session_manager_instance):
         mock_get.return_value = _ok_response(payload)
         result = session_manager_instance.get_entities(session_id)
 
-    assert isinstance(result, dict)
-    assert result == payload
+    assert isinstance(result, list)
+    assert result == [{"id": "e1"}]
 
 
 @pytest.mark.unit

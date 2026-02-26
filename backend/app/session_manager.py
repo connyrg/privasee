@@ -284,6 +284,34 @@ class UCSessionManager:
         response.raise_for_status()
         return session_id
 
+    def get_session(self, session_id: str) -> Optional[SessionData]:
+        """
+        Load session metadata from metadata.json on the UC volume.
+
+        Returns:
+            Parsed SessionData, or None if the session does not exist (404).
+
+        Raises:
+            ValueError: If metadata.json contains malformed JSON.
+        """
+        path = self._session_path(session_id, "metadata.json")
+        response = requests.get(self._url(path), headers=self._headers())
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        try:
+            meta = response.json()
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Malformed metadata.json for session {session_id}"
+            ) from exc
+        return SessionData(
+            session_id=meta["session_id"],
+            filename=meta.get("original_filename", ""),
+            file_size=meta.get("file_size", 0),
+            status=meta.get("status", "uploaded"),
+        )
+
     def update_status(self, session_id: str, status: str) -> None:
         """
         Read existing metadata.json, update its status field, and write it back.
@@ -340,12 +368,12 @@ class UCSessionManager:
         )
         response.raise_for_status()
 
-    def get_entities(self, session_id: str) -> Dict[str, Any]:
+    def get_entities(self, session_id: str) -> List[Dict[str, Any]]:
         """
         Load entities.json for a session.
 
         Returns:
-            Parsed JSON dict.
+            List of entity dicts stored under the ``"entities"`` key.
 
         Raises:
             FileNotFoundError: If the session has no saved entities (404).
@@ -359,7 +387,8 @@ class UCSessionManager:
             )
         response.raise_for_status()
         try:
-            return response.json()
+            payload = response.json()
+            return payload.get("entities", [])
         except json.JSONDecodeError as exc:
             raise ValueError(
                 f"Malformed JSON in entities for session {session_id}"
