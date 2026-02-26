@@ -45,3 +45,6 @@ Thumbs.db
 # --- Data directories (runtime artefacts, not source) ---
 backend/data/
 data/
+
+# --- CI-generated frontend build (copied into backend before Posit Connect deploy) ---
+backend/static/

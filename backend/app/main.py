@@ -986,6 +986,29 @@ async def delete_session(session_id: str):
 
 
 # ---------------------------------------------------------------------------
+# Static frontend (Posit Connect / production)
+# ---------------------------------------------------------------------------
+# Mount the pre-built React bundle so FastAPI serves the SPA from the same
+# origin as the API.  This lets the frontend use relative /api/ paths without
+# any CORS configuration.
+#
+# The directory is populated by CI before deployment:
+#   cp -r frontend/dist backend/static
+#
+# The mount is conditional so local backend-only development is unaffected
+# (the static/ directory simply won't exist in a plain checkout).
+#
+# MUST be registered last — FastAPI resolves routes in registration order, so
+# all /api/* routes above take precedence over this catch-all mount.
+
+_STATIC_DIR = Path(__file__).parent.parent / "static"
+if _STATIC_DIR.exists():
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="frontend")
+    logger.info("Serving frontend from %s", _STATIC_DIR)
+
+
+# ---------------------------------------------------------------------------
 # Dev server entry point
 # ---------------------------------------------------------------------------
 

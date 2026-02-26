@@ -1,11 +1,16 @@
-# Deploy PrivaSee FastAPI backend to Posit Connect
+# Deploy PrivaSee FastAPI backend (+ embedded React frontend) to Posit Connect
 #
-# Trigger: push to main that touches backend/, PR that touches backend/,
-#          or manual dispatch.
+# Trigger: push to main that touches backend/ or frontend/, or manual dispatch.
 #
 # Jobs:
 #   test   — always runs; blocks deployment if it fails
 #   deploy — runs only on push to main after test passes
+#
+# What the deploy job does:
+#   1. Builds the React frontend (npm ci && npm run build)
+#   2. Copies the Vite dist/ into backend/static/ so FastAPI can serve it
+#   3. Deploys the whole backend/ directory (including static/) to Posit Connect
+#      via rsconnect-python
 #
 # Required GitHub secrets:
 #   POSIT_CONNECT_URL        — e.g. https://connect.example.com
@@ -23,9 +28,11 @@ on:
     branches: [main]
     paths:
       - "backend/**"
+      - "frontend/**"
   pull_request:
     paths:
       - "backend/**"
+      - "frontend/**"
   workflow_dispatch:
 
 jobs:
@@ -63,14 +70,31 @@ jobs:
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # --- Build frontend ---
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Copy frontend dist into backend/static
+        run: cp -r frontend/dist backend/static
+
+      # --- Deploy to Posit Connect ---
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -78,28 +102,17 @@ jobs:
           cache: "pip"
           cache-dependency-path: backend/requirements.txt
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install Python dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt rsconnect-python
 
-      # Deployment steps to Posit Connect go here — these depend on your
-      # organisation's Posit Connect deployment method and will need to be
-      # configured with your platform team.
-      #
-      # Example using rsconnect-python:
-      #
-      # - name: Install rsconnect
-      #   run: pip install rsconnect-python
-      #
-      # - name: Deploy to Posit Connect
-      #   env:
-      #     CONNECT_SERVER: ${{ secrets.POSIT_CONNECT_URL }}
-      #     CONNECT_API_KEY: ${{ secrets.POSIT_CONNECT_TOKEN }}
-      #   run: |
-      #     rsconnect deploy fastapi \
-      #       --server "$CONNECT_SERVER" \
-      #       --api-key "$CONNECT_API_KEY" \
-      #       --title "PrivaSee API" \
-      #       app/
-
-      - name: TODO placeholder
-        run: echo "Backend tests passed — Posit Connect deployment not yet configured"
+      - name: Deploy to Posit Connect
+        env:
+          CONNECT_SERVER: ${{ secrets.POSIT_CONNECT_URL }}
+          CONNECT_API_KEY: ${{ secrets.POSIT_CONNECT_TOKEN }}
+        run: |
+          rsconnect deploy fastapi \
+            --server "$CONNECT_SERVER" \
+            --api-key "$CONNECT_API_KEY" \
+            --title "PrivaSee" \
+            backend/

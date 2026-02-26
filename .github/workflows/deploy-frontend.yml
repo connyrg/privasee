@@ -1,31 +1,26 @@
-# Deploy PrivaSee React frontend to Posit Connect
+# Frontend CI — lint and build check
 #
-# Trigger: push to main that touches the frontend/ directory, or manual dispatch.
+# The frontend is no longer deployed independently.  It is built and embedded
+# into the backend deployment by deploy-backend.yml (which copies dist/ into
+# backend/static/ before the rsconnect step).
 #
-# What it does (TODO — implement each step):
-#   1. Install Node dependencies
-#   2. Run ESLint / unit tests
-#   3. Build the Vite production bundle (dist/)
-#   4. Publish the bundle to Posit Connect using the rsconnect CLI
-#
-# Required GitHub secrets (set in repo Settings → Secrets):
-#   POSIT_CONNECT_URL   — e.g. https://connect.example.com
-#   POSIT_CONNECT_TOKEN — API key with publisher permissions
-#
-# TODO: add a manifest.json or app.R shim if Posit Connect requires it for
-#       static React apps.
+# This workflow exists to catch frontend build and lint failures on PRs that
+# only touch the frontend, before they reach the deploy-backend.yml workflow.
 
-name: Deploy Frontend
+name: Frontend CI
 
 on:
   push:
     branches: [main]
     paths:
       - "frontend/**"
+  pull_request:
+    paths:
+      - "frontend/**"
   workflow_dispatch:
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -45,27 +40,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # TODO: uncomment once tests exist
-      # - name: Lint
-      #   run: npm run lint
+      - name: Lint
+        run: npm run lint
 
       - name: Build
         run: npm run build
-
-      # TODO: publish to Posit Connect
-      # - name: Install rsconnect
-      #   run: pip install rsconnect-python
-      #
-      # - name: Deploy to Posit Connect
-      #   env:
-      #     CONNECT_SERVER: ${{ secrets.POSIT_CONNECT_URL }}
-      #     CONNECT_API_KEY: ${{ secrets.POSIT_CONNECT_TOKEN }}
-      #   run: |
-      #     rsconnect deploy static \
-      #       --server "$CONNECT_SERVER" \
-      #       --api-key "$CONNECT_API_KEY" \
-      #       --title "PrivaSee" \
-      #       dist/
-
-      - name: TODO placeholder
-        run: echo "Frontend build succeeded — Posit Connect deployment not yet configured"
