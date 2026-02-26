@@ -21,7 +21,11 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+import requests
 
 from app.models import Entity, FieldDefinition, SessionData
 
@@ -204,3 +208,196 @@ class SessionManager:
     def download_file(self, session_id: str, filename: str) -> bytes:
         """Alias for get_file()."""
         return self.get_file(session_id, filename)
+
+
+# ---------------------------------------------------------------------------
+# UCSessionManager — concrete implementation via Databricks Files REST API
+# ---------------------------------------------------------------------------
+
+_VALID_STATUSES = ["uploaded", "processing", "awaiting_review", "completed"]
+
+
+class UCSessionManager:
+    """
+    Manages session artefacts on a Databricks Unity Catalog volume using the
+    Files REST API (``/api/2.0/fs/files``).
+
+    All methods make HTTP calls authenticated with a Databricks personal access
+    token.  The caller is responsible for catching ``requests.HTTPError`` for
+    unexpected non-2xx responses.
+    """
+
+    _FILES_API = "/api/2.0/fs/files"
+
+    def __init__(self, databricks_host: str, token: str, volume_path: str) -> None:
+        """
+        Args:
+            databricks_host: Workspace URL, e.g. https://adb-xxxx.azuredatabricks.net
+            token:           Personal access token with Files API permissions.
+            volume_path:     UC volume root, e.g. /Volumes/catalog/schema/sessions
+        """
+        self.host = databricks_host.rstrip("/")
+        self.token = token
+        self.volume_path = volume_path.rstrip("/")
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _headers(self) -> Dict[str, str]:
+        return {"Authorization": f"Bearer {self.token}"}
+
+    def _url(self, uc_path: str) -> str:
+        """Build a full Files API URL from a UC volume path."""
+        return f"{self.host}{self._FILES_API}{uc_path}"
+
+    def _session_path(self, session_id: str, filename: str) -> str:
+        return f"{self.volume_path}/{session_id}/{filename}"
+
+    # ------------------------------------------------------------------
+    # Session metadata
+    # ------------------------------------------------------------------
+
+    def create_session(self, original_filename: str) -> str:
+        """
+        Create a new session, persist metadata.json, and return the session_id.
+
+        Args:
+            original_filename: Name of the uploaded document.
+
+        Returns:
+            A new UUID v4 string identifying the session.
+        """
+        session_id = str(uuid.uuid4())
+        metadata: Dict[str, Any] = {
+            "session_id": session_id,
+            "original_filename": original_filename,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "status": "uploaded",
+        }
+        path = self._session_path(session_id, "metadata.json")
+        response = requests.put(
+            self._url(path),
+            headers=self._headers(),
+            data=json.dumps(metadata),
+        )
+        response.raise_for_status()
+        return session_id
+
+    def update_status(self, session_id: str, status: str) -> None:
+        """
+        Read existing metadata.json, update its status field, and write it back.
+
+        Args:
+            session_id: Session to update.
+            status:     New status — must be one of ``_VALID_STATUSES``.
+
+        Raises:
+            ValueError: If ``status`` is not in the valid progression.
+        """
+        if status not in _VALID_STATUSES:
+            raise ValueError(
+                f"Invalid status {status!r}. Must be one of {_VALID_STATUSES}"
+            )
+        path = self._session_path(session_id, "metadata.json")
+        url = self._url(path)
+
+        read_response = requests.get(url, headers=self._headers())
+        read_response.raise_for_status()
+        metadata = read_response.json()
+
+        metadata["status"] = status
+        write_response = requests.put(
+            url, headers=self._headers(), data=json.dumps(metadata)
+        )
+        write_response.raise_for_status()
+
+    # ------------------------------------------------------------------
+    # Entities
+    # ------------------------------------------------------------------
+
+    def save_entities(self, session_id: str, entities: List[Dict[str, Any]]) -> None:
+        """
+        Persist the entity list for a session as entities.json.
+
+        Status is always written as ``"awaiting_review"``.
+
+        Args:
+            session_id: Session to update.
+            entities:   List of entity dicts.
+        """
+        payload: Dict[str, Any] = {
+            "session_id": session_id,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "status": "awaiting_review",
+            "entities": entities,
+        }
+        path = self._session_path(session_id, "entities.json")
+        response = requests.put(
+            self._url(path),
+            headers=self._headers(),
+            data=json.dumps(payload),
+        )
+        response.raise_for_status()
+
+    def get_entities(self, session_id: str) -> Dict[str, Any]:
+        """
+        Load entities.json for a session.
+
+        Returns:
+            Parsed JSON dict.
+
+        Raises:
+            FileNotFoundError: If the session has no saved entities (404).
+            ValueError:        If the stored file contains malformed JSON.
+        """
+        path = self._session_path(session_id, "entities.json")
+        response = requests.get(self._url(path), headers=self._headers())
+        if response.status_code == 404:
+            raise FileNotFoundError(
+                f"No entities found for session {session_id}"
+            )
+        response.raise_for_status()
+        try:
+            return response.json()
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Malformed JSON in entities for session {session_id}"
+            ) from exc
+
+    # ------------------------------------------------------------------
+    # Binary file storage
+    # ------------------------------------------------------------------
+
+    def save_file(self, session_id: str, filename: str, data: bytes) -> None:
+        """
+        Upload raw bytes to the UC volume under the session directory.
+
+        Args:
+            session_id: Session the file belongs to.
+            filename:   Storage name, e.g. ``"original.pdf"``.
+            data:       Raw file bytes sent as the request body.
+        """
+        path = self._session_path(session_id, filename)
+        response = requests.put(
+            self._url(path),
+            headers=self._headers(),
+            data=data,
+        )
+        response.raise_for_status()
+
+    def get_file(self, session_id: str, filename: str) -> bytes:
+        """
+        Download raw bytes from the UC volume.
+
+        Args:
+            session_id: Session the file belongs to.
+            filename:   Name stored under the session directory.
+
+        Returns:
+            Raw file bytes (``response.content``).
+        """
+        path = self._session_path(session_id, filename)
+        response = requests.get(self._url(path), headers=self._headers())
+        response.raise_for_status()
+        return response.content
