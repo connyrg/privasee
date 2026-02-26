@@ -1,38 +1,28 @@
-# Deploy PrivaSee FastAPI backend (+ embedded React frontend) to Posit Connect
+# Backend CI — runs tests on every PR
 #
-# Trigger: push to main that touches backend/ or frontend/, or manual dispatch.
+# Deployment is done manually from Posit Workbench (no GitHub Actions needed):
 #
-# Jobs:
-#   test   — always runs; blocks deployment if it fails
-#   deploy — runs only on push to main after test passes
+#   pip install rsconnect-python
+#   rsconnect deploy fastapi \
+#     --server <POSIT_CONNECT_URL> \
+#     --api-key <POSIT_CONNECT_TOKEN> \
+#     --title "PrivaSee" \
+#     backend/
 #
-# What the deploy job does:
-#   1. Builds the React frontend (npm ci && npm run build)
-#   2. Copies the Vite dist/ into backend/static/ so FastAPI can serve it
-#   3. Deploys the whole backend/ directory (including static/) to Posit Connect
-#      via rsconnect-python
+# The React frontend is pre-built and committed to backend/static/ so no
+# Node.js is required at deploy time.  To update the frontend build, see
+# the instructions in frontend/README or run on any machine with Node:
 #
-# Required GitHub secrets:
-#   POSIT_CONNECT_URL        — e.g. https://connect.example.com
-#   POSIT_CONNECT_TOKEN      — API key with publisher permissions
-#   DATABRICKS_HOST          — injected as an env var on the Connect content item
-#   DATABRICKS_TOKEN         — injected as an env var on the Connect content item
-#   DATABRICKS_MODEL_ENDPOINT
-#   UC_VOLUME_PATH
-#   ALLOWED_ORIGINS
+#   cd frontend && npm ci && npm run build
+#   rm -rf ../backend/static && cp -r dist ../backend/static
+#   git add ../backend/static && git commit -m "build: update frontend"
 
-name: Deploy Backend
+name: Backend CI
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "backend/**"
-      - "frontend/**"
   pull_request:
     paths:
       - "backend/**"
-      - "frontend/**"
   workflow_dispatch:
 
 jobs:
@@ -65,54 +55,3 @@ jobs:
         with:
           name: coverage-report
           path: backend/coverage_html/
-
-  deploy:
-    needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # --- Build frontend ---
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Build frontend
-        working-directory: frontend
-        run: npm run build
-
-      - name: Copy frontend dist into backend/static
-        run: cp -r frontend/dist backend/static
-
-      # --- Deploy to Posit Connect ---
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-          cache-dependency-path: backend/requirements.txt
-
-      - name: Install Python dependencies
-        working-directory: backend
-        run: pip install -r requirements.txt rsconnect-python
-
-      - name: Deploy to Posit Connect
-        env:
-          CONNECT_SERVER: ${{ secrets.POSIT_CONNECT_URL }}
-          CONNECT_API_KEY: ${{ secrets.POSIT_CONNECT_TOKEN }}
-        run: |
-          rsconnect deploy fastapi \
-            --server "$CONNECT_SERVER" \
-            --api-key "$CONNECT_API_KEY" \
-            --title "PrivaSee" \
-            backend/

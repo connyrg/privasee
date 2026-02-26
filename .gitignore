@@ -46,5 +46,6 @@ Thumbs.db
 backend/data/
 data/
 
-# --- CI-generated frontend build (copied into backend before Posit Connect deploy) ---
-backend/static/
+# backend/static/ is intentionally tracked — it holds the pre-built React bundle
+# committed by the build-frontend.yml CI workflow so Posit Connect deployments
+# do not require Node.js in the deployment environment.

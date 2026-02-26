@@ -1,0 +1,84 @@
+/* PrivaSee Dash — custom styles */
+
+body {
+    font-family: Inter, system-ui, -apple-system, sans-serif;
+    background-color: #f8fafc;
+    color: #1e293b;
+}
+
+/* ── Step indicator ────────────────────────────────────── */
+.step-badge {
+    width: 2rem;
+    height: 2rem;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 600;
+    font-size: 0.875rem;
+}
+
+.step-badge.done      { background: #16a34a; color: #fff; }
+.step-badge.active    { background: #0284c7; color: #fff; }
+.step-badge.inactive  { background: #e2e8f0; color: #64748b; }
+
+.step-label.active    { color: #0284c7; font-weight: 600; }
+.step-label.inactive  { color: #94a3b8; }
+
+/* ── Upload zone ──────────────────────────────────────── */
+.upload-zone {
+    border: 2px dashed #cbd5e1;
+    border-radius: 0.75rem;
+    padding: 3rem 2rem;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 150ms, background 150ms;
+}
+.upload-zone:hover {
+    border-color: #0284c7;
+    background: #f0f9ff;
+}
+
+/* ── Field rows ───────────────────────────────────────── */
+.field-row {
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.5rem;
+    padding: 0.75rem 1rem;
+    margin-bottom: 0.5rem;
+    transition: box-shadow 150ms;
+}
+.field-row:hover { box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
+
+/* ── DataTable tweaks ─────────────────────────────────── */
+.dash-table-container .dash-spreadsheet td,
+.dash-table-container .dash-spreadsheet th {
+    font-size: 0.875rem;
+}
+
+/* ── Confidence badges ────────────────────────────────── */
+.conf-high   { color: #16a34a; font-weight: 600; }
+.conf-medium { color: #d97706; font-weight: 600; }
+.conf-low    { color: #dc2626; font-weight: 600; }
+
+/* ── PDF iframe ───────────────────────────────────────── */
+.pdf-frame {
+    width: 100%;
+    height: 600px;
+    border: none;
+    border-radius: 0.5rem;
+}
+
+/* ── Spinner overlay ──────────────────────────────────── */
+.loading-overlay {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 4rem 2rem;
+    gap: 1rem;
+    color: #64748b;
+}
+
+/* ── Navbar ───────────────────────────────────────────── */
+.navbar-brand { font-weight: 700; font-size: 1.25rem; letter-spacing: -0.02em; }
