@@ -113,8 +113,8 @@ async def test_upload_creates_session_with_filename(
     test_pdf_bytes: bytes,
 ):
     """
-    ``create_session`` must be called with the original filename present in
-    the metadata dict so the session record correctly identifies the file.
+    ``create_session`` must be called with the original filename so the
+    session record correctly identifies the file.
     """
     await client.post(
         "/api/upload",
@@ -122,9 +122,9 @@ async def test_upload_creates_session_with_filename(
     )
 
     mock_session_manager.create_session.assert_called_once()
-    # Positional args: (session_id, metadata_dict)
-    metadata = mock_session_manager.create_session.call_args.args[1]
-    assert metadata["filename"] == "my_document.pdf"
+    # Positional arg: (original_filename,)
+    called_filename = mock_session_manager.create_session.call_args.args[0]
+    assert called_filename == "my_document.pdf"
 
 
 # ===========================================================================

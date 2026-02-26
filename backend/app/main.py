@@ -48,7 +48,7 @@ from app.models import (
     UploadResponse,
 )
 from app.services.masking_service import MaskingService
-from app.session_manager import SessionManager
+from app.session_manager import SessionManager, UCSessionManager
 
 # ---------------------------------------------------------------------------
 # Bootstrap
@@ -122,12 +122,12 @@ masking_service = MaskingService()
 _session_manager: Optional[SessionManager] = None
 
 if DATABRICKS_HOST and DATABRICKS_TOKEN and UC_VOLUME_PATH:
-    _session_manager = SessionManager(
-        uc_volume_path=UC_VOLUME_PATH,
+    _session_manager = UCSessionManager(
         databricks_host=DATABRICKS_HOST,
-        databricks_token=DATABRICKS_TOKEN,
+        token=DATABRICKS_TOKEN,
+        volume_path=UC_VOLUME_PATH,
     )
-    logger.info("SessionManager initialised")
+    logger.info("UCSessionManager initialised")
 else:
     logger.warning(
         "DATABRICKS_HOST / DATABRICKS_TOKEN / UC_VOLUME_PATH not fully configured. "
@@ -408,21 +408,12 @@ async def upload_document(file: UploadFile = File(...)):
             ),
         )
 
-    session_id = str(uuid.uuid4())
     # Stored under the session directory with a stable name so endpoints
     # can find it without knowing the original extension at call time.
     stored_filename = f"original{ext}"
 
     try:
-        sm.create_session(
-            session_id,
-            {
-                "filename": filename,
-                "file_size": len(contents),
-                "status": "uploaded",
-                "original_ext": ext,
-            },
-        )
+        session_id = sm.create_session(filename)
         sm.save_file(session_id, stored_filename, contents)
     except NotImplementedError:
         raise HTTPException(
@@ -430,7 +421,7 @@ async def upload_document(file: UploadFile = File(...)):
             detail="Session storage is not yet implemented. Check server logs.",
         )
     except Exception as exc:
-        logger.error("Failed to create session %s: %s", session_id, exc, exc_info=True)
+        logger.error("Failed to upload %s: %s", filename, exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Failed to store the uploaded file. Check Databricks connectivity.",

@@ -228,7 +228,9 @@ def mock_session_manager() -> MagicMock:
         mock_session_manager.get_session.return_value = some_session_data
         mock_session_manager.create_session.side_effect = Exception("boom")
     """
-    return MagicMock(spec=SessionManager)
+    mock = MagicMock(spec=SessionManager)
+    mock.create_session.return_value = "mock-session-id-1234-5678"
+    return mock
 
 
 # ---------------------------------------------------------------------------
