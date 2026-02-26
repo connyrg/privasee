@@ -4,11 +4,14 @@ Applies visual masks to document images by drawing rectangles over identified en
 """
 
 import cv2
+import io
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import logging
-from typing import List, Dict, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 import os
+
+import fitz  # PyMuPDF
 
 logger = logging.getLogger(__name__)
 
@@ -314,3 +317,184 @@ class MaskingService:
         except Exception as e:
             logger.error(f"Error creating preview: {str(e)}")
             raise Exception(f"Failed to create preview: {str(e)}")
+
+    # ------------------------------------------------------------------
+    # PDF-native masking (PyMuPDF)
+    # ------------------------------------------------------------------
+
+    _STRATEGY_MAP: Dict[str, str] = {
+        "Black Out":    "redact",
+        "redact":       "redact",
+        "Fake Data":    "fake_name",
+        "fake_name":    "fake_name",
+        "Entity Label": "entity_label",
+        "entity_label": "entity_label",
+    }
+
+    def apply_pdf_masks(
+        self,
+        pdf_bytes: bytes,
+        entities: List[Dict[str, Any]],
+    ) -> bytes:
+        """
+        Apply redactions to PDF bytes using PyMuPDF and return masked PDF bytes.
+
+        Each entity may specify a single ``bounding_box`` or a list of
+        ``bounding_boxes`` (takes priority when both are present).  Bounding
+        box values are normalised [0, 1] relative to page dimensions.
+
+        Entities with ``approved=False`` are silently skipped.
+
+        Strategies
+        ----------
+        "Black Out" / "redact"
+            Black-filled rectangle.  Original text permanently removed.
+        "Fake Data" / "fake_name"
+            White-filled rectangle.  Original text replaced with the entity's
+            ``replacement_text``.  The same ``original_text`` always maps to the
+            same replacement within a single call.
+        "Entity Label" / "entity_label"
+            White-filled rectangle.  Original text replaced with an auto-generated
+            label of the form ``{EntityType}_{N}`` (e.g. ``Full_Name_1``) where
+            ``N`` is a per-type incrementing integer.  Identical ``original_text``
+            values receive the same label.
+
+        Parameters
+        ----------
+        pdf_bytes:
+            Raw bytes of the input PDF.
+        entities:
+            List of entity dicts.  Recognised keys:
+            ``approved``, ``page_number``, ``strategy``, ``entity_type``,
+            ``original_text``, ``replacement_text``,
+            ``bounding_box``, ``bounding_boxes``.
+
+        Returns
+        -------
+        bytes
+            Redacted PDF bytes, parseable by ``fitz.open()``.
+        """
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+        # Per-call state (reset for every apply_pdf_masks invocation)
+        label_counters: Dict[str, int] = {}
+        consistency_map: Dict[str, str] = {}  # normalised_original → replacement
+
+        # Group approved entities by 0-indexed page number
+        by_page: Dict[int, List[Dict[str, Any]]] = {}
+        for entity in entities:
+            if not entity.get("approved", True):
+                continue
+            page_idx = entity.get("page_number", 1) - 1
+            by_page.setdefault(page_idx, []).append(entity)
+
+        for page_idx, page_entities in sorted(by_page.items()):
+            if page_idx >= len(doc):
+                continue
+
+            page = doc[page_idx]
+            W = page.rect.width
+            H = page.rect.height
+
+            # Collect (rect, replacement_text) pairs so we can batch all
+            # add_redact_annot calls before a single apply_redactions().
+            inserts: List[Tuple[fitz.Rect, str]] = []
+
+            for entity in page_entities:
+                raw_strategy = entity.get("strategy", "redact")
+                strategy = self._STRATEGY_MAP.get(raw_strategy, "redact")
+                bboxes = self._resolve_bboxes(entity)
+
+                if not bboxes:
+                    continue
+
+                replacement = self._resolve_replacement(
+                    entity, strategy, label_counters, consistency_map
+                )
+                fill_color = (0.0, 0.0, 0.0) if strategy == "redact" else (1.0, 1.0, 1.0)
+
+                for bbox in bboxes:
+                    if len(bbox) != 4:
+                        continue
+                    x, y, w, h = bbox
+                    rect = fitz.Rect(x * W, y * H, (x + w) * W, (y + h) * H)
+                    page.add_redact_annot(rect, fill=fill_color)
+                    if replacement:
+                        inserts.append((rect, replacement))
+
+            page.apply_redactions()
+
+            # Insert replacement text after redactions have been applied so
+            # the text lands in the now-cleared area and is extractable.
+            for rect, text in inserts:
+                fontsize = max(6, min(10, int(rect.height * 0.7)))
+                page.insert_text(
+                    (rect.x0 + 2, rect.y1 - 2),
+                    text,
+                    fontsize=fontsize,
+                )
+
+        buf = io.BytesIO()
+        doc.save(buf)
+        doc.close()
+        return buf.getvalue()
+
+    # ------------------------------------------------------------------
+    # Private helpers for apply_pdf_masks
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_bboxes(entity: Dict[str, Any]) -> List[List[float]]:
+        """Return the list of bounding boxes for an entity.
+
+        Prefers ``bounding_boxes`` (plural) when present; falls back to
+        ``bounding_box`` (singular) wrapped in a one-element list.  Entries
+        that are not 4-element lists are silently discarded.
+        """
+        multi = entity.get("bounding_boxes")
+        if multi:
+            return [b for b in multi if isinstance(b, (list, tuple)) and len(b) == 4]
+        single = entity.get("bounding_box")
+        if single and len(single) == 4:
+            return [list(single)]
+        return []
+
+    @staticmethod
+    def _resolve_replacement(
+        entity: Dict[str, Any],
+        strategy: str,
+        label_counters: Dict[str, int],
+        consistency_map: Dict[str, str],
+    ) -> str:
+        """Return the replacement string for an entity, maintaining consistency."""
+        if strategy == "redact":
+            return ""
+
+        original_key = entity.get("original_text", "").lower().strip()
+
+        # Both fake_name and entity_label honour the consistency map so that
+        # duplicate occurrences of the same original text always get the same
+        # replacement within one apply_pdf_masks call.
+        if original_key in consistency_map:
+            return consistency_map[original_key]
+
+        if strategy == "fake_name":
+            text = entity.get(
+                "replacement_text",
+                f"[{entity.get('entity_type', 'UNKNOWN')}]",
+            )
+            consistency_map[original_key] = text
+            return text
+
+        if strategy == "entity_label":
+            etype = (
+                entity.get("entity_type", "Unknown")
+                .replace(" ", "_")
+                .replace("-", "_")
+            )
+            label_counters[etype] = label_counters.get(etype, 0) + 1
+            label = f"{etype}_{label_counters[etype]}"
+            consistency_map[original_key] = label
+            return label
+
+        return ""
