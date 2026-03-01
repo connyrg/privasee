@@ -1,32 +1,71 @@
 """
-Claude Vision Service
-Uses Claude AI with vision capabilities to extract entities from documents.
+Azure OpenAI Vision Service
+Uses Azure OpenAI GPT-4o with vision capabilities to extract entities from documents.
 """
 
-import anthropic
+from openai import AzureOpenAI
 import base64
 import json
 import logging
+import os
 from typing import List, Dict, Optional
+
+from ..utils.nginx_utils import http_client_factory
 
 logger = logging.getLogger(__name__)
 
 
-class ClaudeVisionService:
-    """Service for entity extraction using Claude Vision API."""
+class OpenAIVisionService:
+    """Service for entity extraction using Azure OpenAI Vision API."""
 
-    def __init__(self, api_key: str):
+    def __init__(
+        self,
+        api_key: str,
+        azure_endpoint: str,
+        workspace_url: str = "https://suncorp-dev.cloud.databricks.com/",
+        workspace_id: str = "1238531023703058",
+        proxy_cluster_id: str = "",
+        proxy_port: str = "8110",
+        proxy_route: str = "openai-00010-1",
+        api_version: str = "2024-02-15-preview",
+        deployment_name: str = "gpt-4o"
+    ):
         """
-        Initialize Claude Vision service.
+        Initialize Azure OpenAI Vision service.
 
         Args:
-            api_key: Anthropic API key
+            api_key: Azure OpenAI API key
+            azure_endpoint: Azure OpenAI endpoint (e.g., https://<resource>.openai.azure.com/)
+            api_version: Azure OpenAI API version (default: 2024-02-15-preview)
+            deployment_name: Name of the GPT-4o deployment (default: gpt-4o)
         """
         if not api_key:
-            raise ValueError("Anthropic API key must be provided")
+            raise ValueError("Azure OpenAI API key must be provided")
+        if not azure_endpoint:
+            raise ValueError("Azure OpenAI endpoint must be provided")
 
-        self.client = anthropic.Anthropic(api_key=api_key)
-        logger.info("Claude Vision Service initialized")
+        # Use provided proxy_cluster_id or fall back to environment variable
+        if not proxy_cluster_id:
+            proxy_cluster_id = os.environ.get("PROXY_CLUSTER_ID", "")
+        
+        if not proxy_cluster_id:
+            raise ValueError("PROXY_CLUSTER_ID must be provided either as parameter or environment variable")
+
+        base_url = f"{workspace_url}/driver-proxy-api/o/{workspace_id}/{proxy_cluster_id}/{proxy_port}/{proxy_route}/openai"
+
+        http_client, http_async_client = http_client_factory(
+            workspace_url,
+        )
+
+        self.deployment_name = deployment_name
+        self.client = AzureOpenAI(
+            api_key=api_key,
+            # azure_endpoint=azure_endpoint,
+            base_url=base_url,
+            api_version=api_version,
+            http_client=http_client,
+        )
+        logger.info(f"Azure OpenAI Vision Service initialized (deployment: {deployment_name})")
 
     async def extract_entities(
         self,
@@ -36,11 +75,11 @@ class ClaudeVisionService:
         page_number: int = 1
     ) -> List[Dict]:
         """
-        Extract entities from document using Claude Vision.
+        Extract entities from document using Azure OpenAI Vision.
 
         Args:
             image_path: Path to document image
-            ocr_data: OCR data from Azure (text, words, bounding boxes)
+            ocr_data: OCR data from Azure Document Intelligence (text, words, bounding boxes)
             field_definitions: List of field definitions to extract
                 [{"name": "Full Name", "description": "...", "strategy": "..."}]
             page_number: Page number this image corresponds to (1-indexed)
@@ -62,43 +101,41 @@ class ClaudeVisionService:
             Exception: For API or processing errors
         """
         try:
-            logger.info(f"Extracting entities using Claude Vision for {len(field_definitions)} field types (page {page_number})")
+            logger.info(f"Extracting entities using Azure OpenAI Vision for {len(field_definitions)} field types (page {page_number})")
 
             # Read and encode image
             with open(image_path, "rb") as f:
-                image_data = base64.standard_b64encode(f.read()).decode("utf-8")
+                image_data = base64.b64encode(f.read()).decode("utf-8")
 
-            # Build prompt for Claude
+            # Build prompt for OpenAI
             prompt = self._build_extraction_prompt(field_definitions, ocr_data)
 
-            # Call Claude API with vision
-            message = self.client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=4096,
+            # Call Azure OpenAI API with vision
+            response = self.client.chat.completions.create(
+                model=self.deployment_name,
                 messages=[
                     {
                         "role": "user",
                         "content": [
                             {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": "image/png",
-                                    "data": image_data,
-                                },
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{image_data}"
+                                }
                             },
                             {
                                 "type": "text",
                                 "text": prompt
                             }
-                        ],
+                        ]
                     }
                 ],
+                max_tokens=4096
             )
 
             # Parse response
-            response_text = message.content[0].text
-            entities = self._parse_claude_response(response_text, ocr_data, page_number)
+            response_text = response.choices[0].message.content
+            entities = self._parse_openai_response(response_text, ocr_data, page_number)
 
             logger.info(f"Successfully extracted {len(entities)} entities")
             return entities
@@ -107,7 +144,7 @@ class ClaudeVisionService:
             logger.error(f"Image file not found: {image_path}")
             raise
         except Exception as e:
-            logger.error(f"Error extracting entities with Claude: {str(e)}")
+            logger.error(f"Error extracting entities with Azure OpenAI: {str(e)}")
             raise Exception(f"Entity extraction failed: {str(e)}")
 
     def extract_entities_from_base64(
@@ -119,7 +156,7 @@ class ClaudeVisionService:
         page_number: int = 1
     ) -> List[Dict]:
         """
-        Extract entities from base64-encoded image using Claude Vision.
+        Extract entities from base64-encoded image using Azure OpenAI Vision.
         
         This method is designed for use with OCR services that return base64-encoded
         page images, avoiding the need to write temporary files.
@@ -127,7 +164,7 @@ class ClaudeVisionService:
         Args:
             image_b64: Base64-encoded image data
             mimetype: Image MIME type (e.g., 'png', 'jpeg')
-            ocr_data: OCR data from Azure (text, words, bounding boxes)
+            ocr_data: OCR data from Azure Document Intelligence (text, words, bounding boxes)
             field_definitions: List of field definitions to extract
                 [{"name": "Full Name", "description": "...", "strategy": "..."}]
             page_number: Page number this image corresponds to (1-indexed)
@@ -148,45 +185,43 @@ class ClaudeVisionService:
             Exception: For API or processing errors
         """
         try:
-            logger.info(f"Extracting entities using Claude Vision for {len(field_definitions)} field types (page {page_number})")
+            logger.info(f"Extracting entities using Azure OpenAI Vision for {len(field_definitions)} field types (page {page_number})")
 
-            # Build prompt for Claude
+            # Build prompt for OpenAI
             prompt = self._build_extraction_prompt(field_definitions, ocr_data)
 
-            # Call Claude API with vision
-            message = self.client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=4096,
+            # Call Azure OpenAI API with vision
+            response = self.client.chat.completions.create(
+                model=self.deployment_name,
                 messages=[
                     {
                         "role": "user",
                         "content": [
                             {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": f"image/{mimetype}",
-                                    "data": image_b64,
-                                },
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/{mimetype};base64,{image_b64}"
+                                }
                             },
                             {
                                 "type": "text",
                                 "text": prompt
                             }
-                        ],
+                        ]
                     }
                 ],
+                max_completion_tokens=4096
             )
 
             # Parse response
-            response_text = message.content[0].text
-            entities = self._parse_claude_response(response_text, ocr_data, page_number)
+            response_text = response.choices[0].message.content
+            entities = self._parse_openai_response(response_text, ocr_data, page_number)
 
             logger.info(f"Successfully extracted {len(entities)} entities")
             return entities
 
         except Exception as e:
-            logger.error(f"Error extracting entities with Claude: {str(e)}")
+            logger.error(f"Error extracting entities with Azure OpenAI: {str(e)}")
             return []
 
     def _build_extraction_prompt(
@@ -195,7 +230,7 @@ class ClaudeVisionService:
         ocr_data: Dict
     ) -> str:
         """
-        Build prompt for Claude entity extraction.
+        Build prompt for Azure OpenAI entity extraction.
 
         Args:
             field_definitions: List of fields to extract
@@ -210,7 +245,7 @@ class ClaudeVisionService:
             for field in field_definitions
         ])
 
-        # Create OCR context — send all words so Claude can locate
+        # Create OCR context — send all words so Azure OpenAI can locate
         # entities anywhere on the page, not just the first ~50.
         all_words = ocr_data.get('words', [])
         ocr_context = json.dumps({
@@ -272,18 +307,19 @@ Begin analysis:"""
 
         return prompt
 
-    def _parse_claude_response(
+    def _parse_openai_response(
         self,
         response_text: str,
         ocr_data: Dict,
         page_number: int = 1
     ) -> List[Dict]:
         """
-        Parse Claude's JSON response into entity list.
+        Parse Azure OpenAI's JSON response into entity list.
 
         Args:
-            response_text: Raw response from Claude
+            response_text: Raw response from Azure OpenAI
             ocr_data: Original OCR data for validation
+            page_number: Page number for entities
 
         Returns:
             List of validated entity dictionaries
@@ -324,12 +360,12 @@ Begin analysis:"""
             return validated_entities
 
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse Claude response as JSON: {e}")
+            logger.error(f"Failed to parse Azure OpenAI response as JSON: {e}")
             logger.debug(f"Response text: {response_text[:500]}")
             # Return empty list rather than failing completely
             return []
         except Exception as e:
-            logger.error(f"Error parsing Claude response: {e}")
+            logger.error(f"Error parsing Azure OpenAI response: {e}")
             return []
 
     def _validate_entity(self, entity: Dict) -> bool:
@@ -358,24 +394,24 @@ Begin analysis:"""
 
     def test_connection(self) -> bool:
         """
-        Test Claude API connection.
+        Test Azure OpenAI API connection.
 
         Returns:
             True if connection successful, False otherwise
         """
         try:
             # Simple test message
-            message = self.client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=10,
+            response = self.client.chat.completions.create(
+                model=self.deployment_name,
                 messages=[
                     {
                         "role": "user",
                         "content": "Hello"
                     }
-                ]
+                ],
+                max_tokens=10
             )
             return True
         except Exception as e:
-            logger.error(f"Claude API connection test failed: {e}")
+            logger.error(f"Azure OpenAI API connection test failed: {e}")
             return False

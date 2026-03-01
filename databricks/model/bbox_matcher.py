@@ -1,75 +1,242 @@
 """
-Bounding Box Matcher
+Bounding Box Matcher for Databricks Model Serving
 
-Reconciles entity bounding boxes returned by Claude Vision with the precise
-word-level bounding boxes from Azure Document Intelligence OCR.
-
-Why this is needed:
-  Claude's bounding boxes are approximate (estimated from the image).  The OCR
-  service provides pixel-accurate, word-level boxes.  BBoxMatcher snaps each
-  Claude entity to the tightest union of OCR word boxes that overlap the
-  Claude box, improving masking precision.
-
-Planned algorithm:
-  1. For each Claude entity, find all OCR words whose centres fall within the
-     entity's bounding box (with a configurable tolerance).
-  2. Compute the union bounding box of the matched OCR words.
-  3. If no OCR words match (e.g. the entity spans a non-text region), fall back
-     to the original Claude bounding box.
-
-TODO:
-  - Implement match_entity(entity_bbox, ocr_words, tolerance) -> list[float]
-  - Implement match_all(entities, ocr_data) -> list[dict]  (mutates bbox in place)
-  - Add tolerance parameter (default 0.01 in normalised coords)
-  - Unit-test edge cases: no overlap, partial overlap, multi-word entities
+This module matches Claude-extracted entities to ADI OCR words and assigns
+bounding boxes. Uses sliding window matching to find all occurrences of
+multi-word entities and merges their individual word bounding boxes.
 """
+
+import logging
+from typing import List, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class BBoxMatcher:
-    """Snaps Claude entity boxes to precise OCR word boxes."""
+    """Matches entity text to OCR words and assigns bounding boxes."""
 
-    def __init__(self, tolerance: float = 0.01):
+    def __init__(self):
+        """Initialize bounding box matcher."""
+        logger.info("BBox Matcher initialized")
+
+    def match_entities_to_words(
+        self,
+        entities: List[Dict],
+        ocr_words: List[Dict]
+    ) -> List[Dict]:
         """
+        Match entities to OCR words and assign bounding boxes.
+
+        Uses sliding window approach to find all occurrences of each entity
+        in the OCR words, then merges bounding boxes for multi-word entities.
+
         Args:
-            tolerance: Extra margin (in normalised coords) added around each
-                       Claude bounding box when searching for OCR word matches.
-        """
-        self.tolerance = tolerance
-
-    def match_all(self, entities: list, ocr_data: dict) -> list:
-        """
-        Refine bounding boxes for all entities.
-
-        Args:
-            entities: List of entity dicts with 'bounding_box' key
-            ocr_data: OCR output dict with 'words' list
+            entities: List of entities from Claude Vision
+                [
+                    {
+                        "entity_type": "Full Name",
+                        "original_text": "John Smith",
+                        "page_number": 1,
+                        ...
+                    }
+                ]
+            ocr_words: List of words from OCR service
+                [
+                    {
+                        "text": "John",
+                        "bounding_box": {"x": 0.1, "y": 0.2, "width": 0.05, "height": 0.02}
+                    },
+                    ...
+                ]
 
         Returns:
-            Same entity list with updated 'bounding_box' values
-
-        TODO: implement
+            List of entities with bounding_boxes field added:
+            [
+                {
+                    "entity_type": "Full Name",
+                    "original_text": "John Smith",
+                    "page_number": 1,
+                    "bounding_boxes": [
+                        {"x": 0.1, "y": 0.2, "width": 0.15, "height": 0.02},
+                        {"x": 0.3, "y": 0.5, "width": 0.15, "height": 0.02}  # second occurrence
+                    ],
+                    ...
+                }
+            ]
         """
-        raise NotImplementedError
+        logger.info(
+            f"Matching {len(entities)} entities to {len(ocr_words)} OCR words"
+        )
 
-    def match_entity(self, entity_bbox: list, ocr_words: list) -> list:
+        matched_entities = []
+
+        for entity in entities:
+            entity_text = entity.get('original_text', '')
+            
+            if not entity_text:
+                logger.warning(f"Entity has empty original_text: {entity}")
+                entity['bounding_boxes'] = []
+                matched_entities.append(entity)
+                continue
+
+            # Find all matching bounding boxes for this entity
+            bounding_boxes = self._find_all_matches(entity_text, ocr_words)
+
+            if not bounding_boxes:
+                logger.warning(
+                    f"No match found for entity '{entity_text}' "
+                    f"(page {entity.get('page_number', 'unknown')})"
+                )
+
+            # Add bounding boxes to entity
+            entity['bounding_boxes'] = bounding_boxes
+            matched_entities.append(entity)
+
+        logger.info(
+            f"Matched {sum(1 for e in matched_entities if e['bounding_boxes'])} "
+            f"out of {len(entities)} entities"
+        )
+
+        return matched_entities
+
+    def _find_all_matches(
+        self,
+        entity_text: str,
+        ocr_words: List[Dict]
+    ) -> List[Dict]:
         """
-        Find the tightest OCR word union for a single entity bbox.
+        Find all occurrences of entity text in OCR words using sliding window.
 
         Args:
-            entity_bbox: [x, y, w, h] in normalised coords
-            ocr_words:   List of OCR word dicts, each with 'bounding_box' key
+            entity_text: Text to find (e.g., "John Smith")
+            ocr_words: List of OCR word dictionaries
 
         Returns:
-            Refined [x, y, w, h] in normalised coords
-
-        TODO: implement
+            List of merged bounding boxes for all occurrences
         """
-        raise NotImplementedError
+        # Normalize entity text for matching
+        normalized_entity = self._normalize_text(entity_text)
+        entity_word_count = len(normalized_entity.split())
 
-    def _bbox_union(self, boxes: list) -> list:
-        """Compute the union of a list of [x, y, w, h] boxes. TODO: implement."""
-        raise NotImplementedError
+        bounding_boxes = []
 
-    def _overlaps(self, box_a: list, box_b: list) -> bool:
-        """Return True if two normalised boxes overlap. TODO: implement."""
-        raise NotImplementedError
+        # Slide window across OCR words
+        for i in range(len(ocr_words) - entity_word_count + 1):
+            window_words = ocr_words[i:i + entity_word_count]
+            
+            # Join window words and normalize
+            window_text = ' '.join([w.get('text', '') for w in window_words])
+            normalized_window = self._normalize_text(window_text)
+
+            # Check if window matches entity text
+            if normalized_window == normalized_entity:
+                # Merge bounding boxes for all words in the window
+                merged_bbox = self._merge_bounding_boxes(window_words)
+                if merged_bbox:
+                    bounding_boxes.append(merged_bbox)
+
+        return bounding_boxes
+
+    def _normalize_text(self, text: str) -> str:
+        """
+        Normalize text for matching.
+
+        Args:
+            text: Text to normalize
+
+        Returns:
+            Normalized text (lowercase, stripped whitespace)
+        """
+        return ' '.join(text.lower().split())
+
+    def _merge_bounding_boxes(self, words: List[Dict]) -> Optional[Dict]:
+        """
+        Merge multiple word bounding boxes into a single bounding box.
+
+        The merged box covers all words:
+        - x: minimum x across all boxes
+        - y: minimum y across all boxes
+        - width: (max x + width) - min x
+        - height: (max y + height) - min y
+
+        Args:
+            words: List of word dictionaries with bounding_box field
+
+        Returns:
+            Merged bounding box dictionary or None if no valid boxes
+        """
+        valid_boxes = []
+        
+        for word in words:
+            bbox = word.get('bounding_box')
+            if bbox and self._is_valid_bbox(bbox):
+                valid_boxes.append(bbox)
+
+        if not valid_boxes:
+            logger.warning("No valid bounding boxes to merge")
+            return None
+
+        # Extract coordinates
+        x_values = [box['x'] for box in valid_boxes]
+        y_values = [box['y'] for box in valid_boxes]
+        x_max_values = [box['x'] + box['width'] for box in valid_boxes]
+        y_max_values = [box['y'] + box['height'] for box in valid_boxes]
+
+        # Calculate merged bounding box
+        min_x = min(x_values)
+        min_y = min(y_values)
+        max_x = max(x_max_values)
+        max_y = max(y_max_values)
+
+        merged_bbox = {
+            'x': min_x,
+            'y': min_y,
+            'width': max_x - min_x,
+            'height': max_y - min_y
+        }
+
+        return merged_bbox
+
+    def _is_valid_bbox(self, bbox: Dict) -> bool:
+        """
+        Validate bounding box has required fields with numeric values.
+
+        Args:
+            bbox: Bounding box dictionary
+
+        Returns:
+            True if valid, False otherwise
+        """
+        required_fields = ['x', 'y', 'width', 'height']
+        
+        try:
+            for field in required_fields:
+                if field not in bbox:
+                    return False
+                # Check if value is numeric
+                float(bbox[field])
+            return True
+        except (TypeError, ValueError):
+            return False
+
+
+# Convenience function for direct usage
+def match_entities_to_words(
+    entities: List[Dict],
+    ocr_words: List[Dict]
+) -> List[Dict]:
+    """
+    Match entities to OCR words and assign bounding boxes.
+
+    This is a convenience function that creates a BBoxMatcher instance
+    and calls its match_entities_to_words method.
+
+    Args:
+        entities: List of entities from Claude Vision
+        ocr_words: List of words from OCR service
+
+    Returns:
+        List of entities with bounding_boxes field added
+    """
+    matcher = BBoxMatcher()
+    return matcher.match_entities_to_words(entities, ocr_words)

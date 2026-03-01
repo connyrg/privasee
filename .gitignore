@@ -34,6 +34,9 @@ frontend/.vite/
 .databricks/
 *.dbc
 
+# --- Posit Connect ---
+*/rsconnect-python/*
+
 # --- OS / editor ---
 .DS_Store
 Thumbs.db

@@ -258,6 +258,8 @@ def preflight() -> None:
 
     # Check server is reachable and report MOCK_DATABRICKS mode
     try:
+        print(f"{API_BASE_URL}/api/health")
+        print(requests.get(f"{API_BASE_URL}/api/health", timeout=5))
         health = requests.get(f"{API_BASE_URL}/api/health", timeout=5).json()
         mock = health.get("mock_databricks", False)
         print(f"MOCK_DATABRICKS: {mock} (server-side)")

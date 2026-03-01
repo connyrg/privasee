@@ -1,0 +1,27 @@
+# ============================================================================
+# Document Intelligence Model - Python Dependencies
+# ============================================================================
+
+# Core MLflow for model serving
+mlflow>=2.10.0
+
+# Data processing
+pandas>=2.0.0
+
+# PDF processing
+PyMuPDF>=1.23.0  # fitz for PDF text extraction and rendering
+
+# Word document processing
+python-docx>=1.1.0
+
+# Azure Document Intelligence (OCR)
+azure-ai-documentintelligence>=1.0.0
+azure-core>=1.29.0
+
+# Vision AI providers
+anthropic>=0.25.0  # Claude vision service
+openai>=1.12.0     # Azure OpenAI vision service
+
+# Testing dependencies (development only)
+pytest>=8.0.0
+pytest-cov>=4.1.0
