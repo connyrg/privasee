@@ -1,7 +1,7 @@
 # PrivaSee
 
 Document de-identification tool — intelligently masks sensitive information
-in single-page PDFs using Azure Document Intelligence and Claude Vision.
+in PDFs and images using Azure Document Intelligence, Claude Vision, and Azure OpenAI.
 
 ## Architecture
 
@@ -9,7 +9,7 @@ Three independently deployable components:
 
 | Component | Location | Deployed to |
 |---|---|---|
-| React frontend | `frontend/` | Posit Connect |
+| Dash frontend | `frontend_dash/` | Posit Connect |
 | FastAPI backend | `backend/` | Posit Connect |
 | MLflow model | `databricks/` | Databricks Model Serving |
 
@@ -23,8 +23,18 @@ See [docs/architecture.md](docs/architecture.md) for the full architecture diagr
 cp backend/.env.template backend/.env
 # fill in backend/.env with your credentials
 
-./start.sh
-# Frontend: http://localhost:5173
+# Terminal 1 — backend
+cd backend
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
+
+# Terminal 2 — Dash frontend
+cd frontend_dash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+API_BASE_URL=http://localhost:8000 python app.py
+# Frontend: http://localhost:8050
 # Backend:  http://localhost:8000
 ```
 
@@ -39,29 +49,37 @@ See [docs/deployment.md](docs/deployment.md) for CI/CD pipeline details.
 ```
 privasee/
 ├── .github/workflows/       CI/CD pipelines
-├── frontend/                React + Vite app (copied from PoC)
+├── frontend_dash/           Dash frontend (primary UI)
+│   ├── app.py               Entry point — deployable via rsconnect deploy dash
+│   └── requirements.txt
+├── frontend/                Legacy React + Vite app (not actively deployed)
 ├── backend/
 │   ├── app/
-│   │   ├── main.py          FastAPI application entry point
-│   │   ├── models.py        Pydantic data models
-│   │   ├── session_manager.py  UC volume session persistence
+│   │   ├── main.py          FastAPI application — all endpoints
+│   │   ├── models.py        Pydantic request/response models
+│   │   ├── session_manager.py  UC volume session persistence (Files REST API)
 │   │   └── services/
-│   │       ├── masking_service.py   Visual PDF masking (from PoC)
-│   │       └── mapping_manager.py  Consistent entity replacement (from PoC)
+│   │       ├── masking_service.py   Visual PDF/image masking (PyMuPDF)
+│   │       └── mapping_manager.py  Consistent entity replacement
 │   ├── tests/
+│   ├── scripts/
+│   │   └── e2e_upload_test.py   End-to-end workflow validation script
 │   ├── requirements.txt
 │   └── .env.template
 ├── databricks/
 │   ├── model/               MLflow PyFunc model source
-│   ├── notebooks/           Registration and deployment notebooks
-│   └── tests/
+│   │   ├── document_intelligence.py  Main model — OCR + entity extraction pipeline
+│   │   ├── ocr_service.py            Azure Document Intelligence OCR
+│   │   ├── openai_service.py         Azure OpenAI vision entity extraction
+│   │   ├── claude_service.py         Claude vision entity extraction (alternative)
+│   │   └── bbox_matcher.py           Entity-to-word bounding box alignment
+│   ├── notebooks/
+│   │   ├── register_model.py    MLflow model registration in Unity Catalog
+│   │   └── deploy_endpoint.py   Model Serving endpoint deployment
+│   └── utils/
 ├── docs/
-└── start.sh                 Local dev launcher
+│   ├── architecture.md
+│   ├── setup.md
+│   └── deployment.md
+└── start.sh                 Legacy local dev launcher (React frontend)
 ```
-
-## Status
-
-This repository is a migration of the
-[PoC](https://github.com/nkranthiram/privasee) to the target three-component
-architecture.  The structure and placeholder files are in place; implementation
-will be added in subsequent steps.

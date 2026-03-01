@@ -588,7 +588,7 @@ async def process_document(request: ProcessRequest):
     # --- Persist entities to UC session ---
     try:
         sm.save_entities(request.session_id, [e.model_dump() for e in entities])
-        sm.update_session(request.session_id, status="ready")
+        sm.update_session(request.session_id, status="awaiting_review")
     except NotImplementedError:
         pass  # Non-fatal — entities are returned to the frontend regardless
     except Exception as exc:

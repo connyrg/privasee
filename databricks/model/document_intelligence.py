@@ -137,11 +137,16 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
         self.ocr_service = OCRService()
         self.bbox_matcher = BBoxMatcher()
         
-        # Get Unity Catalog volume path
+        # Get Unity Catalog volume path and Databricks credentials for Files API
         self.uc_volume_path = os.environ.get("UC_VOLUME_PATH")
         if not self.uc_volume_path:
             raise ValueError("UC_VOLUME_PATH must be set")
-        
+
+        self.databricks_host = os.environ.get("DATABRICKS_HOST", "").rstrip("/")
+        self.databricks_token = os.environ.get("DATABRICKS_TOKEN", "")
+        if not self.databricks_host or not self.databricks_token:
+            raise ValueError("DATABRICKS_HOST and DATABRICKS_TOKEN must be set")
+
         logger.info(f"UC Volume path: {self.uc_volume_path}")
         logger.info("Document Intelligence Model ready")
 
@@ -153,9 +158,7 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
             context: MLflow model context (unused)
             model_input: DataFrame with columns:
                 - session_id: string
-                - document_bytes_b64: base64-encoded document bytes
-                - document_filename: original filename
-                - field_definitions_json: JSON string of field definitions
+                - field_definitions: list of field definition dicts
         
         Returns:
             DataFrame with processing results for each row
@@ -176,32 +179,62 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
         
         return pd.DataFrame(results)
 
+    def _fetch_original_file(self, session_id: str):
+        """
+        Fetch the original uploaded file from the UC volume via the Files REST API.
+
+        Returns:
+            Tuple of (document_bytes: bytes, document_filename: str)
+        """
+        import requests as _requests
+
+        _FILES_API = "/api/2.0/fs/files"
+        headers = {"Authorization": f"Bearer {self.databricks_token}"}
+        session_path = f"{self.uc_volume_path}/{session_id}"
+
+        # List files in the session directory to find original.*
+        list_url = f"{self.databricks_host}{_FILES_API}{session_path}/"
+        list_resp = _requests.get(list_url, headers=headers)
+        list_resp.raise_for_status()
+        files = list_resp.json().get("files", [])
+        original = next(
+            (f["path"].rsplit("/", 1)[-1] for f in files
+             if f["path"].rsplit("/", 1)[-1].startswith("original.")),
+            None,
+        )
+        if not original:
+            raise FileNotFoundError(
+                f"No original file found in UC volume for session {session_id}"
+            )
+
+        file_url = f"{self.databricks_host}{_FILES_API}{session_path}/{original}"
+        file_resp = _requests.get(file_url, headers=headers)
+        file_resp.raise_for_status()
+        return file_resp.content, original
+
     def _process_document(self, row: pd.Series) -> Dict[str, Any]:
         """
         Process a single document through the complete pipeline.
-        
+
         Args:
-            row: DataFrame row with document data
-        
+            row: DataFrame row with columns:
+                - session_id: string
+                - field_definitions: list of field definition dicts
+
         Returns:
             Dictionary with processing results
         """
         session_id = row["session_id"]
-        document_bytes_b64 = row["document_bytes_b64"]
-        document_filename = row["document_filename"]
-        field_definitions_json = row["field_definitions_json"]
-        
+        field_definitions = row["field_definitions"]
+
         logger.info(f"Processing document for session {session_id}")
-        
-        # Parse field definitions
-        field_definitions = json.loads(field_definitions_json)
-        
-        # Decode document bytes
-        document_bytes = base64.b64decode(document_bytes_b64)
-        
-        # Extract file extension from filename
+
+        # Fetch document bytes from UC volume via Files REST API
+        document_bytes, document_filename = self._fetch_original_file(session_id)
+
+        # Extract file extension from stored filename (e.g. "original.pdf" → "pdf")
         file_extension = document_filename.split('.')[-1].lower()
-        
+
         # Step 1: OCR - Extract text and word-level bounding boxes
         logger.info(f"Step 1: Running OCR on {document_filename}")
         ocr_result = self.ocr_service.process_document(
@@ -338,30 +371,45 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
 
     def _write_to_uc_volume(self, session_id: str, result: Dict):
         """
-        Write processing results to Unity Catalog volume.
-        
-        Unity Catalog volumes are mounted as local filesystem paths on Databricks,
-        so we can write directly without API calls.
-        
+        Write processing results to Unity Catalog volume via the Files REST API.
+
+        Flattens entities from all pages into a single list and writes
+        entities.json in the format expected by UCSessionManager.get_entities():
+            {"session_id": ..., "status": "awaiting_review", "entities": [...]}
+
         Args:
             session_id: Session ID for the document
-            result: Processing result dictionary
+            result: Processing result dictionary with a "pages" list
         """
+        import requests as _requests
+        from datetime import datetime, timezone
+
         try:
-            # Construct filesystem path
-            session_dir = os.path.join(self.uc_volume_path, session_id)
-            entities_file = os.path.join(session_dir, "entities.json")
-            
-            # Create session directory if it doesn't exist
-            os.makedirs(session_dir, exist_ok=True)
-            
-            # Write entities.json
-            with open(entities_file, 'w') as f:
-                json.dump(result, f, indent=2)
-            
-            logger.info(f"Wrote entities to {entities_file}")
-            
+            # Flatten pages[].entities into a single list
+            flat_entities = []
+            for page in result.get("pages", []):
+                page_num = page.get("page_num", 1)
+                for entity in page.get("entities", []):
+                    entity.setdefault("page_number", page_num)
+                    flat_entities.append(entity)
+
+            payload = {
+                "session_id": session_id,
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "status": "awaiting_review",
+                "entities": flat_entities,
+            }
+
+            _FILES_API = "/api/2.0/fs/files"
+            headers = {"Authorization": f"Bearer {self.databricks_token}"}
+            entities_path = f"{self.uc_volume_path}/{session_id}/entities.json"
+            url = f"{self.databricks_host}{_FILES_API}{entities_path}"
+
+            resp = _requests.put(url, headers=headers, data=json.dumps(payload))
+            resp.raise_for_status()
+
+            logger.info(f"Wrote {len(flat_entities)} entities to UC volume for session {session_id}")
+
         except Exception as e:
-            logger.error(f"Error writing to UC volume: {e}")
-            # Don't fail the request if write fails - we still return the result
-            # The caller can retry the write operation if needed
+            logger.error(f"Error writing entities to UC volume: {e}")
+            # Don't fail the request if write fails — result is still returned to caller

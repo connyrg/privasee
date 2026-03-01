@@ -340,6 +340,38 @@ class UCSessionManager:
         )
         write_response.raise_for_status()
 
+    def update_session(self, session_id: str, **kwargs: Any) -> None:
+        """
+        Merge arbitrary kwargs into metadata.json and write it back.
+
+        Supported kwargs mirror SessionData fields (status, field_definitions,
+        page_count, …).  If ``status`` is included it must be one of
+        ``_VALID_STATUSES``.
+
+        Args:
+            session_id: Session to update.
+            **kwargs:   Fields to merge into the stored metadata.
+
+        Raises:
+            ValueError: If a ``status`` kwarg is not a valid status value.
+        """
+        if "status" in kwargs and kwargs["status"] not in _VALID_STATUSES:
+            raise ValueError(
+                f"Invalid status {kwargs['status']!r}. Must be one of {_VALID_STATUSES}"
+            )
+        path = self._session_path(session_id, "metadata.json")
+        url = self._url(path)
+
+        read_response = requests.get(url, headers=self._headers())
+        read_response.raise_for_status()
+        metadata = read_response.json()
+
+        metadata.update(kwargs)
+        write_response = requests.put(
+            url, headers=self._headers(), data=json.dumps(metadata)
+        )
+        write_response.raise_for_status()
+
     # ------------------------------------------------------------------
     # Entities
     # ------------------------------------------------------------------
@@ -425,8 +457,15 @@ class UCSessionManager:
 
         Returns:
             Raw file bytes (``response.content``).
+
+        Raises:
+            FileNotFoundError: If the file does not exist in the volume (404).
         """
         path = self._session_path(session_id, filename)
         response = requests.get(self._url(path), headers=self._headers())
+        if response.status_code == 404:
+            raise FileNotFoundError(
+                f"File '{filename}' not found for session {session_id}"
+            )
         response.raise_for_status()
         return response.content

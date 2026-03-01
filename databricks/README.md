@@ -1,364 +1,215 @@
-# Document Intelligence Model for Databricks Model Serving
+# PrivaSee — Databricks Model Serving
 
-This directory contains a complete document intelligence pipeline designed to run in Databricks Model Serving endpoints. The system processes documents (PDF, DOCX, PNG, JPG), extracts text with OCR, identifies sensitive entities using Vision AI (Azure OpenAI or Claude), and provides word-level bounding boxes for precise redaction masking.
+This directory contains the complete document de-identification pipeline deployed as
+a Databricks Model Serving endpoint. The system accepts a `session_id` and
+`field_definitions`, fetches the uploaded document from a Unity Catalog volume,
+runs OCR and AI-powered entity extraction, and writes results back to UC.
 
 ## Folder Structure
 
 ```
 databricks/
 ├── model/
-│   ├── __init__.py
-│   └── ocr_service.py          # Main OCR service implementation
-├── tests/
-│   ├── __init__.py
-│   └── test_ocr_service.py     # Comprehensive test suite (18 tests)
-├── databricks_test_runner      # Notebook to run tests with coverage
-├── __init__.py
-└── README.md                   # This file
+│   ├── document_intelligence.py  MLflow PyFunc model — main pipeline entry point
+│   ├── ocr_service.py            Azure Document Intelligence OCR
+│   ├── openai_service.py         Azure OpenAI vision entity extraction
+│   ├── claude_service.py         Claude vision entity extraction (alternative)
+│   ├── bbox_matcher.py           Aligns extracted entities to OCR word bounding boxes
+│   └── __init__.py
+├── notebooks/
+│   ├── register_model.py         Log and register the model in Unity Catalog
+│   └── deploy_endpoint.py        Create / update the Model Serving endpoint
+├── utils/
+│   └── databricks_utils.py       Databricks API helpers
+└── README.md
 ```
 
-## Features
-
-* **Intelligent PDF Page Detection**: Automatically detects whether PDF pages are digital (have text layer) or scanned (image-only)
-* **Optimized Processing**: Digital pages bypass OCR for faster, more accurate text extraction
-* **Multiple Format Support**: PDF, DOCX, PNG, JPG, JPEG
-* **Precise Bounding Boxes**: Word-level coordinates for accurate masking
-* **Self-Contained Dependencies**: Uses PyMuPDF (no system dependencies needed)
-* **Azure Document Intelligence Integration**: OCR for scanned pages and images
-
-## Architecture
-
-### Processing Flow
+## Pipeline
 
 ```
-Input Document
-    ↓
-File Type Detection
-    ↓
-├─ PDF ──→ Page Analysis
-│           ├─ Digital Page (>50 chars) ──→ PyMuPDF Text Extraction
-│           └─ Scanned Page (<50 chars) ──→ Render to PNG (144 DPI) ──→ Azure DI OCR
-│
-├─ DOCX ──→ python-docx Text Extraction (no OCR needed)
-│
-└─ Image (PNG/JPG) ──→ Azure DI OCR
+POST /invocations  (session_id, field_definitions)
+    │
+    ├─ Fetch original{ext} from UC volume via Files REST API
+    │
+    ├─ OCRService.process_document()
+    │   ├─ PDF: digital pages → PyMuPDF text extraction
+    │   │        scanned pages → Azure Document Intelligence
+    │   ├─ DOCX: python-docx paragraph extraction
+    │   └─ Image (PNG/JPG): Azure Document Intelligence
+    │
+    ├─ (per page) VisionService.extract_entities_from_base64()
+    │   ├─ Azure OpenAI (default): GPT-4o with vision
+    │   └─ Claude (alternative): Claude Vision
+    │
+    ├─ BBoxMatcher.match_entities_to_words()
+    │   └─ Aligns entity text spans to OCR word-level bounding boxes
+    │
+    ├─ Write entities.json to UC volume via Files REST API
+    │
+    └─ Return {session_id, status, pages: [{page_num, entities}]}
 ```
 
-### Output Format
+## MLflow Interface
 
-Each page returns:
-```python
+### Input (dataframe_records format)
+
+```json
 {
-    "page_num": 1,
-    "source": "digital_pdf" | "scanned_pdf" | "image" | "docx",
-    "text": "Full page text as a single string",
-    "words": [
+  "dataframe_records": [
+    {
+      "session_id": "uuid-string",
+      "field_definitions": [
+        {"name": "Full Name", "description": "Person's full name", "strategy": "Fake Data"},
+        {"name": "Email", "description": "Email address", "strategy": "Black Out"}
+      ]
+    }
+  ]
+}
+```
+
+The model fetches the document from:
+`{UC_VOLUME_PATH}/{session_id}/original{ext}`
+
+### Output (MLflow predictions format)
+
+```json
+{
+  "predictions": [
+    {
+      "session_id": "uuid-string",
+      "status": "complete",
+      "pages": [
         {
-            "text": "John",
-            "confidence": 0.99,
-            "bounding_box": {
-                "x": 100.0,      # Top-left corner x
-                "y": 200.0,      # Top-left corner y
-                "width": 40.0,   # Width in points/pixels
-                "height": 15.0   # Height in points/pixels
+          "page_num": 1,
+          "entities": [
+            {
+              "id": "entity-uuid",
+              "entity_type": "Full Name",
+              "original_text": "John Doe",
+              "replacement_text": "Jane Smith",
+              "bounding_box": [0.1, 0.2, 0.3, 0.05],
+              "confidence": 0.95,
+              "approved": true,
+              "page_number": 1,
+              "strategy": "Fake Data"
             }
+          ]
         }
-    ]
+      ]
+    }
+  ]
 }
 ```
 
-## Vision Service Configuration
+## Environment Variables
 
-### Azure OpenAI vs Claude
+All of the following must be set on the Model Serving endpoint:
 
-The Document Intelligence Model supports two vision service providers for entity detection:
+### Databricks Files API (for UC volume access)
 
-* **Azure OpenAI** (Default): Uses GPT-4o with vision capabilities
-* **Claude**: Uses Anthropic's Claude Sonnet 4
+| Variable | Description |
+|---|---|
+| `DATABRICKS_HOST` | Workspace URL, e.g. `https://adb-xxxx.azuredatabricks.net` |
+| `DATABRICKS_TOKEN` | Service principal token with Files API read/write access |
+| `UC_VOLUME_PATH` | UC volume base path, e.g. `/Volumes/catalog/schema/privasee_sessions` |
 
-Toggle between providers using the `VISION_SERVICE_PROVIDER` environment variable.
+### Azure Document Intelligence (OCR)
 
-### Azure OpenAI Configuration
+| Variable | Description |
+|---|---|
+| `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT` | Azure DI endpoint URL |
+| `AZURE_DOCUMENT_INTELLIGENCE_KEY` | Azure DI API key |
 
-**Environment Variables:**
+### Vision Service (choose one)
 
-```bash
-# Vision Service Provider (default: "openai")
-export VISION_SERVICE_PROVIDER="openai"
+**Azure OpenAI (default):**
 
-# Azure OpenAI Configuration
-export AZURE_OPENAI_API_KEY="your-azure-openai-key"
-export AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com/"
-export AZURE_OPENAI_API_VERSION="2024-02-15-preview"  # Optional, defaults to 2024-02-15-preview
-export AZURE_OPENAI_DEPLOYMENT_NAME="gpt-4o"  # Optional, defaults to gpt-4o
+| Variable | Description |
+|---|---|
+| `VISION_SERVICE_PROVIDER` | `openai` (default) |
+| `AZURE_OPENAI_API_KEY` | Azure OpenAI API key |
+| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint URL |
+| `AZURE_OPENAI_API_VERSION` | Optional, defaults to `2024-02-15-preview` |
+| `AZURE_OPENAI_DEPLOYMENT_NAME` | Optional, defaults to `gpt-4o` |
+
+**Claude (alternative):**
+
+| Variable | Description |
+|---|---|
+| `VISION_SERVICE_PROVIDER` | `claude` |
+| `ANTHROPIC_API_KEY` | Anthropic API key |
+
+## UC Volume Layout
+
+The model reads and writes files under `{UC_VOLUME_PATH}/{session_id}/`:
+
+```
+{UC_VOLUME_PATH}/{session_id}/
+    original{ext}    — uploaded document (read by model)
+    entities.json    — extraction results (written by model, read by backend)
+    metadata.json    — session metadata (written/read by backend)
+    masked.pdf       — de-identified output (written by backend)
 ```
 
-**Deployment Setup:**
+`entities.json` format written by the model:
 
-1. Create an Azure OpenAI resource in Azure Portal
-2. Deploy GPT-4o model with vision capabilities
-3. Note your deployment name (use this for `AZURE_OPENAI_DEPLOYMENT_NAME`)
-4. Get your endpoint and API key from Azure Portal
-
-**Why Azure OpenAI Instead of OpenAI Direct?**
-
-* **Enterprise Compliance**: Data stays within your Azure subscription
-* **Private Network**: Use VNet integration and private endpoints
-* **Regional Deployment**: Host models in your preferred Azure region
-* **Unified Billing**: Consolidated with other Azure services
-* **SLA Guarantees**: Enterprise-grade service level agreements
-
-### Claude Configuration (Alternative)
-
-```bash
-export VISION_SERVICE_PROVIDER="claude"
-export ANTHROPIC_API_KEY="your-anthropic-key"
-```
-
-## Installation
-
-### Dependencies
-
-```bash
-pip install PyMuPDF python-docx azure-ai-documentintelligence azure-core
-```
-
-### Environment Variables
-
-**Required for Azure Document Intelligence (OCR):**
-
-```bash
-export AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT="https://your-instance.cognitiveservices.azure.com/"
-export AZURE_DOCUMENT_INTELLIGENCE_KEY="your-key-here"
-```
-
-**Required for Vision Service (Choose Azure OpenAI or Claude):**
-
-```bash
-# For Azure OpenAI (default)
-export VISION_SERVICE_PROVIDER="openai"
-export AZURE_OPENAI_API_KEY="your-azure-openai-key"
-export AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com/"
-export AZURE_OPENAI_API_VERSION="2024-02-15-preview"  # Optional
-export AZURE_OPENAI_DEPLOYMENT_NAME="gpt-4o"  # Optional
-
-# OR for Claude
-export VISION_SERVICE_PROVIDER="claude"
-export ANTHROPIC_API_KEY="your-anthropic-key"
-```
-
-**Required for Unity Catalog Storage:**
-
-```bash
-export UC_VOLUME_PATH="/Volumes/catalog/schema/volume_name"
-```
-
-## Usage
-
-### Basic Usage
-
-```python
-from databricks.model.ocr_service import OCRService
-
-# Initialize service (reads credentials from environment)
-service = OCRService()
-
-# Process a document
-with open("document.pdf", "rb") as f:
-    document_bytes = f.read()
-
-# Pass the file extension (without dot)
-pages = service.process_document(document_bytes, "pdf")
-
-# Access results
-for page in pages:
-    print(f"Page {page['page_num']} ({page['source']}):")
-    print(f"Text: {page['text'][:100]}...")
-    print(f"Word count: {len(page['words'])}")
-```
-
-### Digital vs Scanned Detection
-
-The service automatically detects page type based on text content:
-
-```python
-# Digital page (has text layer)
-# - Extracted directly with PyMuPDF
-# - Confidence: 1.0
-# - Faster processing, no OCR API call
-
-# Scanned page (image only)
-# - Rendered to PNG at 144 DPI
-# - Sent to Azure Document Intelligence
-# - Confidence: varies (typically 0.95-0.99)
-```
-
-### Bounding Box Coordinates
-
-Azure Document Intelligence returns polygons (4 corners), which are converted to our standard format:
-
-```python
-# ADI polygon: [x1, y1, x2, y2, x3, y3, x4, y4]
-polygon = [100.0, 200.0, 140.0, 200.0, 140.0, 215.0, 100.0, 215.0]
-
-# Converted to bbox:
-bbox = {
-    "x": 100.0,      # min(x_coords)
-    "y": 200.0,      # min(y_coords)
-    "width": 40.0,   # max(x) - min(x)
-    "height": 15.0   # max(y) - min(y)
+```json
+{
+  "session_id": "...",
+  "saved_at": "2025-01-01T00:00:00+00:00",
+  "status": "awaiting_review",
+  "entities": [ ... ]
 }
 ```
+
+## Deployment
+
+### 1. Register the model
+
+Run `notebooks/register_model.py` in your Databricks workspace. Update the catalog,
+schema, and model name variables at the top of the notebook.
+
+### 2. Deploy the endpoint
+
+Run `notebooks/deploy_endpoint.py`. Set `ENDPOINT_NAME` and `MODEL_VERSION` to match
+your registered model. The endpoint will have `scale_to_zero` enabled by default.
+
+### 3. Get the invocation URL
+
+After deployment, the invocation URL follows this pattern:
+```
+https://<databricks-host>/serving-endpoints/<endpoint-name>/invocations
+```
+
+Set this as `DATABRICKS_MODEL_ENDPOINT` in the backend environment.
 
 ## Testing
 
-### Run Tests
-
 ```bash
-# Run all tests
-python -m pytest databricks/tests/test_ocr_service.py -v
+# Run OCR service tests (no real API credentials needed — all mocked)
+python -m pytest databricks/tests/ -v
 
-# Run specific test class
-python -m pytest databricks/tests/test_ocr_service.py::TestPolygonToBBox -v
-
-# Run with coverage
-python -m pytest databricks/tests/test_ocr_service.py --cov=databricks.model.ocr_service --cov-report=term
-```
-
-### Test Coverage
-
-The test suite includes:
-
-* **Initialization Tests**: Credential validation
-* **Polygon Conversion Tests**: ADI format to standard bbox
-* **Digital PDF Tests**: Text extraction and word detection
-* **Scanned PDF Tests**: Rendering and OCR
-* **DOCX Tests**: Paragraph extraction
-* **Image Tests**: OCR processing
-* **Routing Tests**: File type detection and dispatch
-
-All Azure Document Intelligence API calls are mocked—no real API credentials needed for testing.
-
-## Performance Considerations
-
-### Digital vs Scanned Detection Threshold
-
-The `MIN_TEXT_LENGTH_FOR_DIGITAL` threshold (default: 50 characters) determines when a page is considered "digital":
-
-* **Too low**: May misclassify scanned pages as digital, missing OCR
-* **Too high**: May unnecessarily OCR digital pages, wasting API calls
-* **Recommended**: 50 chars (approximately 1-2 short sentences)
-
-### PDF Rendering Resolution
-
-The `RENDER_ZOOM_FACTOR` (default: 2.0) controls PNG rendering quality:
-
-* **1.0**: 72 DPI (low quality, smaller files)
-* **2.0**: 144 DPI (recommended for OCR)
-* **3.0**: 216 DPI (higher quality, larger files, slower)
-
-## Deployment to Databricks Model Serving
-
-### 1. Package the Service
-
-Create `requirements.txt`:
-```
-PyMuPDF==1.23.8
-python-docx==1.1.0
-azure-ai-documentintelligence==1.0.0b1
-azure-core==1.29.5
-```
-
-### 2. Configure Secrets
-
-Store credentials in Databricks secrets:
-
-```bash
-databricks secrets create-scope --scope adi-credentials
-databricks secrets put --scope adi-credentials --key endpoint
-databricks secrets put --scope adi-credentials --key key
-```
-
-### 3. Create Model Serving Endpoint
-
-```python
-# In your endpoint initialization
-import os
-from databricks.model.ocr_service import OCRService
-
-# Load credentials from secrets
-os.environ['AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT'] = dbutils.secrets.get('adi-credentials', 'endpoint')
-os.environ['AZURE_DOCUMENT_INTELLIGENCE_KEY'] = dbutils.secrets.get('adi-credentials', 'key')
-
-# Initialize service
-ocr_service = OCRService()
-
-def score_model(input_data):
-    """Model serving endpoint handler"""
-    import base64
-    
-    file_bytes = base64.b64decode(input_data['file_bytes'])
-    filename = input_data['filename']
-    
-    # Extract file extension
-    file_extension = filename.split('.')[-1]
-    
-    pages = ocr_service.process_document(file_bytes, file_extension)
-    
-    return {"pages": pages}
+# End-to-end workflow test (requires live credentials)
+cd backend
+API_BASE_URL=http://localhost:8000 python scripts/e2e_upload_test.py
 ```
 
 ## Troubleshooting
 
-### "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT must be set"
+### `No original file found in UC volume for session <id>`
 
-Ensure environment variables are set before initializing `OCRService`:
+The model could not find `original.*` in `{UC_VOLUME_PATH}/{session_id}/`. Check that:
+- The backend successfully uploaded the file (see backend logs for the upload step)
+- `UC_VOLUME_PATH` is the same value on both the backend and the model endpoint
+- `DATABRICKS_TOKEN` on the endpoint has Files API read access to the UC volume
 
-```python
-import os
-os.environ['AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT'] = 'https://...'
-os.environ['AZURE_DOCUMENT_INTELLIGENCE_KEY'] = 'your-key'
-```
+### `DATABRICKS_HOST and DATABRICKS_TOKEN must be set`
 
-### PyMuPDF Import Error
+These environment variables were not set on the model serving endpoint config.
+Add them in the Databricks UI: Serving → your endpoint → Edit endpoint → Environment variables.
 
-If you see `ModuleNotFoundError: No module named 'fitz'`:
+### Low OCR confidence on scanned pages
 
-```bash
-pip install --upgrade PyMuPDF
-```
-
-### Low OCR Confidence
-
-If scanned pages have low confidence scores:
-
-1. Increase `RENDER_ZOOM_FACTOR` to 3.0 for higher resolution
-2. Check original document quality (scan at higher DPI)
-3. Verify Azure DI endpoint is using "prebuilt-read" model
-
-## Implementation Details
-
-### Why PyMuPDF Instead of Poppler?
-
-* **Self-Contained**: PyMuPDF installs via pip, no system dependencies
-* **Model Serving Compatible**: Works in restricted Databricks environments
-* **Performance**: Faster text extraction than Poppler utils
-* **Bounding Boxes**: Native support for word-level coordinates
-
-### Why 144 DPI for Scanned Pages?
-
-* **OCR Optimal**: Azure Document Intelligence performs best at 150-300 DPI
-* **File Size**: Balance between quality and processing speed
-* **Claude Vision**: Sufficient resolution for downstream AI processing
-
-### DOCX Limitation
-
-Word documents don't provide spatial information for text, so:
-
-* `words` array is empty
-* Only paragraph-level text is returned
-* Consider converting DOCX to PDF if masking is required
-
-## License
-
-Copyright © 2024 Suncorp Group. All rights reserved.
+- Increase `RENDER_ZOOM_FACTOR` in `ocr_service.py` to `3.0` for higher DPI rendering
+- Verify the original document was scanned at ≥200 DPI
+- Azure Document Intelligence performs best with `prebuilt-read` model (the default)

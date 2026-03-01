@@ -99,10 +99,9 @@ flag causes `POST /api/process` to call `_mock_entities()` instead of the real
 Databricks Model Serving endpoint. This means integration tests cannot catch:
 
 - Bugs in the Databricks PyFunc model's `predict` method
-- Schema mismatches between the FastAPI payload and what the model expects
+- Runtime errors in the model's UC file-fetch logic (`_fetch_original_file`)
 - Performance regressions in the model
 - Authentication or network failures in the Databricks workspace
 
-These are caught by `databricks/tests/`, which must be run separately inside a
-Databricks environment with access to the Model Serving endpoint. See
-`databricks/tests/` for instructions.
+These are caught by the end-to-end test script (`backend/scripts/e2e_upload_test.py`),
+which must be run against a live environment with real Databricks credentials.

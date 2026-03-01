@@ -354,3 +354,93 @@ def test_update_status_rejects_invalid_status(session_manager_instance):
     # ValueError must be raised before any HTTP call is made
     with pytest.raises(ValueError, match="invalid_status"):
         session_manager_instance.update_status("abc-session-123", "invalid_status")
+
+
+# ===========================================================================
+# Group 6 — update_session
+# ===========================================================================
+
+
+@pytest.mark.unit
+def test_update_session_merges_kwargs_into_metadata(session_manager_instance):
+    """update_session must read metadata, merge all kwargs, and write back."""
+    session_id = "abc-session-123"
+    existing_metadata = {
+        "session_id": session_id,
+        "original_filename": "report.pdf",
+        "created_at": "2024-06-01T12:00:00+00:00",
+        "status": "uploaded",
+        "extra_field": "must_be_preserved",
+    }
+
+    with patch("app.session_manager.requests.get") as mock_get, \
+            patch("app.session_manager.requests.put") as mock_put:
+        mock_get.return_value = _ok_response(existing_metadata)
+        mock_put.return_value = _ok_response()
+
+        session_manager_instance.update_session(
+            session_id,
+            status="processing",
+            field_definitions=[{"name": "Full Name"}],
+        )
+
+    # Both GET (read) and PUT (write) must have been called
+    assert mock_get.called
+    assert mock_put.called
+
+    written = json.loads(mock_put.call_args.kwargs["data"])
+    # New kwargs must be written
+    assert written["status"] == "processing"
+    assert written["field_definitions"] == [{"name": "Full Name"}]
+    # Pre-existing fields must be preserved
+    assert written["original_filename"] == "report.pdf"
+    assert written["created_at"] == "2024-06-01T12:00:00+00:00"
+    assert written["extra_field"] == "must_be_preserved"
+
+
+@pytest.mark.unit
+def test_update_session_rejects_invalid_status(session_manager_instance):
+    """ValueError must be raised before any HTTP call when status is invalid."""
+    with pytest.raises(ValueError, match="invalid_status"):
+        session_manager_instance.update_session("abc-session-123", status="invalid_status")
+
+
+@pytest.mark.unit
+def test_update_session_accepts_no_status_kwarg(session_manager_instance):
+    """update_session with no status kwarg must merge other kwargs without error."""
+    session_id = "abc-session-123"
+    existing_metadata = {"session_id": session_id, "status": "uploaded"}
+
+    with patch("app.session_manager.requests.get") as mock_get, \
+            patch("app.session_manager.requests.put") as mock_put:
+        mock_get.return_value = _ok_response(existing_metadata)
+        mock_put.return_value = _ok_response()
+
+        session_manager_instance.update_session(
+            session_id, field_definitions=[{"name": "Email"}]
+        )
+
+    written = json.loads(mock_put.call_args.kwargs["data"])
+    assert written["field_definitions"] == [{"name": "Email"}]
+    assert written["status"] == "uploaded"  # unchanged
+
+
+# ===========================================================================
+# Group 7 — get_file 404 handling
+# ===========================================================================
+
+
+@pytest.mark.unit
+def test_get_file_raises_file_not_found_on_404(session_manager_instance):
+    """A 404 from the Files API must surface as FileNotFoundError, not HTTPError."""
+    session_id = "abc-session-123"
+    filename = "original.pdf"
+
+    with patch("app.session_manager.requests.get") as mock_get:
+        mock_get.return_value = _not_found_response()
+
+        with pytest.raises(FileNotFoundError) as exc_info:
+            session_manager_instance.get_file(session_id, filename)
+
+    assert session_id in str(exc_info.value)
+    assert filename in str(exc_info.value)

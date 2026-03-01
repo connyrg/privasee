@@ -80,10 +80,10 @@ async def test_process_saves_entities_to_uc(client, override_databricks_dependen
 
 
 @pytest.mark.integration
-async def test_process_updates_session_status_to_processing_then_ready(
+async def test_process_updates_session_status_to_processing_then_awaiting_review(
     client, override_databricks_dependency
 ):
-    """update_session must be called with status='processing' before status='ready'."""
+    """update_session must be called with status='processing' before status='awaiting_review'."""
     sm = override_databricks_dependency
 
     response = await client.post("/api/process", json=VALID_PAYLOAD)
@@ -94,11 +94,11 @@ async def test_process_updates_session_status_to_processing_then_ready(
     assert "processing" in statuses, (
         f"Expected 'processing' in update_session calls; got: {statuses}"
     )
-    assert "ready" in statuses, (
-        f"Expected 'ready' in update_session calls; got: {statuses}"
+    assert "awaiting_review" in statuses, (
+        f"Expected 'awaiting_review' in update_session calls; got: {statuses}"
     )
-    assert statuses.index("processing") < statuses.index("ready"), (
-        "Expected 'processing' to be set before 'ready'"
+    assert statuses.index("processing") < statuses.index("awaiting_review"), (
+        "Expected 'processing' to be set before 'awaiting_review'"
     )
 
 

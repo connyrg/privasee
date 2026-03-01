@@ -274,6 +274,11 @@ class DatabricksProcessResponse(BaseModel):
 
         Handles both the standard {"predictions": [...]} shape and a bare
         {"entities": [...]} shape for easier local mocking.
+
+        The model returns entities nested under a "pages" list:
+            {"pages": [{"page_num": 1, "entities": [...]}, ...]}
+        This method flattens them into a single entity list, using each
+        page's "page_num" as the entity's page_number.
         """
         predictions = raw.get("predictions") or raw.get("dataframe_records")
         if predictions and isinstance(predictions, list):
@@ -281,7 +286,20 @@ class DatabricksProcessResponse(BaseModel):
         else:
             record = raw  # bare dict fallback
 
-        entities = [Entity(**e) for e in record.get("entities", [])]
+        # Flatten pages[].entities into a single list
+        pages = record.get("pages")
+        if pages and isinstance(pages, list):
+            raw_entities: list = []
+            for page in pages:
+                page_num = page.get("page_num", 1)
+                for entity in page.get("entities", []):
+                    entity.setdefault("page_number", page_num)
+                    raw_entities.append(entity)
+        else:
+            # Fallback: bare {"entities": [...]} shape (mock / local testing)
+            raw_entities = record.get("entities", [])
+
+        entities = [Entity(**e) for e in raw_entities]
         return cls(
             entities=entities,
             model_version=record.get("model_version"),
