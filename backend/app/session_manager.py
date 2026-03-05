@@ -380,8 +380,6 @@ class UCSessionManager:
         """
         Persist the entity list for a session as entities.json.
 
-        Status is always written as ``"awaiting_review"``.
-
         Args:
             session_id: Session to update.
             entities:   List of entity dicts.
@@ -389,7 +387,6 @@ class UCSessionManager:
         payload: Dict[str, Any] = {
             "session_id": session_id,
             "saved_at": datetime.now(timezone.utc).isoformat(),
-            "status": "awaiting_review",
             "entities": entities,
         }
         path = self._session_path(session_id, "entities.json")

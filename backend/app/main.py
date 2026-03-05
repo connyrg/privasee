@@ -943,53 +943,6 @@ async def get_session_info(session_id: str):
 
 
 # ---------------------------------------------------------------------------
-# DELETE /api/sessions/{session_id}
-# ---------------------------------------------------------------------------
-
-@app.delete("/api/sessions/{session_id}")
-async def delete_session(session_id: str):
-    """Delete a session and all its artefacts from UC storage."""
-    sm = _require_session_manager()
-
-    try:
-        session = sm.get_session(session_id)
-    except NotImplementedError:
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail="Session storage is not yet implemented.",
-        )
-    except Exception as exc:
-        logger.error("get_session(%s) failed: %s", session_id, exc, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Failed to read session from storage.",
-        )
-
-    if session is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session not found: {session_id}",
-        )
-
-    try:
-        sm.delete_session(session_id)
-    except NotImplementedError:
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail="Session storage is not yet implemented.",
-        )
-    except Exception as exc:
-        logger.error("delete_session(%s) failed: %s", session_id, exc, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Failed to delete session from storage.",
-        )
-
-    logger.info("Session deleted: %s", session_id)
-    return {"message": "Session deleted successfully", "session_id": session_id}
-
-
-# ---------------------------------------------------------------------------
 # Static frontend (Posit Connect / production)
 # ---------------------------------------------------------------------------
 # Mount the pre-built React bundle so FastAPI serves the SPA from the same
