@@ -15,9 +15,8 @@ Environment variables (see .env.template):
     MOCK_DATABRICKS             "true" → skip Databricks, return fake entities
     MAX_FILE_SIZE_MB            Upload size cap (default 10)
 
-export http_proxy="" && export http
-s_proxy="" && rsconnect deploy fastapi  --server  https://sds-posit-connect-prod.int.corp.sun/ --api-key $POSIT_CONNECT_API_KEY -p ven
-v/bin/python --entrypoint app.main:app . --insecure  --exclude venv/
+Deploy:
+export http_proxy="" && export https_proxy="" && rsconnect deploy fastapi  --server  https://sds-posit-connect-prod.int.corp.sun/ --api-key $POSIT_CONNECT_API_KEY -p venv/bin/python --entrypoint app.main:app . --insecure  --exclude venv/
 """
 
 from __future__ import annotations
@@ -972,4 +971,12 @@ if _STATIC_DIR.exists():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+    path, port = '', 8000 # declare uvicorn arguments
+
+    # When running in Posit Workbench, pass port to rserver-url to determine the root path
+    # See https://docs.posit.co/ide/server-pro/user/vs-code/guide/posit-workbench-extension.html#fastapi for details
+    if 'RS_SERVER_URL' in os.environ and os.environ['RS_SERVER_URL']:
+        import subprocess
+        path = subprocess.run(f'echo $(/usr/lib/rstudio-server/bin/rserver-url -l {port})', stdout=subprocess.PIPE, shell=True).stdout.decode().strip()
+
+    uvicorn.run("app.main:app", host="0.0.0.0", root_path = path, port = 8000, reload=True)
