@@ -21,12 +21,10 @@ export http_proxy="" && export https_proxy="" && rsconnect deploy fastapi  --ser
 
 from __future__ import annotations
 
-import io
 import logging
 import os
 import tempfile
 import time
-import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -51,7 +49,7 @@ from app.models import (
     UploadResponse,
 )
 from app.services.masking_service import MaskingService
-from app.session_manager import SessionManager, UCSessionManager
+from app.session_manager import UCSessionManager
 
 # ---------------------------------------------------------------------------
 # Bootstrap
@@ -122,7 +120,7 @@ masking_service = MaskingService()
 
 # SessionManager is initialised lazily so the app still starts without
 # Databricks credentials (useful for local testing with MOCK_DATABRICKS=true).
-_session_manager: Optional[SessionManager] = None
+_session_manager: Optional[UCSessionManager] = None
 
 if DATABRICKS_HOST and DATABRICKS_TOKEN and UC_VOLUME_PATH:
     _session_manager = UCSessionManager(
@@ -138,7 +136,7 @@ else:
     )
 
 
-def _require_session_manager() -> SessionManager:
+def _require_session_manager() -> UCSessionManager:
     """
     Return the SessionManager or raise 503 if it was not configured.
 
@@ -262,58 +260,18 @@ def _apply_masking_sync(
             detail="Masking DOCX files is not yet supported. Convert to PDF first.",
         )
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        input_path = os.path.join(tmpdir, f"input{ext}")
-        with open(input_path, "wb") as fh:
-            fh.write(file_bytes)
+    if ext == ".pdf":
+        return masking_service.apply_pdf_masks(file_bytes, entities_to_mask)
 
-        if ext == ".pdf":
-            try:
-                from pdf2image import convert_from_path  # type: ignore
-            except ImportError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-                    detail=(
-                        "PDF masking requires poppler. "
-                        "Install it with: brew install poppler (macOS) "
-                        "or apt-get install poppler-utils (Linux)."
-                    ),
-                ) from exc
+    if ext in (".png", ".jpg", ".jpeg"):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = os.path.join(tmpdir, f"input{ext}")
+            with open(input_path, "wb") as fh:
+                fh.write(file_bytes)
 
-            images = convert_from_path(input_path, dpi=200)
-            masked_image_paths: List[str] = []
-
-            for page_num, img in enumerate(images, start=1):
-                page_png = os.path.join(tmpdir, f"page_{page_num}.png")
-                img.save(page_png, "PNG")
-
-                masked_png = os.path.join(tmpdir, f"masked_page_{page_num}.png")
-                page_entities = [
-                    e for e in entities_to_mask
-                    if e.get("page_number", 1) == page_num
-                ]
-                masking_service.apply_masks(page_png, page_entities, masked_png)
-                masked_image_paths.append(masked_png)
-
-            # Combine masked page images back into a PDF using PIL
-            from PIL import Image as PILImage  # type: ignore
-
-            pil_images = [PILImage.open(p).convert("RGB") for p in masked_image_paths]
-            masked_pdf_path = os.path.join(tmpdir, "masked.pdf")
-            pil_images[0].save(
-                masked_pdf_path,
-                save_all=True,
-                append_images=pil_images[1:],
-                format="PDF",
-            )
-            with open(masked_pdf_path, "rb") as fh:
-                return fh.read()
-
-        elif ext in (".png", ".jpg", ".jpeg"):
             masked_img_path = os.path.join(tmpdir, f"masked{ext}")
             masking_service.apply_masks(input_path, entities_to_mask, masked_img_path)
 
-            # Wrap the masked image in a single-page PDF
             from PIL import Image as PILImage  # type: ignore
 
             img = PILImage.open(masked_img_path).convert("RGB")
@@ -322,11 +280,10 @@ def _apply_masking_sync(
             with open(masked_pdf_path, "rb") as fh:
                 return fh.read()
 
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Unsupported file type for masking: '{ext}'",
-            )
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail=f"Unsupported file type for masking: '{ext}'",
+    )
 
 
 # ---------------------------------------------------------------------------

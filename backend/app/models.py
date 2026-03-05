@@ -111,7 +111,7 @@ class SessionData(BaseModel):
     filename: str
     file_size: int
     page_count: int = 1
-    status: str = "uploaded"          # uploaded | processing | ready | completed
+    status: str = "uploaded"          # uploaded | processing | awaiting_review | completed
     entities: List[Entity] = []
     field_definitions: List[FieldDefinition] = []
 

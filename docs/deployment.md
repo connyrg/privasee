@@ -25,8 +25,13 @@ rsconnect deploy dash \
   frontend_dash/
 ```
 
-After deployment, set the `API_BASE_URL` environment variable on the content item in the
-Posit Connect UI (Content → Settings → Environment Variables) to the deployed backend URL.
+After deployment, set the following environment variables on the content item in the
+Posit Connect UI (Content → Settings → Environment Variables):
+
+| Variable | Value |
+|---|---|
+| `API_BASE_URL` | Deployed backend URL (e.g. `https://connect.example.com/privasee-api`) |
+| `SSL_VERIFY` | `false` if the backend is behind a Posit Connect proxy with an internal/self-signed certificate; omit otherwise |
 
 ---
 

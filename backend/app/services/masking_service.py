@@ -3,9 +3,7 @@ Masking Service
 Applies visual masks to document images by drawing rectangles over identified entities.
 """
 
-import cv2
 import io
-import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import logging
 from typing import Any, Dict, List, Tuple, Optional
@@ -236,87 +234,6 @@ class MaskingService:
         except Exception as e:
             logger.warning(f"Could not load font: {e}, using default")
             return ImageFont.load_default()
-
-    def preview_masks(
-        self,
-        image_path: str,
-        entities: List[Dict],
-        output_path: str
-    ) -> str:
-        """
-        Create preview with colored bounding boxes (no masking).
-
-        Args:
-            image_path: Path to input image
-            entities: List of entities to preview
-            output_path: Path for output preview image
-
-        Returns:
-            Path to preview image
-        """
-        if not os.path.exists(image_path):
-            raise FileNotFoundError(f"Image file not found: {image_path}")
-
-        try:
-            # Load image with OpenCV for color manipulation
-            image = cv2.imread(image_path)
-
-            if image is None:
-                raise ValueError(f"Could not load image: {image_path}")
-
-            img_height, img_width = image.shape[:2]
-
-            # Define colors for different entity types
-            colors = [
-                (255, 0, 0),    # Blue
-                (0, 255, 0),    # Green
-                (0, 0, 255),    # Red
-                (255, 255, 0),  # Cyan
-                (255, 0, 255),  # Magenta
-                (0, 255, 255),  # Yellow
-            ]
-
-            entity_types = list(set(e['entity_type'] for e in entities))
-            color_map = {et: colors[i % len(colors)] for i, et in enumerate(entity_types)}
-
-            # Draw boxes
-            for entity in entities:
-                bbox = entity['bounding_box']
-                entity_type = entity['entity_type']
-                color = color_map.get(entity_type, (255, 0, 0))
-
-                x, y, width, height = self._normalize_bbox(bbox, img_width, img_height)
-
-                # Draw rectangle
-                cv2.rectangle(
-                    image,
-                    (x, y),
-                    (x + width, y + height),
-                    color,
-                    2
-                )
-
-                # Draw label
-                label = entity_type
-                cv2.putText(
-                    image,
-                    label,
-                    (x, max(y - 5, 0)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    color,
-                    1
-                )
-
-            # Save preview
-            cv2.imwrite(output_path, image)
-
-            logger.info(f"Preview saved to: {output_path}")
-            return output_path
-
-        except Exception as e:
-            logger.error(f"Error creating preview: {str(e)}")
-            raise Exception(f"Failed to create preview: {str(e)}")
 
     # ------------------------------------------------------------------
     # PDF-native masking (PyMuPDF)
