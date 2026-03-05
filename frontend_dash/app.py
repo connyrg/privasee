@@ -22,6 +22,10 @@ from flask import Response, request as flask_request
 
 load_dotenv()
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
+# Set SSL_VERIFY=false in Posit Connect env vars when the backend uses an
+# internal/self-signed certificate that the Python runtime doesn't trust.
+_ssl_verify_env = os.getenv("SSL_VERIFY", "true").lower()
+SSL_VERIFY: bool | str = False if _ssl_verify_env == "false" else True
 
 # ---------------------------------------------------------------------------
 # App
@@ -45,7 +49,7 @@ server = app.server  # expose Flask server for rsconnect
 def proxy_original_pdf(session_id: str) -> Response:
     url = f"{API_BASE_URL}/api/files/uploads/{session_id}.pdf"
     try:
-        r = req.get(url, timeout=30)
+        r = req.get(url, timeout=30, verify=SSL_VERIFY)
         r.raise_for_status()
         as_download = flask_request.args.get("dl") == "1"
         headers = {"Content-Type": "application/pdf"}
@@ -60,7 +64,7 @@ def proxy_original_pdf(session_id: str) -> Response:
 def proxy_masked_pdf(session_id: str) -> Response:
     url = f"{API_BASE_URL}/api/files/output/{session_id}_masked.pdf"
     try:
-        r = req.get(url, timeout=30)
+        r = req.get(url, timeout=30, verify=SSL_VERIFY)
         r.raise_for_status()
         as_download = flask_request.args.get("dl") == "1"
         headers = {"Content-Type": "application/pdf"}
@@ -659,6 +663,7 @@ def handle_upload(contents: str | None, filename: str | None):
             f"{API_BASE_URL}/api/upload",
             files={"file": (filename, file_bytes, "application/pdf")},
             timeout=120,
+            verify=SSL_VERIFY,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -835,6 +840,7 @@ def process_document(n_clicks: int, session: dict | None, fields: list | None):
             f"{API_BASE_URL}/api/process",
             json={"session_id": session_id, "field_definitions": field_definitions},
             timeout=900,  # 15 minutes — AI model call can be slow
+            verify=SSL_VERIFY,
         )
         resp.raise_for_status()
         entities = resp.json().get("entities", [])
@@ -968,6 +974,7 @@ def approve_and_mask(n_clicks: int, session: dict | None, table_data: list | Non
                 "updated_entities": updated_entities,
             },
             timeout=300,  # 5 minutes
+            verify=SSL_VERIFY,
         )
         resp.raise_for_status()
         result = resp.json()
