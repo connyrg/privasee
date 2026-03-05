@@ -157,7 +157,6 @@ The model reads and writes files under `{UC_VOLUME_PATH}/{session_id}/`:
 {
   "session_id": "...",
   "saved_at": "2025-01-01T00:00:00+00:00",
-  "status": "awaiting_review",
   "entities": [ ... ]
 }
 ```

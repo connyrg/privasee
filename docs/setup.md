@@ -69,6 +69,7 @@ API_BASE_URL=http://localhost:8000 python app.py
 | Variable | Required | Description |
 |---|---|---|
 | `API_BASE_URL` | Yes | Backend URL, e.g. `http://localhost:8000` or the Posit Connect backend URL |
+| `SSL_VERIFY` | No | Set `false` when the backend uses an internal or self-signed certificate (e.g. Posit Connect with a private CA). Defaults to `true`. |
 
 ## 5. Databricks setup
 

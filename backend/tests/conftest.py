@@ -20,7 +20,7 @@ sample_entities        four Entity-compatible dicts with normalised bounding
                        boxes derived from the exact text positions in
                        test_pdf_bytes.
 
-mock_session_manager   MagicMock(spec=SessionManager); all methods available,
+mock_session_manager   MagicMock(spec=UCSessionManager); all methods available,
                        no real UC / Databricks I/O.
 
 override_databricks_dependency
@@ -30,7 +30,7 @@ override_databricks_dependency
 
 client                 httpx.AsyncClient backed by ASGITransport(app=app);
                        depends on override_databricks_dependency so every
-                       API call hits the mock SessionManager.
+                       API call hits the mock UCSessionManager.
 
 PDF coordinate notes
 --------------------
@@ -57,7 +57,7 @@ import fitz  # PyMuPDF
 from PIL import Image
 from httpx import AsyncClient, ASGITransport
 
-from app.session_manager import SessionManager
+from app.session_manager import UCSessionManager
 import app.main as main_module
 from app.main import app
 
@@ -142,22 +142,22 @@ def sample_field_definitions() -> List[dict]:
         {
             "name": "Full Name",
             "description": "Person's full name",
-            "replacement_strategy": "fake_name",
+            "strategy": "Fake Data",
         },
         {
             "name": "Email",
             "description": "Email address",
-            "replacement_strategy": "redact",
+            "strategy": "Black Out",
         },
         {
             "name": "Date of Birth",
             "description": "Date of birth",
-            "replacement_strategy": "entity_label",
+            "strategy": "Entity Label",
         },
         {
             "name": "SSN",
             "description": "Social Security Number",
-            "replacement_strategy": "redact",
+            "strategy": "Black Out",
         },
     ]
 
@@ -228,7 +228,7 @@ def mock_session_manager() -> MagicMock:
         mock_session_manager.get_session.return_value = some_session_data
         mock_session_manager.create_session.side_effect = Exception("boom")
     """
-    mock = MagicMock(spec=SessionManager)
+    mock = MagicMock(spec=UCSessionManager)
     mock.create_session.return_value = "mock-session-id-1234-5678"
     return mock
 
