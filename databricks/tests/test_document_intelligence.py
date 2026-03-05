@@ -77,7 +77,9 @@ class TestModelInitialization(unittest.TestCase):
             'AZURE_OPENAI_API_KEY': 'test-openai-key',
             'AZURE_OPENAI_ENDPOINT': 'https://test-openai.openai.azure.com/',
             'PROXY_CLUSTER_ID': 'test-cluster-123',
-            'UC_VOLUME_PATH': '/Volumes/catalog/schema/sessions'
+            'UC_VOLUME_PATH': '/Volumes/catalog/schema/sessions',
+            'DATABRICKS_HOST': 'https://test.databricks.com',
+            'DATABRICKS_TOKEN': 'test-token-123'
         }):
             model = DocumentIntelligenceModel()
             model.load_context(context=None)
@@ -109,7 +111,9 @@ class TestModelInitialization(unittest.TestCase):
             'AZURE_OPENAI_ENDPOINT': 'https://test-openai.openai.azure.com/',
             'VISION_SERVICE_PROVIDER': 'openai',
             'PROXY_CLUSTER_ID': 'test-cluster-123',
-            'UC_VOLUME_PATH': '/Volumes/catalog/schema/sessions'
+            'UC_VOLUME_PATH': '/Volumes/catalog/schema/sessions',
+            'DATABRICKS_HOST': 'https://test.databricks.com',
+            'DATABRICKS_TOKEN': 'test-token-123'
         }):
             model = DocumentIntelligenceModel()
             model.load_context(context=None)
@@ -133,7 +137,9 @@ class TestModelInitialization(unittest.TestCase):
             'AZURE_DOCUMENT_INTELLIGENCE_KEY': 'test-adi-key',
             'ANTHROPIC_API_KEY': 'test-anthropic-key',
             'VISION_SERVICE_PROVIDER': 'claude',
-            'UC_VOLUME_PATH': '/Volumes/catalog/schema/sessions'
+            'UC_VOLUME_PATH': '/Volumes/catalog/schema/sessions',
+            'DATABRICKS_HOST': 'https://test.databricks.com',
+            'DATABRICKS_TOKEN': 'test-token-123'
         }):
             model = DocumentIntelligenceModel()
             model.load_context(context=None)
@@ -226,10 +232,10 @@ class TestPredictPipelineOpenAI(unittest.TestCase):
         self.model.vision_service = Mock()
         self.model.bbox_matcher = Mock()
         self.model.uc_volume_path = '/tmp/test_volumes'
+        self.model.databricks_host = 'https://test.databricks.com'
+        self.model.databricks_token = 'test-token-123'
 
-    @patch('databricks.model.document_intelligence.os.makedirs')
-    @patch('builtins.open', new_callable=mock_open)
-    def test_predict_single_page_document_openai(self, mock_file, mock_makedirs):
+    def test_predict_single_page_document_openai(self):
         """Test processing single-page document with Azure OpenAI"""
         # Prepare test data
         field_definitions = [
@@ -238,10 +244,14 @@ class TestPredictPipelineOpenAI(unittest.TestCase):
         
         input_df = pd.DataFrame([{
             'session_id': 'test-session-123',
-            'document_bytes_b64': base64.b64encode(b'fake pdf content').decode(),
-            'document_filename': 'test.pdf',
-            'field_definitions_json': json.dumps(field_definitions)
+            'field_definitions': field_definitions
         }])
+        
+        # Mock _fetch_original_file() method directly
+        self.model._fetch_original_file = Mock(return_value=(b'fake pdf content', 'original.pdf'))
+        
+        # Mock _write_to_uc_volume() to prevent actual HTTP requests
+        self.model._write_to_uc_volume = Mock()
 
         # Mock OCR service response - returns list directly, not dict with 'pages' key
         self.model.ocr_service.process_document.return_value = [
@@ -301,9 +311,8 @@ class TestPredictPipelineOpenAI(unittest.TestCase):
         self.assertTrue(entity['approved'])
         self.assertIn('id', entity)
 
-        # Verify UC volume write was attempted
-        mock_makedirs.assert_called()
-        mock_file.assert_called()
+        # Verify UC volume write was attempted via REST API
+        self.model._write_to_uc_volume.assert_called_once()
 
 
 class TestPredictPipelineClaude(unittest.TestCase):
@@ -319,10 +328,10 @@ class TestPredictPipelineClaude(unittest.TestCase):
         self.model.vision_service = Mock()
         self.model.bbox_matcher = Mock()
         self.model.uc_volume_path = '/tmp/test_volumes'
+        self.model.databricks_host = 'https://test.databricks.com'
+        self.model.databricks_token = 'test-token-123'
 
-    @patch('databricks.model.document_intelligence.os.makedirs')
-    @patch('builtins.open', new_callable=mock_open)
-    def test_predict_single_page_document_claude(self, mock_file, mock_makedirs):
+    def test_predict_single_page_document_claude(self):
         """Test processing single-page document with Claude"""
         # Prepare test data
         field_definitions = [
@@ -331,10 +340,14 @@ class TestPredictPipelineClaude(unittest.TestCase):
         
         input_df = pd.DataFrame([{
             'session_id': 'test-session-456',
-            'document_bytes_b64': base64.b64encode(b'fake pdf content').decode(),
-            'document_filename': 'test.pdf',
-            'field_definitions_json': json.dumps(field_definitions)
+            'field_definitions': field_definitions
         }])
+        
+        # Mock _fetch_original_file() method directly
+        self.model._fetch_original_file = Mock(return_value=(b'fake pdf content', 'original.pdf'))
+        
+        # Mock _write_to_uc_volume() to prevent actual HTTP requests
+        self.model._write_to_uc_volume = Mock()
 
         # Mock OCR service response - returns list directly, not dict with 'pages' key
         self.model.ocr_service.process_document.return_value = [
@@ -399,10 +412,10 @@ class TestPredictEdgeCases(unittest.TestCase):
         self.model.vision_service = Mock()
         self.model.bbox_matcher = Mock()
         self.model.uc_volume_path = '/tmp/test_volumes'
+        self.model.databricks_host = 'https://test.databricks.com'
+        self.model.databricks_token = 'test-token-123'
 
-    @patch('databricks.model.document_intelligence.os.makedirs')
-    @patch('builtins.open', new_callable=mock_open)
-    def test_predict_multi_page_document(self, mock_file, mock_makedirs):
+    def test_predict_multi_page_document(self):
         """Test processing multi-page document"""
         field_definitions = [
             {"name": "Name", "description": "Person name", "strategy": "Black Out"}
@@ -410,10 +423,14 @@ class TestPredictEdgeCases(unittest.TestCase):
         
         input_df = pd.DataFrame([{
             'session_id': 'multi-page-session',
-            'document_bytes_b64': base64.b64encode(b'fake pdf content').decode(),
-            'document_filename': 'multipage.pdf',
-            'field_definitions_json': json.dumps(field_definitions)
+            'field_definitions': field_definitions
         }])
+        
+        # Mock _fetch_original_file() method directly
+        self.model._fetch_original_file = Mock(return_value=(b'fake pdf content', 'original.pdf'))
+        
+        # Mock _write_to_uc_volume() to prevent actual HTTP requests
+        self.model._write_to_uc_volume = Mock()
 
         # Mock OCR with 2 pages - returns list directly, not dict with 'pages' key
         self.model.ocr_service.process_document.return_value = [
@@ -458,13 +475,11 @@ class TestPredictEdgeCases(unittest.TestCase):
         """Test error handling when processing fails"""
         input_df = pd.DataFrame([{
             'session_id': 'error-session',
-            'document_bytes_b64': 'invalid_base64',
-            'document_filename': 'test.pdf',
-            'field_definitions_json': '[]'
+            'field_definitions': []
         }])
-
-        # Mock OCR to raise exception
-        self.model.ocr_service.process_document.side_effect = Exception("OCR failed")
+        
+        # Mock _fetch_original_file() to raise exception
+        self.model._fetch_original_file = Mock(side_effect=Exception("File fetch failed"))
 
         # Run prediction
         result_df = self.model.predict(context=None, model_input=input_df)
@@ -475,18 +490,20 @@ class TestPredictEdgeCases(unittest.TestCase):
         self.assertEqual(result['status'], 'error')
         self.assertIn('error_message', result)
 
-    @patch('databricks.model.document_intelligence.os.makedirs')
-    @patch('builtins.open', new_callable=mock_open)
-    def test_predict_no_image_page(self, mock_file, mock_makedirs):
+    def test_predict_no_image_page(self):
         """Test handling pages without images (digital PDF text extraction)"""
         field_definitions = [{"name": "Name", "description": "Name", "strategy": "Fake Data"}]
         
         input_df = pd.DataFrame([{
             'session_id': 'no-image-session',
-            'document_bytes_b64': base64.b64encode(b'pdf').decode(),
-            'document_filename': 'digital.pdf',
-            'field_definitions_json': json.dumps(field_definitions)
+            'field_definitions': field_definitions
         }])
+        
+        # Mock _fetch_original_file() method directly
+        self.model._fetch_original_file = Mock(return_value=(b'fake pdf content', 'original.pdf'))
+        
+        # Mock _write_to_uc_volume() to prevent actual HTTP requests
+        self.model._write_to_uc_volume = Mock()
 
         # Mock OCR with page that has no image_base64 - returns list directly, not dict with 'pages' key
         self.model.ocr_service.process_document.return_value = [

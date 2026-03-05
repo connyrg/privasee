@@ -188,18 +188,18 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
         """
         import requests as _requests
 
-        _FILES_API = "/api/2.0/fs/files"
+        _FILES_API = "/api/2.0/fs"
         headers = {"Authorization": f"Bearer {self.databricks_token}"}
         session_path = f"{self.uc_volume_path}/{session_id}"
 
         # List files in the session directory to find original.*
-        list_url = f"{self.databricks_host}{_FILES_API}{session_path}/"
+        list_url = f"{self.databricks_host}{_FILES_API}/directories{session_path}/"
         list_resp = _requests.get(list_url, headers=headers)
         list_resp.raise_for_status()
-        files = list_resp.json().get("files", [])
+        files = list_resp.json().get("contents", [])
         original = next(
-            (f["path"].rsplit("/", 1)[-1] for f in files
-             if f["path"].rsplit("/", 1)[-1].startswith("original.")),
+            (f["name"] for f in files
+             if f["name"].startswith("original.")),
             None,
         )
         if not original:
@@ -207,7 +207,7 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
                 f"No original file found in UC volume for session {session_id}"
             )
 
-        file_url = f"{self.databricks_host}{_FILES_API}{session_path}/{original}"
+        file_url = f"{self.databricks_host}{_FILES_API}/files{session_path}/{original}"
         file_resp = _requests.get(file_url, headers=headers)
         file_resp.raise_for_status()
         return file_resp.content, original

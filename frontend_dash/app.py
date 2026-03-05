@@ -4,6 +4,7 @@ Deployable on Posit Connect via: rsconnect deploy dash --title "PrivaSee" .
 
 Set API_BASE_URL env var to point at the deployed FastAPI backend.
 """
+# export http_proxy="" && export https_proxy="" && rsconnect deploy dash  --server  https://sds-posit-connect-prod.int.corp.sun/ --api-key $POSIT_CONNECT_API_KEY --entrypoint app.py [--new] -t PrivaSee . --insecure  --exclude venv/
 
 from __future__ import annotations
 

@@ -95,23 +95,19 @@ except ImportError as e:
 # Define MLflow model signature
 # Input: DataFrame with document request data
 # Output: DataFrame with processing results
-# Note: Output fields may contain None values - this is handled by the model's predict() method
+# Note: 'pages' contains JSON-serialized list of page objects with detected entities
+# Note: 'error_message' is only present when status='error'
 
 input_schema = Schema([
     ColSpec("string", "session_id"),
-    ColSpec("string", "document_bytes_b64"),
-    ColSpec("string", "document_filename"),
-    ColSpec("string", "field_definitions_json"),
+    ColSpec("string", "field_definitions"),
 ])
 
 output_schema = Schema([
     ColSpec("string", "session_id"),
     ColSpec("string", "status"),
-    ColSpec("string", "ocr_result_json", required=False),
-    ColSpec("string", "entity_detection_json", required=False),
-    ColSpec("string", "bbox_matches_json", required=False),
-    ColSpec("string", "masked_pdf_path", required=False),
-    ColSpec("string", "error_message", required=False),
+    ColSpec("string", "pages", required=False),  # JSON string: list of {page_num, entities[]}
+    ColSpec("string", "error_message", required=False),  # Only present on error
 ])
 
 signature = ModelSignature(inputs=input_schema, outputs=output_schema)
@@ -119,19 +115,27 @@ print("✅ Model signature defined")
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 11
 # Create input example for model card
 import pandas as pd
 import json
 
 input_example = pd.DataFrame({
     "session_id": ["example_session_123"],
-    "document_bytes_b64": ["base64_encoded_document_bytes_here"],
-    "document_filename": ["sample_document.pdf"],
-    "field_definitions_json": [json.dumps({
-        "PERSON_NAME": {"label": "Person Name", "category": "PII"},
-        "ADDRESS": {"label": "Address", "category": "PII"},
-        "SSN": {"label": "Social Security Number", "category": "SENSITIVE"}
-    })]
+    "field_definitions": [
+        [
+            {
+                "name": "claimant_name",
+                "description": "The name of the claimant of a personal injury claims. The claimant is the person who is injured and lodging a compensation claim.",
+                "strategy": "Black Out"
+            },
+            {
+                "name": "incident_date",
+                "description": "The date when an incident happened",
+                "strategy": "Black Out"
+            }
+        ]
+    ]
 })
 
 print("✅ Input example created")
@@ -211,6 +215,8 @@ MODEL_VERSION = str(registered_model.version)
 print(f"🧪 Testing registered model: {UC_MODEL_PATH} v{MODEL_VERSION}")
 
 import os
+os.environ['DATABRICKS_HOST']='host'
+os.environ['DATABRICKS_TOKEN']='token'
 os.environ['AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT']='endpoint'
 os.environ['AZURE_DOCUMENT_INTELLIGENCE_KEY']='apikey'
 os.environ['WORKSPACE_URL']='url'

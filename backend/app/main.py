@@ -14,6 +14,10 @@ Environment variables (see .env.template):
     ALLOWED_ORIGINS             Comma-separated list of CORS origins
     MOCK_DATABRICKS             "true" → skip Databricks, return fake entities
     MAX_FILE_SIZE_MB            Upload size cap (default 10)
+
+export http_proxy="" && export http
+s_proxy="" && rsconnect deploy fastapi  --server  https://sds-posit-connect-prod.int.corp.sun/ --api-key $POSIT_CONNECT_API_KEY -p ven
+v/bin/python --entrypoint app.main:app . --insecure  --exclude venv/
 """
 
 from __future__ import annotations

@@ -1,4 +1,5 @@
 # Databricks notebook source
+# DBTITLE 1,Cell 1
 # MAGIC %md
 # MAGIC # Deploy Model Serving Endpoint
 # MAGIC
@@ -9,6 +10,7 @@
 # MAGIC * Workspace has Model Serving enabled
 # MAGIC * Calling identity has "Can Manage" permissions on serving endpoints
 # MAGIC * Databricks secrets configured for Azure and OpenAI/Claude credentials
+# MAGIC * **Documents must be uploaded to UC volume** at `/Volumes/{catalog}/{schema}/sessions/{session_id}/original.{ext}` before invoking the endpoint
 # MAGIC
 # MAGIC ## What This Notebook Does
 # MAGIC 1. Configures endpoint settings (model, compute size, secrets)
@@ -16,6 +18,9 @@
 # MAGIC 3. Waits for endpoint to become ready
 # MAGIC 4. Tests endpoint availability
 # MAGIC 5. Provides endpoint URL for integration
+# MAGIC
+# MAGIC ## How the Model Works
+# MAGIC The model expects a `session_id` and `field_definitions` as input. It fetches the original document from the UC volume using the session_id, processes it through OCR and vision AI, and returns detected entities with bounding boxes.
 # MAGIC
 # MAGIC ## Previous Step
 # MAGIC Run `register_model.py` to register the model first.
@@ -48,7 +53,7 @@ UC_MODEL_PATH = f"{CATALOG}.{SCHEMA}.{MODEL_NAME}"
 
 # Endpoint configuration
 ENDPOINT_NAME = "privasee_endpoint_local"
-MODEL_VERSION = "7"  # Update to your registered model version
+MODEL_VERSION = "9"  # Update to your registered model version
 WORKLOAD_SIZE = "Small"  # Options: Small, Medium, Large
 SCALE_TO_ZERO = True  # Enable scale-to-zero to save costs
 
@@ -106,6 +111,8 @@ env_vars = {
 # Add OpenAI or Claude secrets based on provider
 if VISION_PROVIDER == "openai":
     env_vars.update({
+        "DATABRICKS_HOST": "https://suncorp-dev.cloud.databricks.com/",
+        "DATABRICKS_TOKEN": f"{{{{secrets/Conny.GUNADI@suncorp.com.au/DATABRICKS_TOKEN_DEV}}}}",
         "AZURE_OPENAI_API_KEY": f"{{{{secrets/{OPENAI_SECRET_SCOPE}/apikey}}}}",
         "AZURE_OPENAI_ENDPOINT": "https://openai-00010-non-prod-1.openai.azure.com/",
         "AZURE_OPENAI_API_VERSION": "2024-02-15-preview",
@@ -134,23 +141,25 @@ for key, value in env_vars.items():
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 9
 # MAGIC %md
 # MAGIC ⚠️ **Important: Verify Secrets Exist**
 # MAGIC
-# MAGIC Before deploying, ensure these secrets exist in your Databricks workspace:
+# MAGIC Before deploying, ensure these secrets exist in your Databricks workspace.
 # MAGIC
-# MAGIC For Azure Document Intelligence:
-# MAGIC * `{SECRET_SCOPE}/adi_endpoint`
-# MAGIC * `{SECRET_SCOPE}/adi_key`
+# MAGIC **For Azure Document Intelligence:**
+# MAGIC * Note: Currently using dummy values in the code - update Cell 8 with real secret references if needed
 # MAGIC
-# MAGIC For OpenAI (if using):
-# MAGIC * `{SECRET_SCOPE}/openai_key`
-# MAGIC * `{SECRET_SCOPE}/openai_endpoint`
+# MAGIC **For OpenAI (if VISION_PROVIDER = "openai"):**
+# MAGIC * `{SECRET_SCOPE}/apikey` - Azure OpenAI API key
+# MAGIC * `{SECRET_SCOPE}/client_id` - Proxy client ID
+# MAGIC * `{SECRET_SCOPE}/client_secret` - Proxy client secret
+# MAGIC * `{SECRET_SCOPE}/DATABRICKS_TOKEN_DEV` - Databricks token
 # MAGIC
-# MAGIC For Claude (if using):
-# MAGIC * `{SECRET_SCOPE}/anthropic_key`
+# MAGIC **For Claude (if VISION_PROVIDER = "claude"):**
+# MAGIC * Note: Currently using dummy value in the code - update Cell 8 with real secret reference if needed
 # MAGIC
-# MAGIC Run this cell to verify secrets (optional):
+# MAGIC Run the cell below to verify secrets (optional):
 
 # COMMAND ----------
 
@@ -303,12 +312,19 @@ print("🧪 Testing endpoint availability...")
 test_payload = {
     "dataframe_records": [
         {
-            "session_id": "test_session_001",
-            "document_bytes_b64": "VGVzdCBkb2N1bWVudA==",  # "Test document" in base64
-            "document_filename": "test.pdf",
-            "field_definitions_json": json.dumps({
-                "PERSON_NAME": {"label": "Person Name", "category": "PII"}
-            })
+            "session_id": "integration_test_002",
+            "field_definitions": [
+                {
+                    "name": "claimant_name",
+                    "description": "The name of the claimant of a personal injury claims. The claimant is the person who is injured and lodging a compensation claim.",
+                    "strategy": "Black Out"
+                },
+                {
+                    "name": "incident_date",
+                    "description": "The date when an incident happened",
+                    "strategy": "Black Out"
+                }
+            ]
         }
     ]
 }
@@ -375,44 +391,116 @@ print(f"""
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 21
 # MAGIC %md
 # MAGIC ## Endpoint Invocation Examples
+# MAGIC
+# MAGIC ### Important: Document Upload Workflow
+# MAGIC
+# MAGIC Before invoking the endpoint:
+# MAGIC 1. Upload your document to UC volume: `/Volumes/{catalog}/{schema}/sessions/{session_id}/original.{ext}`
+# MAGIC 2. Send request with `session_id` and `field_definitions` to the endpoint
+# MAGIC 3. The model fetches the document from UC volume, processes it, and returns entities
 # MAGIC
 # MAGIC ### Python Example
 # MAGIC ```python
 # MAGIC import requests
 # MAGIC import json
-# MAGIC import base64
+# MAGIC import shutil
+# MAGIC import os
 # MAGIC
-# MAGIC # Read and encode document
-# MAGIC with open("document.pdf", "rb") as f:
-# MAGIC     doc_bytes = base64.b64encode(f.read()).decode()
+# MAGIC # Step 1: Upload document to UC volume
+# MAGIC session_id = "my_session_123"
+# MAGIC uc_volume_path = "/Volumes/datascience_dev_bronze_sandbox/ds_document_deidentification/sessions"
+# MAGIC session_dir = f"{uc_volume_path}/{session_id}"
+# MAGIC os.makedirs(session_dir, exist_ok=True)
 # MAGIC
-# MAGIC # Create request payload
+# MAGIC # Copy document to session directory as 'original.pdf'
+# MAGIC shutil.copy2("path/to/document.pdf", f"{session_dir}/original.pdf")
+# MAGIC
+# MAGIC # Step 2: Define field definitions
+# MAGIC field_definitions = [
+# MAGIC     {
+# MAGIC         "name": "claimant_name",
+# MAGIC         "description": "The name of the claimant",
+# MAGIC         "strategy": "Black Out"
+# MAGIC     },
+# MAGIC     {
+# MAGIC         "name": "incident_date",
+# MAGIC         "description": "The date when an incident happened",
+# MAGIC         "strategy": "Black Out"
+# MAGIC     }
+# MAGIC ]
+# MAGIC
+# MAGIC # Step 3: Create request payload
 # MAGIC payload = {
 # MAGIC     "dataframe_records": [{
-# MAGIC         "session_id": "session_123",
-# MAGIC         "document_bytes_b64": doc_bytes,
-# MAGIC         "document_filename": "document.pdf",
-# MAGIC         "field_definitions_json": json.dumps({
-# MAGIC             "PERSON_NAME": {"label": "Person Name", "category": "PII"},
-# MAGIC             "ADDRESS": {"label": "Address", "category": "PII"}
-# MAGIC         })
+# MAGIC         "session_id": session_id,
+# MAGIC         "field_definitions": field_definitions
 # MAGIC     }]
 # MAGIC }
 # MAGIC
-# MAGIC # Invoke endpoint
+# MAGIC # Step 4: Invoke endpoint
 # MAGIC response = requests.post(
 # MAGIC     "{endpoint_url}",
-# MAGIC     headers={{"Authorization": f"Bearer {{DATABRICKS_TOKEN}}"}},
-# MAGIC     json=payload
+# MAGIC     headers={"Authorization": f"Bearer {DATABRICKS_TOKEN}"},
+# MAGIC     json=payload,
+# MAGIC     timeout=120
 # MAGIC )
 # MAGIC
 # MAGIC result = response.json()
+# MAGIC print(json.dumps(result, indent=2))
+# MAGIC ```
+# MAGIC
+# MAGIC ### Expected Response Format
+# MAGIC ```json
+# MAGIC {
+# MAGIC   "predictions": [{
+# MAGIC     "session_id": "my_session_123",
+# MAGIC     "status": "complete",
+# MAGIC     "pages": [
+# MAGIC       {
+# MAGIC         "page_num": 1,
+# MAGIC         "entities": [
+# MAGIC           {
+# MAGIC             "id": "uuid",
+# MAGIC             "entity_type": "claimant_name",
+# MAGIC             "original_text": "John Doe",
+# MAGIC             "bounding_box": [0.1, 0.2, 0.3, 0.4],
+# MAGIC             "confidence": 0.95,
+# MAGIC             "page_number": 1,
+# MAGIC             "approved": true,
+# MAGIC             "strategy": "Black Out"
+# MAGIC           }
+# MAGIC         ]
+# MAGIC       }
+# MAGIC     ]
+# MAGIC   }]
+# MAGIC }
 # MAGIC ```
 # MAGIC
 # MAGIC ### cURL Example
 # MAGIC ```bash
+# MAGIC # Step 1: Upload document using Files API (or use volume directly)
+# MAGIC cp document.pdf /Volumes/catalog/schema/sessions/session_123/original.pdf
+# MAGIC
+# MAGIC # Step 2: Create request.json
+# MAGIC cat > request.json << EOF
+# MAGIC {
+# MAGIC   "dataframe_records": [{
+# MAGIC     "session_id": "session_123",
+# MAGIC     "field_definitions": [
+# MAGIC       {
+# MAGIC         "name": "claimant_name",
+# MAGIC         "description": "The name of the claimant",
+# MAGIC         "strategy": "Black Out"
+# MAGIC       }
+# MAGIC     ]
+# MAGIC   }]
+# MAGIC }
+# MAGIC EOF
+# MAGIC
+# MAGIC # Step 3: Invoke endpoint
 # MAGIC curl -X POST {endpoint_url} \
 # MAGIC   -H "Authorization: Bearer $DATABRICKS_TOKEN" \
 # MAGIC   -H "Content-Type: application/json" \
