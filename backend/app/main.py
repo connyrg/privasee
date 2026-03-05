@@ -519,7 +519,9 @@ async def process_document(request: ProcessRequest):
             session_id=request.session_id,
             field_definitions=request.field_definitions,
         )
-
+        print(f"DATABRICKS_MODEL_ENDPOINT: {DATABRICKS_MODEL_ENDPOINT}")
+        print(f"db_request: {db_request}")
+        print(f"db_request: {db_request.to_mlflow_payload()}")
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(
@@ -574,8 +576,11 @@ async def process_document(request: ProcessRequest):
             )
 
         try:
+            print(f"raw: {raw}")
             db_response = DatabricksProcessResponse.from_mlflow_response(raw)
+            print(f"db_response: {db_response}")
             entities = db_response.entities
+            print(f"entities: {entities}")
         except Exception as exc:
             logger.error(
                 "Failed to parse Databricks response for session %s: %s — raw: %s",
