@@ -241,7 +241,7 @@ class TestIntegrationEntityLabel(unittest.TestCase):
         text = doc[0].get_text()
         doc.close()
         import re
-        self.assertRegex(text, r"Full_Name_\d+")
+        self.assertRegex(text, r"Full_Name_[A-Z\d]+")
 
 
 # ===========================================================================

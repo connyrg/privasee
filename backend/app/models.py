@@ -86,6 +86,9 @@ class Entity(BaseModel):
     confidence: float = Field(default=0.9, ge=0.0, le=1.0)
     approved: bool = Field(default=True)
     page_number: int = Field(default=1, ge=1)
+    strategy: Optional[str] = Field(
+        default=None, description="Masking strategy: 'Fake Data', 'Black Out', 'Entity Label'"
+    )
 
     @field_validator("bounding_box")
     @classmethod

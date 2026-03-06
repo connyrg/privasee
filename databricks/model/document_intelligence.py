@@ -37,6 +37,7 @@ from .ocr_service import OCRService
 from .claude_service import ClaudeVisionService
 from .openai_service import OpenAIVisionService
 from .bbox_matcher import BBoxMatcher
+from .fake_data_service import FakeDataService
 
 logger = logging.getLogger(__name__)
 
@@ -133,9 +134,10 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
             )
             logger.info(f"Azure OpenAI vision service initialized (deployment: {azure_openai_deployment})")
         
-        # Initialize OCR service and BBox matcher
+        # Initialize OCR service, BBox matcher, and fake data generator
         self.ocr_service = OCRService()
         self.bbox_matcher = BBoxMatcher()
+        self.fake_data_service = FakeDataService()
         
         # Get Unity Catalog volume path and Databricks credentials for Files API
         self.uc_volume_path = os.environ.get("UC_VOLUME_PATH")
@@ -245,9 +247,16 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
         pages = ocr_result
         logger.info(f"OCR completed: {len(pages)} page(s) processed")
         
+        # Per-document state for replacement pre-generation.
+        # Both maps key on normalised original_text so the same value always
+        # gets the same replacement across all pages.
+        fake_data_consistency: Dict[str, str] = {}
+        entity_label_consistency: Dict[str, str] = {}
+        entity_label_counters: Dict[str, int] = {}
+
         # Process each page
         result_pages = []
-        
+
         for page_idx, page_data in enumerate(pages, start=1):
             logger.info(f"Processing page {page_idx}/{len(pages)}")
             
@@ -308,7 +317,39 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
                 )
                 if matching_field:
                     entity['strategy'] = matching_field.get('strategy', 'Black Out')
-            
+
+                # Pre-generate replacement_text so users can review/edit it in
+                # Step 2 before masking is applied.
+
+                if entity.get('strategy') == 'Fake Data' and not entity.get('replacement_text'):
+                    # Realistic fake value — same original always maps to same
+                    # replacement (e.g. "John Smith" → "Jane Doe" everywhere).
+                    original = entity.get('original_text', '')
+                    key = original.lower().strip()
+                    if key not in fake_data_consistency:
+                        fake_data_consistency[key] = self.fake_data_service.generate(
+                            entity.get('entity_type', ''), original
+                        )
+                    entity['replacement_text'] = fake_data_consistency[key]
+
+                elif entity.get('strategy') == 'Entity Label' and not entity.get('replacement_text'):
+                    # Sequential letter label per entity type: Full_Name_A,
+                    # Full_Name_B, … Full_Name_Z, Full_Name_27, …
+                    # Same original_text always gets the same label.
+                    original = entity.get('original_text', '')
+                    key = original.lower().strip()
+                    if key not in entity_label_consistency:
+                        etype = (
+                            entity.get('entity_type', 'Unknown')
+                            .replace(' ', '_')
+                            .replace('-', '_')
+                        )
+                        entity_label_counters[etype] = entity_label_counters.get(etype, 0) + 1
+                        count = entity_label_counters[etype]
+                        suffix = chr(64 + count) if count <= 26 else str(count)
+                        entity_label_consistency[key] = f"{etype}_{suffix}"
+                    entity['replacement_text'] = entity_label_consistency[key]
+
             result_pages.append({
                 'page_num': page_idx,
                 'entities': enriched_entities

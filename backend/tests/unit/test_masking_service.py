@@ -245,16 +245,16 @@ def test_entity_label_uses_type_and_counter_format():
     page_text = doc[0].get_text()
     doc.close()
 
-    pattern = re.compile(r"Full_Name_\d+")
+    pattern = re.compile(r"Full_Name_[A-Z\d]+")
     assert pattern.search(page_text), (
-        f"Expected a label matching 'Full_Name_N' in output text; got: {page_text!r}"
+        f"Expected a label matching 'Full_Name_A' in output text; got: {page_text!r}"
     )
 
 
 @pytest.mark.unit
 def test_entity_label_increments_counter_per_type():
     """
-    Two distinct Full Name entities must produce Full_Name_1 and Full_Name_2,
+    Two distinct Full Name entities must produce Full_Name_A and Full_Name_B,
     not the same label twice.
     """
     entities = [
@@ -272,10 +272,10 @@ def test_entity_label_increments_counter_per_type():
     page_text = doc[0].get_text()
     doc.close()
 
-    assert "Full_Name_1" in page_text, f"Expected Full_Name_1 in: {page_text!r}"
-    assert "Full_Name_2" in page_text, f"Expected Full_Name_2 in: {page_text!r}"
-    assert page_text.count("Full_Name_1") == 1, "Full_Name_1 should appear exactly once"
-    assert page_text.count("Full_Name_2") == 1, "Full_Name_2 should appear exactly once"
+    assert "Full_Name_A" in page_text, f"Expected Full_Name_A in: {page_text!r}"
+    assert "Full_Name_B" in page_text, f"Expected Full_Name_B in: {page_text!r}"
+    assert page_text.count("Full_Name_A") == 1, "Full_Name_A should appear exactly once"
+    assert page_text.count("Full_Name_B") == 1, "Full_Name_B should appear exactly once"
 
 
 # ===========================================================================

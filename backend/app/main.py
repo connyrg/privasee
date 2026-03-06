@@ -205,6 +205,9 @@ def _mock_entities(session_id: str, field_definitions: list) -> List[Entity]:
 
         original, replacement = match
 
+        field_strategy = (
+            field_def.strategy.value if hasattr(field_def, "strategy") else "Fake Data"
+        )
         entities.append(
             Entity(
                 id=f"{session_id}_mock_{i}",
@@ -216,6 +219,7 @@ def _mock_entities(session_id: str, field_definitions: list) -> List[Entity]:
                 confidence=0.95,
                 approved=True,
                 page_number=1,
+                strategy=field_strategy,
             )
         )
     return entities

@@ -185,15 +185,15 @@ class TestFakeData(unittest.TestCase):
 class TestEntityLabel(unittest.TestCase):
 
     def test_uses_type_and_counter_format(self):
-        """Label must match {EntityType}_{N} where N starts at 1."""
+        """Label must match {EntityType}_{Letter} e.g. Full_Name_A."""
         entity = _entity("Full Name", "John Smith", 50, 100, 90, strategy="Entity Label")
         doc = _apply([("John Smith", 50, 100)], [entity])
         page_text = doc[0].get_text()
         doc.close()
-        self.assertRegex(page_text, r"Full_Name_\d+")
+        self.assertRegex(page_text, r"Full_Name_[A-Z\d]+")
 
     def test_increments_counter_per_type(self):
-        """Two distinct entities of the same type get _1 and _2."""
+        """Two distinct entities of the same type get _A and _B."""
         entities = [
             _entity("Full Name", "John Smith", 50, 100, 90, strategy="Entity Label"),
             _entity("Full Name", "Jane Doe",   50, 200, 90, strategy="Entity Label"),
@@ -201,10 +201,10 @@ class TestEntityLabel(unittest.TestCase):
         doc = _apply([("John Smith", 50, 100), ("Jane Doe", 50, 200)], entities)
         page_text = doc[0].get_text()
         doc.close()
-        self.assertIn("Full_Name_1", page_text)
-        self.assertIn("Full_Name_2", page_text)
-        self.assertEqual(page_text.count("Full_Name_1"), 1)
-        self.assertEqual(page_text.count("Full_Name_2"), 1)
+        self.assertIn("Full_Name_A", page_text)
+        self.assertIn("Full_Name_B", page_text)
+        self.assertEqual(page_text.count("Full_Name_A"), 1)
+        self.assertEqual(page_text.count("Full_Name_B"), 1)
 
 
 # ===========================================================================
