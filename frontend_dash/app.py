@@ -434,7 +434,7 @@ def _step3_layout() -> html.Div:
                                                     [html.I(className="bi bi-download me-1"), "Download"],
                                                     id="original-download-link",
                                                     className="btn btn-sm btn-outline-secondary",
-                                                    target="_blank",
+                                                    download="original.pdf",
                                                 ),
                                                 width="auto",
                                             ),
@@ -474,7 +474,7 @@ def _step3_layout() -> html.Div:
                                                     [html.I(className="bi bi-download me-1"), "Download"],
                                                     id="masked-download-link",
                                                     className="btn btn-sm btn-outline-primary",
-                                                    target="_blank",
+                                                    download="masked.pdf",
                                                 ),
                                                 width="auto",
                                             ),
@@ -1032,12 +1032,24 @@ def populate_compare(mask_result: dict | None, session: dict | None):
     count = mask_result.get("entities_masked", 0)
     label = f"{count} {'entity' if count == 1 else 'entities'} masked"
 
-    prefix = app.config.requests_pathname_prefix.rstrip("/")
+    headers = {"Authorization": f"Key {os.environ.get('POSIT_CONNECT_API_KEY', '')}"}
+
+    def _fetch_b64(url: str) -> str:
+        try:
+            r = req.get(url, headers=headers, timeout=30, verify=SSL_VERIFY)
+            r.raise_for_status()
+            return "data:application/pdf;base64," + base64.b64encode(r.content).decode()
+        except Exception:
+            return ""
+
+    original_src = _fetch_b64(f"{API_BASE_URL}/api/files/uploads/{session_id}.pdf")
+    masked_src = _fetch_b64(f"{API_BASE_URL}/api/files/output/{session_id}_masked.pdf")
+
     return (
-        f"{prefix}/pdf/original/{session_id}",
-        f"{prefix}/pdf/masked/{session_id}",
-        f"{prefix}/pdf/original/{session_id}?dl=1",
-        f"{prefix}/pdf/masked/{session_id}?dl=1",
+        original_src,
+        masked_src,
+        original_src,
+        masked_src,
         label,
         label,
     )
