@@ -79,7 +79,7 @@ class Entity(BaseModel):
     id: str = Field(..., description="Unique identifier for this entity")
     entity_type: str = Field(..., description="Type of entity (field name)")
     original_text: str = Field(..., description="Original text found in the document")
-    replacement_text: str = Field(..., description="Text to replace it with")
+    replacement_text: str = Field(default="", description="Text to replace it with")
     bounding_box: List[float] = Field(
         ..., description="Normalised [x, y, width, height]"
     )
@@ -166,6 +166,13 @@ class ProcessResponse(BaseModel):
 # Approve and mask
 # ---------------------------------------------------------------------------
 
+class EntityUpdate(BaseModel):
+    """Minimal payload for a user-edited entity — only the fields the backend uses."""
+
+    id: str
+    replacement_text: str
+
+
 class ApprovalRequest(BaseModel):
     """Request body for POST /api/approve-and-mask."""
 
@@ -173,7 +180,7 @@ class ApprovalRequest(BaseModel):
     # IDs of entities the user approved for masking
     approved_entity_ids: List[str]
     # Optional entities with user-edited replacement_text
-    updated_entities: Optional[List[Entity]] = None
+    updated_entities: Optional[List[EntityUpdate]] = None
 
 
 class ApprovalResponse(BaseModel):
