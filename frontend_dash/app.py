@@ -1032,11 +1032,12 @@ def populate_compare(mask_result: dict | None, session: dict | None):
     count = mask_result.get("entities_masked", 0)
     label = f"{count} {'entity' if count == 1 else 'entities'} masked"
 
+    prefix = app.config.requests_pathname_prefix.rstrip("/")
     return (
-        f"/pdf/original/{session_id}",
-        f"/pdf/masked/{session_id}",
-        f"/pdf/original/{session_id}?dl=1",
-        f"/pdf/masked/{session_id}?dl=1",
+        f"{prefix}/pdf/original/{session_id}",
+        f"{prefix}/pdf/masked/{session_id}",
+        f"{prefix}/pdf/original/{session_id}?dl=1",
+        f"{prefix}/pdf/masked/{session_id}?dl=1",
         label,
         label,
     )
