@@ -82,10 +82,10 @@ Use this decision rule to choose the right level:
 | Does it verify a mock matches a real service schema? | Yes | **contract** |
 
 Practical examples:
-- New method on `MaskingService` → unit test in `tests/unit/test_masking_service.py`
+- New helper in `session_manager.py` → unit test in `tests/unit/test_session_manager.py`
 - New endpoint `POST /api/export` → integration tests in `tests/integration/test_export_endpoint.py`
 - New field added to the Databricks response → contract test update in `tests/contracts/`
-- Helper function used only inside a service → unit test alongside the service
+- New field added to the masking payload → integration test update in `tests/integration/test_approve_and_mask_endpoint.py`
 
 Every test must carry one of `@pytest.mark.unit`, `@pytest.mark.integration`,
 or `@pytest.mark.contract` so the Makefile targets select the right subset.

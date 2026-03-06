@@ -1,24 +1,28 @@
 # PrivaSee — Databricks Model Serving
 
-This directory contains the complete document de-identification pipeline deployed as
-a Databricks Model Serving endpoint. The system accepts a `session_id` and
-`field_definitions`, fetches the uploaded document from a Unity Catalog volume,
-runs OCR and AI-powered entity extraction, and writes results back to UC.
+This directory contains two MLflow PyFunc models deployed as separate Databricks
+Model Serving endpoints:
+
+- **Document Intelligence** — OCR + AI entity extraction pipeline
+- **Masking** — PDF redaction engine; reads `original{ext}` from UC, writes `masked.pdf`
 
 ## Folder Structure
 
 ```
 databricks/
 ├── model/
-│   ├── document_intelligence.py  MLflow PyFunc model — main pipeline entry point
+│   ├── document_intelligence.py  Document Intelligence model entry point
+│   ├── masking_model.py          Masking model entry point
+│   ├── masking_service.py        PyMuPDF redaction engine (used by masking model)
+│   ├── fake_data_service.py      Faker-based replacement text generator
 │   ├── ocr_service.py            Azure Document Intelligence OCR
 │   ├── openai_service.py         Azure OpenAI vision entity extraction
 │   ├── claude_service.py         Claude vision entity extraction (alternative)
 │   ├── bbox_matcher.py           Aligns extracted entities to OCR word bounding boxes
 │   └── __init__.py
 ├── notebooks/
-│   ├── register_model.py         Log and register the model in Unity Catalog
-│   └── deploy_endpoint.py        Create / update the Model Serving endpoint
+│   ├── register_model.py         Log and register a model in Unity Catalog
+│   └── deploy_endpoint.py        Create / update a Model Serving endpoint
 ├── utils/
 │   └── databricks_utils.py       Databricks API helpers
 └── README.md
@@ -145,10 +149,10 @@ The model reads and writes files under `{UC_VOLUME_PATH}/{session_id}/`:
 
 ```
 {UC_VOLUME_PATH}/{session_id}/
-    original{ext}    — uploaded document (read by model)
-    entities.json    — extraction results (written by model, read by backend)
-    metadata.json    — session metadata (written/read by backend)
-    masked.pdf       — de-identified output (written by backend)
+    original{ext}    — uploaded document (backend → read by both models)
+    entities.json    — extraction results (document intelligence model → backend)
+    metadata.json    — session metadata (backend)
+    masked.pdf       — de-identified output (masking model)
 ```
 
 `entities.json` format written by the model:
@@ -173,14 +177,15 @@ schema, and model name variables at the top of the notebook.
 Run `notebooks/deploy_endpoint.py`. Set `ENDPOINT_NAME` and `MODEL_VERSION` to match
 your registered model. The endpoint will have `scale_to_zero` enabled by default.
 
-### 3. Get the invocation URL
+### 3. Get the invocation URLs
 
-After deployment, the invocation URL follows this pattern:
+After deployment, invocation URLs follow this pattern:
 ```
 https://<databricks-host>/serving-endpoints/<endpoint-name>/invocations
 ```
 
-Set this as `DATABRICKS_MODEL_ENDPOINT` in the backend environment.
+Set the Document Intelligence endpoint URL as `DATABRICKS_MODEL_ENDPOINT` and the
+Masking endpoint URL as `DATABRICKS_MASKING_ENDPOINT` in the backend environment.
 
 ## Testing
 

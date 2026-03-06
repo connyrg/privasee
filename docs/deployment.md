@@ -56,7 +56,8 @@ Posit Connect UI (Content → Settings → Environment Variables):
 |---|---|
 | `DATABRICKS_HOST` | Workspace URL |
 | `DATABRICKS_TOKEN` | Personal access token |
-| `DATABRICKS_MODEL_ENDPOINT` | Full serving endpoint invocation URL |
+| `DATABRICKS_MODEL_ENDPOINT` | Document Intelligence Model Serving invocation URL |
+| `DATABRICKS_MASKING_ENDPOINT` | Masking Model Serving invocation URL |
 | `UC_VOLUME_PATH` | `/Volumes/<catalog>/<schema>/privasee_sessions` |
 | `ALLOWED_ORIGINS` | Deployed Dash frontend URL (e.g. `https://connect.example.com/privasee`) |
 
@@ -64,24 +65,27 @@ Posit Connect UI (Content → Settings → Environment Variables):
 
 ## Databricks — Model Serving
 
-### 1. Register the model
+There are two independent Model Serving endpoints: one for document intelligence (OCR + entity extraction) and one for masking (PDF redaction).
+
+### Document Intelligence endpoint
+
+#### 1. Register the model
 
 Run `databricks/notebooks/register_model.py` in your Databricks workspace. This logs
-the `DocumentIntelligenceModel` as an MLflow PyFunc model and registers it in Unity Catalog.
+`DocumentIntelligenceModel` as an MLflow PyFunc model and registers it in Unity Catalog.
 
-### 2. Deploy the endpoint
+#### 2. Deploy the endpoint
 
-Run `databricks/notebooks/deploy_endpoint.py` to create or update the Model Serving
-endpoint. Adjust `ENDPOINT_NAME` and `MODEL_VERSION` at the top of the notebook.
+Run `databricks/notebooks/deploy_endpoint.py`. Adjust `ENDPOINT_NAME` and `MODEL_VERSION`
+at the top of the notebook.
 
-### 3. Configure endpoint environment variables
+#### 3. Configure endpoint environment variables
 
-In the Databricks UI (Serving → your endpoint → Edit endpoint → Environment variables),
-set:
+In the Databricks UI (Serving → your endpoint → Edit endpoint → Environment variables), set:
 
 | Variable | Description |
 |---|---|
-| `DATABRICKS_HOST` | Workspace URL — used by the model to fetch documents from UC |
+| `DATABRICKS_HOST` | Workspace URL |
 | `DATABRICKS_TOKEN` | Service principal token with Files API read/write access to UC volume |
 | `UC_VOLUME_PATH` | Same value as the backend |
 | `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT` | Azure DI endpoint URL |
@@ -91,7 +95,26 @@ set:
 | `AZURE_OPENAI_ENDPOINT` | Required when provider is `openai` |
 | `ANTHROPIC_API_KEY` | Required when provider is `claude` |
 
-### 4. Update after a model version bump
+### Masking endpoint
+
+#### 1. Register the model
+
+Run `databricks/notebooks/register_model.py` selecting `MaskingModel`. Register it
+under a separate name (e.g. `privasee_masking`) in Unity Catalog.
+
+#### 2. Deploy the endpoint
+
+Run `databricks/notebooks/deploy_endpoint.py` with the masking model name and version.
+
+#### 3. Configure endpoint environment variables
+
+| Variable | Description |
+|---|---|
+| `DATABRICKS_HOST` | Workspace URL |
+| `DATABRICKS_TOKEN` | Service principal token with Files API read/write access to UC volume |
+| `UC_VOLUME_PATH` | Same value as the backend |
+
+#### 4. Update after a model version bump
 
 Re-run `deploy_endpoint.py` with the updated model version number. The endpoint
 will perform a rolling update with zero downtime.
@@ -110,6 +133,7 @@ The following secrets must be configured in the repository
 | `DATABRICKS_HOST` | deploy-databricks, deploy-backend |
 | `DATABRICKS_TOKEN` | deploy-databricks, deploy-backend |
 | `DATABRICKS_MODEL_ENDPOINT` | deploy-backend |
+| `DATABRICKS_MASKING_ENDPOINT` | deploy-backend |
 | `UC_VOLUME_PATH` | deploy-backend |
 | `ALLOWED_ORIGINS` | deploy-backend |
 

@@ -1,11 +1,9 @@
 """
 PrivaSee FastAPI Backend — orchestration layer.
 
-This module manages the user-facing workflow.  It does NOT perform any
-document intelligence — all OCR and entity extraction is delegated to the
-Databricks Model Serving endpoint.  When DATABRICKS_MASKING_ENDPOINT is set,
-masking is also delegated to the Databricks MaskingModel; otherwise it runs
-in-process using MaskingService.
+This module manages the user-facing workflow.  No document processing runs
+in-process — OCR/entity extraction and masking are both delegated to
+Databricks Model Serving endpoints.
 
 Environment variables (see .env.template):
     DATABRICKS_HOST               Workspace URL
@@ -25,7 +23,6 @@ from __future__ import annotations
 
 import logging
 import os
-import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -35,8 +32,6 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
-from starlette.concurrency import run_in_threadpool
-
 from app.models import (
     ApprovalRequest,
     ApprovalResponse,
@@ -50,7 +45,6 @@ from app.models import (
     SessionInfo,
     UploadResponse,
 )
-from app.services.masking_service import MaskingService
 from app.session_manager import UCSessionManager
 
 # ---------------------------------------------------------------------------
@@ -118,8 +112,6 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # Service initialisation
 # ---------------------------------------------------------------------------
-
-masking_service = MaskingService()
 
 # SessionManager is initialised lazily so the app still starts without
 # Databricks credentials (useful for local testing with MOCK_DATABRICKS=true).
@@ -226,71 +218,6 @@ def _mock_entities(session_id: str, field_definitions: list) -> List[Entity]:
             )
         )
     return entities
-
-
-# ---------------------------------------------------------------------------
-# In-process masking helper
-# ---------------------------------------------------------------------------
-
-def _apply_masking_sync(
-    file_bytes: bytes,
-    original_ext: str,
-    entities_to_mask: List[Dict[str, Any]],
-) -> bytes:
-    """
-    Apply visual redactions and return the resulting PDF bytes.
-
-    Runs synchronously (intended to be called via run_in_threadpool).
-
-    For image files (PNG / JPG) the image is masked directly and then
-    wrapped in a single-page PDF.  For PDFs each page is converted to an
-    image, masked, and the pages are re-assembled into a PDF.
-    DOCX masking is not yet supported.
-
-    Args:
-        file_bytes:       Raw bytes of the original document.
-        original_ext:     File extension including the dot, e.g. ".pdf".
-        entities_to_mask: List of entity dicts (model_dump output).
-
-    Returns:
-        PDF bytes of the masked document.
-
-    Raises:
-        HTTPException 422  if the file type cannot be masked.
-        HTTPException 501  if pdf2image / poppler is not installed.
-    """
-    ext = original_ext.lower()
-
-    if ext == ".docx":
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Masking DOCX files is not yet supported. Convert to PDF first.",
-        )
-
-    if ext == ".pdf":
-        return masking_service.apply_pdf_masks(file_bytes, entities_to_mask)
-
-    if ext in (".png", ".jpg", ".jpeg"):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            input_path = os.path.join(tmpdir, f"input{ext}")
-            with open(input_path, "wb") as fh:
-                fh.write(file_bytes)
-
-            masked_img_path = os.path.join(tmpdir, f"masked{ext}")
-            masking_service.apply_masks(input_path, entities_to_mask, masked_img_path)
-
-            from PIL import Image as PILImage  # type: ignore
-
-            img = PILImage.open(masked_img_path).convert("RGB")
-            masked_pdf_path = os.path.join(tmpdir, "masked.pdf")
-            img.save(masked_pdf_path, format="PDF")
-            with open(masked_pdf_path, "rb") as fh:
-                return fh.read()
-
-    raise HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        detail=f"Unsupported file type for masking: '{ext}'",
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -599,9 +526,9 @@ async def approve_and_mask(request: ApprovalRequest):
        from the request if storage is not yet available).
     3. Filters to the entity IDs the user approved.
     4. Applies any replacement-text overrides the user made in the ReviewTable.
-    5. Calls MaskingService in a thread pool (CPU-bound, synchronous).
-    6. Saves the masked PDF back to UC storage.
-    7. Updates the session status to "completed".
+    5. Delegates masking to the Databricks MaskingModel endpoint, which writes
+       masked.pdf back to UC directly.
+    6. Updates the session status to "completed".
     """
     sm = _require_session_manager()
     t0 = time.monotonic()
@@ -708,20 +635,27 @@ async def approve_and_mask(request: ApprovalRequest):
             if entity.get("id") in updates:
                 entity["replacement_text"] = updates[entity["id"]]
 
-    # --- Apply masking ---
+    # --- Delegate masking to Databricks ---
     logger.info(
         "Masking %d entities for session %s", len(entities_to_mask), request.session_id
     )
 
-    use_databricks_masking = (
-        not MOCK_DATABRICKS
-        and bool(DATABRICKS_MASKING_ENDPOINT)
-    )
+    if not MOCK_DATABRICKS and not DATABRICKS_MASKING_ENDPOINT:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "DATABRICKS_MASKING_ENDPOINT is not configured. "
+                "Set the environment variable or enable MOCK_DATABRICKS=true."
+            ),
+        )
 
-    if use_databricks_masking:
-        # Delegate masking to the Databricks MaskingModel endpoint.
+    if MOCK_DATABRICKS and not DATABRICKS_MASKING_ENDPOINT:
+        # Local dev / test mode: skip real masking, just update status.
+        logger.info("Mock mode: skipping masking for session %s", request.session_id)
+    else:
+        # Production: POST to the Databricks MaskingModel endpoint.
         # The model reads the original file from UC, applies redactions,
-        # and writes masked.pdf back to UC — no need to save_file here.
+        # and writes masked.pdf back to UC — no local save_file needed.
         import json as _json
         payload = {
             "dataframe_records": [
@@ -766,42 +700,13 @@ async def approve_and_mask(request: ApprovalRequest):
                 detail="Failed to apply redactions via Databricks.",
             )
 
-        # Masked PDF is in UC — just update the session status.
-        try:
-            sm.update_session(request.session_id, status="completed")
-        except Exception as exc:
-            logger.warning(
-                "Could not update session status for %s: %s", request.session_id, exc
-            )
-
-    else:
-        # In-process masking path (MOCK_DATABRICKS or no masking endpoint configured).
-        try:
-            masked_pdf_bytes: bytes = await run_in_threadpool(
-                _apply_masking_sync,
-                original_bytes,
-                original_ext,
-                entities_to_mask,
-            )
-        except HTTPException:
-            raise  # propagate 422 / 501 from _apply_masking_sync
-        except Exception as exc:
-            logger.error("Masking failed for session %s: %s", request.session_id, exc, exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to apply redactions to the document.",
-            )
-
-        # Save masked PDF to UC and update status.
-        try:
-            sm.save_file(request.session_id, "masked.pdf", masked_pdf_bytes)
-            sm.update_session(request.session_id, status="completed")
-        except NotImplementedError:
-            pass  # Non-fatal
-        except Exception as exc:
-            logger.warning(
-                "Could not persist masked PDF for session %s: %s", request.session_id, exc
-            )
+    # Update session status (masked.pdf is already in UC via the Databricks model).
+    try:
+        sm.update_session(request.session_id, status="completed")
+    except Exception as exc:
+        logger.warning(
+            "Could not update session status for %s: %s", request.session_id, exc
+        )
 
     elapsed = round(time.monotonic() - t0, 2)
     logger.info(

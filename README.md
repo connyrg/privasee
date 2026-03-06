@@ -57,10 +57,7 @@ privasee/
 │   ├── app/
 │   │   ├── main.py          FastAPI application — all endpoints
 │   │   ├── models.py        Pydantic request/response models
-│   │   ├── session_manager.py  UC volume session persistence (Files REST API)
-│   │   └── services/
-│   │       ├── masking_service.py   Visual PDF/image masking (PyMuPDF)
-│   │       └── mapping_manager.py  Consistent entity replacement
+│   │   └── session_manager.py  UC volume session persistence (Files REST API)
 │   ├── tests/
 │   ├── scripts/
 │   │   └── e2e_upload_test.py   End-to-end workflow validation script
@@ -68,7 +65,10 @@ privasee/
 │   └── .env.template
 ├── databricks/
 │   ├── model/               MLflow PyFunc model source
-│   │   ├── document_intelligence.py  Main model — OCR + entity extraction pipeline
+│   │   ├── document_intelligence.py  Document intelligence model — OCR + entity extraction
+│   │   ├── masking_model.py          Masking model — applies redactions to PDF in UC
+│   │   ├── masking_service.py        PyMuPDF redaction engine (used by masking model)
+│   │   ├── fake_data_service.py      Faker-based replacement text generator
 │   │   ├── ocr_service.py            Azure Document Intelligence OCR
 │   │   ├── openai_service.py         Azure OpenAI vision entity extraction
 │   │   ├── claude_service.py         Claude vision entity extraction (alternative)

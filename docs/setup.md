@@ -57,8 +57,9 @@ API_BASE_URL=http://localhost:8000 python app.py
 | Variable | Required | Description |
 |---|---|---|
 | `DATABRICKS_HOST` | Yes | Workspace URL, e.g. `https://adb-xxxx.azuredatabricks.net` |
-| `DATABRICKS_TOKEN` | Yes | PAT with UC Files API permissions |
-| `DATABRICKS_MODEL_ENDPOINT` | Yes | Full Model Serving invocation URL |
+| `DATABRICKS_TOKEN` | Yes | PAT with UC Files API and Model Serving permissions |
+| `DATABRICKS_MODEL_ENDPOINT` | Yes | Document Intelligence Model Serving invocation URL |
+| `DATABRICKS_MASKING_ENDPOINT` | Yes | Masking Model Serving invocation URL |
 | `UC_VOLUME_PATH` | Yes | UC volume base path, e.g. `/Volumes/catalog/schema/privasee_sessions` |
 | `ALLOWED_ORIGINS` | Yes (prod) | Comma-separated CORS origins, e.g. `https://connect.example.com` |
 | `MOCK_DATABRICKS` | No | Set `true` to skip Databricks and return mock entities (local dev only) |
@@ -83,20 +84,19 @@ CREATE VOLUME <catalog>.<schema>.privasee_sessions;
 
 Set `UC_VOLUME_PATH=/Volumes/<catalog>/<schema>/privasee_sessions` in the backend env.
 
-### Model Serving endpoint
+### Document Intelligence Model Serving endpoint
 
 1. Configure Databricks secrets for Azure and AI credentials (see `databricks/notebooks/register_model.py`)
-2. Run `databricks/notebooks/register_model.py` to register the MLflow model in Unity Catalog
-3. Run `databricks/notebooks/deploy_endpoint.py` to create the Model Serving endpoint
-4. Note the endpoint invocation URL and set it as `DATABRICKS_MODEL_ENDPOINT` in the backend env
-5. Add `DATABRICKS_HOST` and `DATABRICKS_TOKEN` as environment variables on the model serving endpoint config (required for the model to fetch documents from the UC volume)
+2. Run `databricks/notebooks/register_model.py` to register `DocumentIntelligenceModel` in Unity Catalog
+3. Run `databricks/notebooks/deploy_endpoint.py` to create the endpoint
+4. Note the invocation URL and set it as `DATABRICKS_MODEL_ENDPOINT` in the backend env
 
-### Required secrets in the Databricks endpoint environment
+Required environment variables on the endpoint:
 
 | Variable | Description |
 |---|---|
 | `DATABRICKS_HOST` | Workspace URL (same as backend) |
-| `DATABRICKS_TOKEN` | Service principal token with Files API read access to the UC volume |
+| `DATABRICKS_TOKEN` | Service principal token with Files API read/write access to the UC volume |
 | `UC_VOLUME_PATH` | Same value as backend |
 | `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT` | Azure DI endpoint URL |
 | `AZURE_DOCUMENT_INTELLIGENCE_KEY` | Azure DI API key |
@@ -104,6 +104,20 @@ Set `UC_VOLUME_PATH=/Volumes/<catalog>/<schema>/privasee_sessions` in the backen
 | `AZURE_OPENAI_API_KEY` | Required when `VISION_SERVICE_PROVIDER=openai` |
 | `AZURE_OPENAI_ENDPOINT` | Required when `VISION_SERVICE_PROVIDER=openai` |
 | `ANTHROPIC_API_KEY` | Required when `VISION_SERVICE_PROVIDER=claude` |
+
+### Masking Model Serving endpoint
+
+1. Run `databricks/notebooks/register_model.py` (selecting `MaskingModel`) to register it in Unity Catalog
+2. Run `databricks/notebooks/deploy_endpoint.py` to create a separate masking endpoint
+3. Note the invocation URL and set it as `DATABRICKS_MASKING_ENDPOINT` in the backend env
+
+Required environment variables on the endpoint:
+
+| Variable | Description |
+|---|---|
+| `DATABRICKS_HOST` | Workspace URL |
+| `DATABRICKS_TOKEN` | Service principal token with Files API read/write access to the UC volume |
+| `UC_VOLUME_PATH` | Same value as backend |
 
 ## 6. Run the end-to-end test
 

@@ -2,27 +2,26 @@
 Integration tests for POST /api/approve-and-mask.
 
 Uses the `client` fixture (httpx.AsyncClient + ASGITransport) and
-`override_databricks_dependency`.  The masking pipeline (_apply_masking_sync)
-is patched in every test so no real image/PDF processing (and therefore no
-poppler or OpenCV dependency) is required at this layer — those behaviours
-are covered by the MaskingService unit tests.
+`override_databricks_dependency` (MOCK_DATABRICKS=True, no masking endpoint).
 
-Session storage calls (get_session, get_file, get_entities, save_file,
-update_session) are all handled via the mock_session_manager from conftest.
+In mock mode the masking step is skipped — the endpoint filters entities,
+applies user edits, and updates the session status to "completed" without
+calling Databricks.  Tests that need to verify which entities would be sent
+to Databricks set DATABRICKS_MASKING_ENDPOINT via monkeypatch and mock the
+httpx call.
+
+Session storage calls (get_session, get_file, get_entities, update_session)
+are all handled via the mock_session_manager from conftest.
 """
 
+import json
+
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx
 
 import app.main as main_module
-
-
-# ---------------------------------------------------------------------------
-# Module-level constants
-# ---------------------------------------------------------------------------
-
-# Minimal valid PDF bytes returned by the patched masking helper.
-_FAKE_PDF_BYTES = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\n%%EOF"
 
 # Two representative stored entity dicts (shape matches model_dump() output).
 _ENTITY_1 = {
@@ -70,14 +69,13 @@ async def test_approve_and_mask_returns_masked_pdf_url(
     sm.get_file.return_value = b"fake image bytes"
     sm.get_entities.return_value = [_ENTITY_1]
 
-    with patch("app.main._apply_masking_sync", return_value=_FAKE_PDF_BYTES):
-        response = await client.post(
-            "/api/approve-and-mask",
-            json={
-                "session_id": "test-session-id",
-                "approved_entity_ids": ["entity-1"],
-            },
-        )
+    response = await client.post(
+        "/api/approve-and-mask",
+        json={
+            "session_id": "test-session-id",
+            "approved_entity_ids": ["entity-1"],
+        },
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -90,21 +88,32 @@ async def test_approve_and_mask_returns_masked_pdf_url(
 
 @pytest.mark.integration
 async def test_approve_and_mask_only_redacts_approved_entities(
-    client, override_databricks_dependency
+    client, override_databricks_dependency, monkeypatch
 ):
-    """Only the entity IDs listed in approved_entity_ids are passed to masking."""
+    """Only the entity IDs listed in approved_entity_ids are sent to masking."""
     sm = override_databricks_dependency
     sm.get_session.return_value = _make_session()
     sm.get_file.return_value = b"fake image bytes"
     sm.get_entities.return_value = [_ENTITY_1, _ENTITY_2]
 
-    captured: list = []
+    monkeypatch.setattr(main_module, "MOCK_DATABRICKS", False)
+    monkeypatch.setattr(main_module, "DATABRICKS_MASKING_ENDPOINT", "https://fake-masking/invocations")
 
-    def _capture(file_bytes, ext, entities):
-        captured.extend(entities)
-        return _FAKE_PDF_BYTES
+    captured_payloads: list = []
 
-    with patch("app.main._apply_masking_sync", side_effect=_capture):
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+
+    async def _capture_post(url, **kw):
+        captured_payloads.append(kw.get("json", {}))
+        return mock_resp
+
+    mock_http = AsyncMock()
+    mock_http.post = _capture_post
+
+    with patch("app.main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_http)
+        MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
         response = await client.post(
             "/api/approve-and-mask",
             json={
@@ -114,27 +123,40 @@ async def test_approve_and_mask_only_redacts_approved_entities(
         )
 
     assert response.status_code == 200
-    assert len(captured) == 1, f"Expected 1 entity passed to masking, got {len(captured)}"
-    assert captured[0]["id"] == "entity-1"
+    assert len(captured_payloads) == 1
+    sent_entities = json.loads(captured_payloads[0]["dataframe_records"][0]["entities_to_mask"])
+    assert len(sent_entities) == 1
+    assert sent_entities[0]["id"] == "entity-1"
 
 
 @pytest.mark.integration
 async def test_approve_and_mask_applies_entity_updates(
-    client, override_databricks_dependency
+    client, override_databricks_dependency, monkeypatch
 ):
-    """replacement_text from updated_entities overrides the stored value."""
+    """replacement_text from updated_entities overrides the stored value before sending to Databricks."""
     sm = override_databricks_dependency
     sm.get_session.return_value = _make_session()
     sm.get_file.return_value = b"fake image bytes"
     sm.get_entities.return_value = [{**_ENTITY_1, "replacement_text": "Original Text"}]
 
-    captured: list = []
+    monkeypatch.setattr(main_module, "MOCK_DATABRICKS", False)
+    monkeypatch.setattr(main_module, "DATABRICKS_MASKING_ENDPOINT", "https://fake-masking/invocations")
 
-    def _capture(file_bytes, ext, entities):
-        captured.extend(entities)
-        return _FAKE_PDF_BYTES
+    captured_payloads: list = []
 
-    with patch("app.main._apply_masking_sync", side_effect=_capture):
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+
+    async def _capture_post(url, **kw):
+        captured_payloads.append(kw.get("json", {}))
+        return mock_resp
+
+    mock_http = AsyncMock()
+    mock_http.post = _capture_post
+
+    with patch("app.main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_http)
+        MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
         response = await client.post(
             "/api/approve-and-mask",
             json={
@@ -156,9 +178,11 @@ async def test_approve_and_mask_applies_entity_updates(
         )
 
     assert response.status_code == 200
-    assert len(captured) == 1
-    assert captured[0]["replacement_text"] == "Updated Text", (
-        f"Expected 'Updated Text', got: {captured[0]['replacement_text']!r}"
+    assert len(captured_payloads) == 1
+    sent_entities = json.loads(captured_payloads[0]["dataframe_records"][0]["entities_to_mask"])
+    assert len(sent_entities) == 1
+    assert sent_entities[0]["replacement_text"] == "Updated Text", (
+        f"Expected 'Updated Text', got: {sent_entities[0]['replacement_text']!r}"
     )
 
 
@@ -172,14 +196,13 @@ async def test_approve_and_mask_updates_status_to_completed(
     sm.get_file.return_value = b"fake image bytes"
     sm.get_entities.return_value = [_ENTITY_1]
 
-    with patch("app.main._apply_masking_sync", return_value=_FAKE_PDF_BYTES):
-        response = await client.post(
-            "/api/approve-and-mask",
-            json={
-                "session_id": "test-session-id",
-                "approved_entity_ids": ["entity-1"],
-            },
-        )
+    response = await client.post(
+        "/api/approve-and-mask",
+        json={
+            "session_id": "test-session-id",
+            "approved_entity_ids": ["entity-1"],
+        },
+    )
 
     assert response.status_code == 200
     sm.update_session.assert_called_with("test-session-id", status="completed")
@@ -263,25 +286,24 @@ async def test_approve_and_mask_returns_400_when_no_approved_entities_match(
 
 
 @pytest.mark.integration
-async def test_approve_and_mask_save_output_failure_is_nonfatal(
+async def test_approve_and_mask_update_session_failure_is_nonfatal(
     client, override_databricks_dependency
 ):
-    """A save_file failure when persisting the masked PDF must not prevent a 200
-    response — the error is logged but the endpoint still returns successfully."""
+    """An update_session failure after masking must not prevent a 200 response —
+    the error is logged but the endpoint still returns successfully."""
     sm = override_databricks_dependency
     sm.get_session.return_value = _make_session()
     sm.get_file.return_value = b"fake image bytes"
     sm.get_entities.return_value = [_ENTITY_1]
-    sm.save_file.side_effect = Exception("Storage unavailable")
+    sm.update_session.side_effect = Exception("Storage unavailable")
 
-    with patch("app.main._apply_masking_sync", return_value=_FAKE_PDF_BYTES):
-        response = await client.post(
-            "/api/approve-and-mask",
-            json={
-                "session_id": "test-session-id",
-                "approved_entity_ids": ["entity-1"],
-            },
-        )
+    response = await client.post(
+        "/api/approve-and-mask",
+        json={
+            "session_id": "test-session-id",
+            "approved_entity_ids": ["entity-1"],
+        },
+    )
 
     assert response.status_code == 200
     body = response.json()
