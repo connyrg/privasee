@@ -223,6 +223,7 @@ class HealthResponse(BaseModel):
     version: str = "2.0.0"
     mock_databricks: bool = False
     databricks_endpoint_configured: bool = False
+    databricks_masking_endpoint_configured: bool = False
     uc_volume_configured: bool = False
 
 

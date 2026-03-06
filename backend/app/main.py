@@ -3,17 +3,19 @@ PrivaSee FastAPI Backend — orchestration layer.
 
 This module manages the user-facing workflow.  It does NOT perform any
 document intelligence — all OCR and entity extraction is delegated to the
-Databricks Model Serving endpoint.  Masking is the sole processing step
-that runs in-process, using the unchanged MaskingService from the PoC.
+Databricks Model Serving endpoint.  When DATABRICKS_MASKING_ENDPOINT is set,
+masking is also delegated to the Databricks MaskingModel; otherwise it runs
+in-process using MaskingService.
 
 Environment variables (see .env.template):
-    DATABRICKS_HOST             Workspace URL
-    DATABRICKS_TOKEN            Personal access token
-    DATABRICKS_MODEL_ENDPOINT   Model Serving invocation URL
-    UC_VOLUME_PATH              /Volumes/catalog/schema/sessions
-    ALLOWED_ORIGINS             Comma-separated list of CORS origins
-    MOCK_DATABRICKS             "true" → skip Databricks, return fake entities
-    MAX_FILE_SIZE_MB            Upload size cap (default 10)
+    DATABRICKS_HOST               Workspace URL
+    DATABRICKS_TOKEN              Personal access token
+    DATABRICKS_MODEL_ENDPOINT     Model Serving invocation URL (document intelligence)
+    DATABRICKS_MASKING_ENDPOINT   Model Serving invocation URL (masking model)
+    UC_VOLUME_PATH                /Volumes/catalog/schema/sessions
+    ALLOWED_ORIGINS               Comma-separated list of CORS origins
+    MOCK_DATABRICKS               "true" → skip Databricks, return fake entities
+    MAX_FILE_SIZE_MB              Upload size cap (default 10)
 
 Deploy:
 export http_proxy="" && export https_proxy="" && rsconnect deploy fastapi  --server  https://sds-posit-connect-prod.int.corp.sun/ --api-key $POSIT_CONNECT_API_KEY -p venv/bin/python --entrypoint app.main:app . --insecure  --exclude venv/
@@ -70,6 +72,7 @@ logger = logging.getLogger(__name__)
 DATABRICKS_HOST: str = os.getenv("DATABRICKS_HOST", "")
 DATABRICKS_TOKEN: str = os.getenv("DATABRICKS_TOKEN", "")
 DATABRICKS_MODEL_ENDPOINT: str = os.getenv("DATABRICKS_MODEL_ENDPOINT", "")
+DATABRICKS_MASKING_ENDPOINT: str = os.getenv("DATABRICKS_MASKING_ENDPOINT", "")
 UC_VOLUME_PATH: str = os.getenv("UC_VOLUME_PATH", "")
 
 ALLOWED_ORIGINS: List[str] = [
@@ -329,6 +332,7 @@ async def health_check():
         version="2.0.0",
         mock_databricks=MOCK_DATABRICKS,
         databricks_endpoint_configured=bool(DATABRICKS_MODEL_ENDPOINT),
+        databricks_masking_endpoint_configured=bool(DATABRICKS_MASKING_ENDPOINT),
         uc_volume_configured=bool(UC_VOLUME_PATH),
     )
 
@@ -704,36 +708,100 @@ async def approve_and_mask(request: ApprovalRequest):
             if entity.get("id") in updates:
                 entity["replacement_text"] = updates[entity["id"]]
 
-    # --- Apply masking in a thread pool (blocking I/O + CPU) ---
+    # --- Apply masking ---
     logger.info(
         "Masking %d entities for session %s", len(entities_to_mask), request.session_id
     )
-    try:
-        masked_pdf_bytes: bytes = await run_in_threadpool(
-            _apply_masking_sync,
-            original_bytes,
-            original_ext,
-            entities_to_mask,
-        )
-    except HTTPException:
-        raise  # propagate 422 / 501 from _apply_masking_sync
-    except Exception as exc:
-        logger.error("Masking failed for session %s: %s", request.session_id, exc, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to apply redactions to the document.",
-        )
 
-    # --- Save masked PDF to UC ---
-    try:
-        sm.save_file(request.session_id, "masked.pdf", masked_pdf_bytes)
-        sm.update_session(request.session_id, status="completed")
-    except NotImplementedError:
-        pass  # Non-fatal — the masked PDF is returned in the response
-    except Exception as exc:
-        logger.warning(
-            "Could not persist masked PDF for session %s: %s", request.session_id, exc
-        )
+    use_databricks_masking = (
+        not MOCK_DATABRICKS
+        and bool(DATABRICKS_MASKING_ENDPOINT)
+    )
+
+    if use_databricks_masking:
+        # Delegate masking to the Databricks MaskingModel endpoint.
+        # The model reads the original file from UC, applies redactions,
+        # and writes masked.pdf back to UC — no need to save_file here.
+        import json as _json
+        payload = {
+            "dataframe_records": [
+                {
+                    "session_id": request.session_id,
+                    "entities_to_mask": _json.dumps(entities_to_mask),
+                }
+            ]
+        }
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                resp = await client.post(
+                    DATABRICKS_MASKING_ENDPOINT,
+                    json=payload,
+                    headers={
+                        "Authorization": f"Bearer {DATABRICKS_TOKEN}",
+                        "Content-Type": "application/json",
+                    },
+                )
+                resp.raise_for_status()
+        except httpx.TimeoutException:
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="Masking request to Databricks timed out.",
+            )
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "Databricks masking endpoint returned %s for session %s",
+                exc.response.status_code, request.session_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Databricks masking endpoint returned an error.",
+            )
+        except Exception as exc:
+            logger.error(
+                "Masking via Databricks failed for session %s: %s",
+                request.session_id, exc, exc_info=True,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to apply redactions via Databricks.",
+            )
+
+        # Masked PDF is in UC — just update the session status.
+        try:
+            sm.update_session(request.session_id, status="completed")
+        except Exception as exc:
+            logger.warning(
+                "Could not update session status for %s: %s", request.session_id, exc
+            )
+
+    else:
+        # In-process masking path (MOCK_DATABRICKS or no masking endpoint configured).
+        try:
+            masked_pdf_bytes: bytes = await run_in_threadpool(
+                _apply_masking_sync,
+                original_bytes,
+                original_ext,
+                entities_to_mask,
+            )
+        except HTTPException:
+            raise  # propagate 422 / 501 from _apply_masking_sync
+        except Exception as exc:
+            logger.error("Masking failed for session %s: %s", request.session_id, exc, exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to apply redactions to the document.",
+            )
+
+        # Save masked PDF to UC and update status.
+        try:
+            sm.save_file(request.session_id, "masked.pdf", masked_pdf_bytes)
+            sm.update_session(request.session_id, status="completed")
+        except NotImplementedError:
+            pass  # Non-fatal
+        except Exception as exc:
+            logger.warning(
+                "Could not persist masked PDF for session %s: %s", request.session_id, exc
+            )
 
     elapsed = round(time.monotonic() - t0, 2)
     logger.info(
