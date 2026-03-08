@@ -20,11 +20,14 @@ import io
 import base64
 from typing import List, Dict, Any
 from enum import Enum
+import logging
 
 import fitz  # PyMuPDF
 from docx import Document
 from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.core.credentials import AzureKeyCredential
+
+logger = logging.getLogger(__name__)
 
 
 class PageSource(str, Enum):
@@ -53,20 +56,33 @@ class OCRService:
     RENDER_ZOOM_FACTOR = 2.0
     
     def __init__(self):
-        """Initialize OCR service with Azure Document Intelligence credentials"""
+        """
+        Initialize OCR service with optional Azure Document Intelligence credentials.
+        
+        ADI credentials are only required for:
+        - Scanned PDF pages (image-only, no text layer)
+        - Image files (png, jpg, jpeg)
+        
+        Digital PDFs and DOCX files work without ADI.
+        """
         self.adi_endpoint = os.environ.get("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT")
         self.adi_key = os.environ.get("AZURE_DOCUMENT_INTELLIGENCE_KEY")
         
-        if not self.adi_endpoint or not self.adi_key:
-            raise ValueError(
-                "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT and "
-                "AZURE_DOCUMENT_INTELLIGENCE_KEY must be set"
-            )
-        
-        self.adi_client = DocumentIntelligenceClient(
-            endpoint=self.adi_endpoint,
-            credential=AzureKeyCredential(self.adi_key)
-        )
+        # Make ADI client optional - only create if credentials are provided
+        if self.adi_endpoint and self.adi_key and \
+           self.adi_endpoint != "dummy_endpoint" and self.adi_key != "dummy_key":
+            try:
+                self.adi_client = DocumentIntelligenceClient(
+                    endpoint=self.adi_endpoint,
+                    credential=AzureKeyCredential(self.adi_key)
+                )
+                logger.info("Azure Document Intelligence client initialized")
+            except Exception as e:
+                logger.warning(f"Failed to initialize ADI client: {e}. Will only work with digital PDFs/DOCX.")
+                self.adi_client = None
+        else:
+            logger.info("No ADI credentials provided. Service will work with digital PDFs and DOCX only.")
+            self.adi_client = None
     
     def process_document(
         self, 
@@ -147,6 +163,8 @@ class OCRService:
         
         Uses PyMuPDF's get_text("words") to get word-level bounding boxes.
         Also renders page to PNG for vision API processing.
+        
+        No Azure Document Intelligence required - uses PyMuPDF only.
         """
         # Get word-level information with bounding boxes
         words_data = page.get_text("words")
@@ -189,7 +207,16 @@ class OCRService:
         """
         Render scanned PDF page to PNG and OCR with Azure Document Intelligence.
         Also includes the PNG as base64 for vision API processing.
+        
+        Requires Azure Document Intelligence credentials.
         """
+        if not self.adi_client:
+            raise ValueError(
+                "Scanned PDF page detected but no Azure Document Intelligence credentials provided. "
+                "Please set AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT and AZURE_DOCUMENT_INTELLIGENCE_KEY "
+                "environment variables with valid credentials."
+            )
+        
         # Render page to PNG at 2x zoom (≈144 DPI)
         mat = fitz.Matrix(self.RENDER_ZOOM_FACTOR, self.RENDER_ZOOM_FACTOR)
         pix = page.get_pixmap(matrix=mat)
@@ -217,6 +244,8 @@ class OCRService:
         Note: python-docx doesn't provide word-level bounding boxes,
         so we return paragraph-level text with empty words array.
         No visual representation is provided (image_base64 = None).
+        
+        No Azure Document Intelligence required.
         """
         doc = Document(io.BytesIO(docx_bytes))
         
@@ -238,7 +267,16 @@ class OCRService:
         """
         OCR an image file with Azure Document Intelligence.
         Also includes the image as base64 for vision API processing.
+        
+        Requires Azure Document Intelligence credentials.
         """
+        if not self.adi_client:
+            raise ValueError(
+                "Image file detected but no Azure Document Intelligence credentials provided. "
+                "Please set AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT and AZURE_DOCUMENT_INTELLIGENCE_KEY "
+                "environment variables with valid credentials."
+            )
+        
         # Encode image to base64 for vision API
         image_b64 = base64.b64encode(image_bytes).decode('utf-8')
         
@@ -259,11 +297,11 @@ class OCRService:
         
         Returns:
             {
-                "text": str,
-                "words": [{"text": str, "confidence": float, "bounding_box": {...}}]
+                "text": str,  # Full page text
+                "words": [...]  # Word-level bounding boxes
             }
         """
-        # Call Azure Document Intelligence prebuilt-read model
+        # Use prebuilt-read model for layout-aware OCR
         poller = self.adi_client.begin_analyze_document(
             "prebuilt-read",
             analyze_request=image_bytes,
@@ -271,61 +309,45 @@ class OCRService:
         )
         result = poller.result()
         
-        # Extract text and words with bounding boxes
-        all_text = []
-        all_words = []
+        # Extract text and words
+        full_text = result.content
+        words = []
         
         for page in result.pages:
-            # Extract words with bounding boxes
             for word in page.words:
-                # Convert ADI polygon format to our standard bounding box format
+                # Convert ADI polygon to bounding box
                 bbox = self._polygon_to_bbox(word.polygon)
-                
-                all_words.append({
+                words.append({
                     "text": word.content,
-                    "confidence": word.confidence if hasattr(word, 'confidence') else 1.0,
+                    "confidence": word.confidence,
                     "bounding_box": bbox
                 })
-                
-                all_text.append(word.content)
         
         return {
-            "text": " ".join(all_text),
-            "words": all_words
+            "text": full_text,
+            "words": words
         }
     
     def _polygon_to_bbox(self, polygon: List[float]) -> Dict[str, float]:
         """
-        Convert ADI polygon format to standard bounding box format.
+        Convert ADI polygon (8 points: x1,y1,x2,y2,x3,y3,x4,y4) to bounding box.
         
-        ADI returns polygons as a flat list of coordinates: [x1, y1, x2, y2, x3, y3, x4, y4]
-        representing the four corners of the bounding box (usually a rectangle).
-        
-        We convert to: {"x": top_left_x, "y": top_left_y, "width": w, "height": h}
-        
-        Args:
-            polygon: List of 8 floats [x1, y1, x2, y2, x3, y3, x4, y4]
-        
-        Returns:
-            Bounding box dict with x, y, width, height
+        Returns: {"x": x_min, "y": y_min, "width": width, "height": height}
         """
-        # Handle empty or invalid polygons
         if not polygon or len(polygon) < 8:
             return {"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0}
         
-        # Extract x and y coordinates
-        x_coords = [polygon[i] for i in range(0, len(polygon), 2)]
-        y_coords = [polygon[i] for i in range(1, len(polygon), 2)]
+        x_coords = [polygon[i] for i in range(0, 8, 2)]
+        y_coords = [polygon[i] for i in range(1, 8, 2)]
         
-        # Calculate bounding box
         x_min = min(x_coords)
         y_min = min(y_coords)
         x_max = max(x_coords)
         y_max = max(y_coords)
         
         return {
-            "x": float(x_min),
-            "y": float(y_min),
-            "width": float(x_max - x_min),
-            "height": float(y_max - y_min)
+            "x": x_min,
+            "y": y_min,
+            "width": x_max - x_min,
+            "height": y_max - y_min
         }

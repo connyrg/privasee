@@ -38,12 +38,12 @@ class TestOCRServiceInit(unittest.TestCase):
             self.assertEqual(service.adi_key, 'test-key-123')
     
     def test_init_missing_credentials(self):
-        """Test initialization fails with missing credentials"""
+        """Test initialization succeeds without credentials (for digital PDFs/DOCX only)"""
         with patch.dict(os.environ, {}, clear=True):
-            with self.assertRaises(ValueError) as context:
-                OCRService()
-            self.assertIn("AZURE_DOCUMENT_INTELLIGENCE", str(context.exception))
-
+            service = OCRService()
+            self.assertIsNone(service.adi_client)
+            self.assertIsNone(service.adi_endpoint)
+            self.assertIsNone(service.adi_key)
 
 class TestPolygonToBBox(unittest.TestCase):
     """Test bounding box conversion from ADI polygon format"""
@@ -186,6 +186,7 @@ class TestScannedPDFProcessing(unittest.TestCase):
         
         # Mock ADI OCR response
         mock_adi_result = Mock()
+        mock_adi_result.content = "Scanned"  # Set the text content
         mock_adi_page = Mock()
         
         mock_word1 = Mock()
@@ -274,6 +275,7 @@ class TestImageProcessing(unittest.TestCase):
         """Test OCR processing of image files"""
         # Mock ADI OCR response
         mock_adi_result = Mock()
+        mock_adi_result.content = "Image Text"  # Set the text content
         mock_adi_page = Mock()
         
         mock_word1 = Mock()

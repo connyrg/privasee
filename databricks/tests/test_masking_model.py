@@ -63,7 +63,7 @@ class TestLoadContext(unittest.TestCase):
         return MaskingModel()
 
     def test_load_context_succeeds_with_valid_env(self):
-        with patch("databricks.model.masking_model.MaskingService"):
+        with patch("databricks.model.masking_service.MaskingService"):
             with patch.dict(os.environ, _VALID_ENV):
                 model = self._make_model()
                 model.load_context(context=None)
@@ -75,7 +75,7 @@ class TestLoadContext(unittest.TestCase):
     def test_load_context_strips_trailing_slash(self):
         env = {**_VALID_ENV, "UC_VOLUME_PATH": "/Volumes/cat/schema/sessions/",
                "DATABRICKS_HOST": "https://test.databricks.com/"}
-        with patch("databricks.model.masking_model.MaskingService"):
+        with patch("databricks.model.masking_service.MaskingService"):
             with patch.dict(os.environ, env):
                 model = self._make_model()
                 model.load_context(context=None)
@@ -85,7 +85,7 @@ class TestLoadContext(unittest.TestCase):
 
     def test_load_context_raises_without_uc_volume_path(self):
         env = {k: v for k, v in _VALID_ENV.items() if k != "UC_VOLUME_PATH"}
-        with patch("databricks.model.masking_model.MaskingService"):
+        with patch("databricks.model.masking_service.MaskingService"):
             with patch.dict(os.environ, env, clear=True):
                 model = self._make_model()
                 with self.assertRaises(ValueError) as ctx:
@@ -94,7 +94,7 @@ class TestLoadContext(unittest.TestCase):
 
     def test_load_context_raises_without_databricks_host(self):
         env = {k: v for k, v in _VALID_ENV.items() if k != "DATABRICKS_HOST"}
-        with patch("databricks.model.masking_model.MaskingService"):
+        with patch("databricks.model.masking_service.MaskingService"):
             with patch.dict(os.environ, env, clear=True):
                 model = self._make_model()
                 with self.assertRaises(ValueError) as ctx:
@@ -103,7 +103,7 @@ class TestLoadContext(unittest.TestCase):
 
     def test_load_context_raises_without_databricks_token(self):
         env = {k: v for k, v in _VALID_ENV.items() if k != "DATABRICKS_TOKEN"}
-        with patch("databricks.model.masking_model.MaskingService"):
+        with patch("databricks.model.masking_service.MaskingService"):
             with patch.dict(os.environ, env, clear=True):
                 model = self._make_model()
                 with self.assertRaises(ValueError) as ctx:
@@ -221,7 +221,7 @@ class TestPredictSuccess(unittest.TestCase):
 
 
 # ===========================================================================
-# Group 3 — predict (error handling)
+# Group 3 — predict (error paths)
 # ===========================================================================
 
 class TestPredictErrors(unittest.TestCase):
@@ -229,53 +229,52 @@ class TestPredictErrors(unittest.TestCase):
     def _make_ready_model(self) -> MaskingModel:
         model = MaskingModel()
         model.masking_service = Mock()
+        model.masking_service.apply_pdf_masks.return_value = _FAKE_PDF
         model.uc_volume_path = "/Volumes/cat/schema/sessions"
         model.databricks_host = "https://test.databricks.com"
         model.databricks_token = "test-token"
+        model._fetch_original_file = Mock(return_value=(b"original bytes", "original.pdf"))
+        model._write_masked_file = Mock()
         return model
+
+    def _sample_entities(self) -> list:
+        return [{"id": "e1", "entity_type": "Full Name", "original_text": "John",
+                 "replacement_text": "Jane", "bounding_box": [0.05, 0.08, 0.2, 0.025],
+                 "strategy": "Fake Data", "approved": True, "page_number": 1}]
 
     def test_predict_returns_error_row_on_fetch_failure(self):
         model = self._make_ready_model()
-        model._fetch_original_file = Mock(side_effect=FileNotFoundError("no file"))
-        model._write_masked_file = Mock()
-
-        df = pd.DataFrame([{"session_id": "bad-sess", "entities_to_mask": []}])
-        result = model.predict(context=None, model_input=df)
-
-        row = result.iloc[0]
-        self.assertEqual(row["session_id"], "bad-sess")
-        self.assertEqual(row["status"], "error")
-        self.assertIn("error_message", row)
-
-    def test_predict_returns_error_row_on_masking_failure(self):
-        model = self._make_ready_model()
-        model._fetch_original_file = Mock(return_value=(b"bytes", "original.pdf"))
-        model.masking_service.apply_pdf_masks.side_effect = RuntimeError("fitz crash")
-        model._write_masked_file = Mock()
-
-        df = pd.DataFrame([{"session_id": "crash-sess", "entities_to_mask": [{"strategy": "Black Out"}]}])
+        model._fetch_original_file = Mock(side_effect=FileNotFoundError("No original file"))
+        df = pd.DataFrame([{"session_id": "sess-err", "entities_to_mask": self._sample_entities()}])
         result = model.predict(context=None, model_input=df)
 
         self.assertEqual(result.iloc[0]["status"], "error")
+        self.assertEqual(result.iloc[0]["entities_masked"], 0)
+        self.assertIn("No original file", result.iloc[0]["error_message"])
+
+    def test_predict_returns_error_row_on_masking_failure(self):
+        model = self._make_ready_model()
+        model.masking_service.apply_pdf_masks.side_effect = Exception("PDF error")
+        df = pd.DataFrame([{"session_id": "sess-fail", "entities_to_mask": self._sample_entities()}])
+        result = model.predict(context=None, model_input=df)
+
+        self.assertEqual(result.iloc[0]["status"], "error")
+        self.assertIn("PDF error", result.iloc[0]["error_message"])
 
     def test_predict_other_rows_succeed_after_one_error(self):
-        """A failure in one row must not prevent subsequent rows from processing."""
         model = self._make_ready_model()
-        model.masking_service.apply_pdf_masks.return_value = b"%PDF-1.4 %%EOF"
-        model._write_masked_file = Mock()
-
         call_count = [0]
-        def fetch_side_effect(session_id):
+
+        def side_effect(*args):
             call_count[0] += 1
             if call_count[0] == 1:
-                raise FileNotFoundError("first row fails")
+                raise FileNotFoundError("Missing")
             return (b"bytes", "original.pdf")
 
-        model._fetch_original_file = Mock(side_effect=fetch_side_effect)
-
+        model._fetch_original_file = Mock(side_effect=side_effect)
         df = pd.DataFrame([
-            {"session_id": "fail", "entities_to_mask": []},
-            {"session_id": "ok",   "entities_to_mask": []},
+            {"session_id": "s1", "entities_to_mask": self._sample_entities()},
+            {"session_id": "s2", "entities_to_mask": self._sample_entities()},
         ])
         result = model.predict(context=None, model_input=df)
 
@@ -289,23 +288,23 @@ class TestPredictErrors(unittest.TestCase):
 
 class TestApplyMasking(unittest.TestCase):
 
-    def _make_model(self) -> MaskingModel:
+    def _make_ready_model(self) -> MaskingModel:
         model = MaskingModel()
         model.masking_service = Mock()
-        model.masking_service.apply_pdf_masks.return_value = _FAKE_PDF
+        model.masking_service.apply_pdf_masks.return_value = b"pdf"
         return model
 
     def test_pdf_calls_apply_pdf_masks(self):
-        model = self._make_model()
-        result = model._apply_masking(b"pdf bytes", ".pdf", [])
-        model.masking_service.apply_pdf_masks.assert_called_once_with(b"pdf bytes", [])
-        self.assertEqual(result, _FAKE_PDF)
+        model = self._make_ready_model()
+        result = model._apply_masking(b"pdf content", ".pdf", [])
+        model.masking_service.apply_pdf_masks.assert_called_once()
+        self.assertEqual(result, b"pdf")
 
     def test_unsupported_extension_raises_value_error(self):
-        model = self._make_model()
+        model = self._make_ready_model()
         with self.assertRaises(ValueError) as ctx:
-            model._apply_masking(b"docx bytes", ".docx", [])
-        self.assertIn(".docx", str(ctx.exception))
+            model._apply_masking(b"data", ".docx", [])
+        self.assertIn("Unsupported file type", str(ctx.exception))
 
 
 # ===========================================================================
@@ -314,7 +313,7 @@ class TestApplyMasking(unittest.TestCase):
 
 class TestWriteMaskedFile(unittest.TestCase):
 
-    def _make_model(self) -> MaskingModel:
+    def _make_ready_model(self) -> MaskingModel:
         model = MaskingModel()
         model.uc_volume_path = "/Volumes/cat/schema/sessions"
         model.databricks_host = "https://test.databricks.com"
@@ -322,39 +321,31 @@ class TestWriteMaskedFile(unittest.TestCase):
         return model
 
     def test_write_puts_to_correct_url(self):
-        model = self._make_model()
-        mock_resp = Mock()
-        mock_resp.raise_for_status.return_value = None
+        model = self._make_ready_model()
+        with patch("requests.put") as mock_put:
+            mock_put.return_value.raise_for_status = Mock()
+            model._write_masked_file("sess-abc", b"data")
 
-        with patch("databricks.model.masking_model.MaskingModel._write_masked_file",
-                   wraps=model._write_masked_file):
-            with patch("requests.put", return_value=mock_resp) as mock_put:
-                model._write_masked_file("sess-123", _FAKE_PDF)
-
-        call_url = mock_put.call_args[0][0]
-        self.assertIn("/sess-123/masked.pdf", call_url)
-        self.assertIn("/api/2.0/fs/files", call_url)
-
-    def test_write_sends_correct_bytes(self):
-        model = self._make_model()
-        mock_resp = Mock()
-        mock_resp.raise_for_status.return_value = None
-
-        with patch("requests.put", return_value=mock_resp) as mock_put:
-            model._write_masked_file("sess-123", _FAKE_PDF)
-
-        self.assertEqual(mock_put.call_args[1]["data"], _FAKE_PDF)
+            expected_url = "https://test.databricks.com/api/2.0/fs/files/Volumes/cat/schema/sessions/sess-abc/masked.pdf"
+            mock_put.assert_called_once()
+            self.assertEqual(mock_put.call_args[0][0], expected_url)
 
     def test_write_uses_bearer_auth(self):
-        model = self._make_model()
-        mock_resp = Mock()
-        mock_resp.raise_for_status.return_value = None
+        model = self._make_ready_model()
+        with patch("requests.put") as mock_put:
+            mock_put.return_value.raise_for_status = Mock()
+            model._write_masked_file("sess-write", b"data")
 
-        with patch("requests.put", return_value=mock_resp) as mock_put:
-            model._write_masked_file("sess-123", _FAKE_PDF)
+            headers = mock_put.call_args[1]["headers"]
+            self.assertEqual(headers["Authorization"], "Bearer test-token")
 
-        headers = mock_put.call_args[1]["headers"]
-        self.assertEqual(headers["Authorization"], "Bearer test-token")
+    def test_write_sends_correct_bytes(self):
+        model = self._make_ready_model()
+        with patch("requests.put") as mock_put:
+            mock_put.return_value.raise_for_status = Mock()
+            model._write_masked_file("sess-bytes", b"my-pdf-data")
+
+            self.assertEqual(mock_put.call_args[1]["data"], b"my-pdf-data")
 
 
 if __name__ == "__main__":

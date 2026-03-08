@@ -215,8 +215,9 @@ MODEL_VERSION = str(registered_model.version)
 print(f"🧪 Testing registered model: {UC_MODEL_PATH} v{MODEL_VERSION}")
 
 import os
-os.environ['DATABRICKS_HOST']='host'
-os.environ['DATABRICKS_TOKEN']='token'
+os.environ['DATABRICKS_HOST']=spark.conf.get("spark.databricks.workspaceUrl")
+os.environ['DATABRICKS_TOKEN']=dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
+
 os.environ['AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT']='endpoint'
 os.environ['AZURE_DOCUMENT_INTELLIGENCE_KEY']='apikey'
 os.environ['WORKSPACE_URL']='url'

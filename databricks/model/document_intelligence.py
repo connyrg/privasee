@@ -24,6 +24,7 @@ import base64
 import os
 import uuid
 import logging
+import time
 from typing import Dict, List, Any
 import io
 from mimetypes import guess_type
@@ -231,21 +232,30 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
 
         logger.info(f"Processing document for session {session_id}")
 
+        # TIMING: Start overall timer
+        overall_start = time.time()
+
         # Fetch document bytes from UC volume via Files REST API
+        fetch_start = time.time()
         document_bytes, document_filename = self._fetch_original_file(session_id)
+        fetch_time = time.time() - fetch_start
+        logger.info(f"⏱️  File fetch: {fetch_time:.2f}s")
 
         # Extract file extension from stored filename (e.g. "original.pdf" → "pdf")
         file_extension = document_filename.split('.')[-1].lower()
 
         # Step 1: OCR - Extract text and word-level bounding boxes
         logger.info(f"Step 1: Running OCR on {document_filename}")
+        ocr_start = time.time()
         ocr_result = self.ocr_service.process_document(
             document_bytes=document_bytes,
             file_extension=file_extension
         )
+        ocr_time = time.time() - ocr_start
         
         pages = ocr_result
         logger.info(f"OCR completed: {len(pages)} page(s) processed")
+        logger.info(f"⏱️  OCR processing: {ocr_time:.2f}s ({ocr_time/max(len(pages), 1):.2f}s per page)")
         
         # Per-document state for replacement pre-generation.
         # Both maps key on normalised original_text so the same value always
@@ -256,6 +266,8 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
 
         # Process each page
         result_pages = []
+        total_vision_time = 0.0
+        total_bbox_time = 0.0
 
         for page_idx, page_data in enumerate(pages, start=1):
             logger.info(f"Processing page {page_idx}/{len(pages)}")
@@ -267,7 +279,6 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
             }
             
             # Step 2: Vision AI - Detect entities
-            # page_image_b64 = page_data.get('image_base64')
             page_image_b64 = page_data.get('image_base64', '')
             
             if page_image_b64:
@@ -281,6 +292,8 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
                         mimetype = mimetype_full.split('/')[-1]  # 'image/png' -> 'png'
                     else:
                         mimetype = 'png'  # default fallback
+                
+                vision_start = time.time()
                 entities = self._extract_entities_from_page(
                     mimetype=mimetype,
                     page_image_b64=page_image_b64,
@@ -288,6 +301,9 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
                     field_definitions=field_definitions,
                     page_number=page_idx
                 )
+                vision_time = time.time() - vision_start
+                total_vision_time += vision_time
+                logger.info(f"⏱️  Vision API (page {page_idx}): {vision_time:.2f}s - detected {len(entities)} entities")
             else:
                 # No image available (e.g., digital PDF page with direct text extraction)
                 # Skip entity detection for this page or use text-only mode
@@ -297,10 +313,14 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
             # Step 3: BBox Matcher - Enrich entities with bounding boxes
             if entities:
                 logger.info(f"Matching {len(entities)} entities to OCR words")
+                bbox_start = time.time()
                 enriched_entities = self.bbox_matcher.match_entities_to_words(
                     entities=entities,
                     ocr_words=ocr_data['words']
                 )
+                bbox_time = time.time() - bbox_start
+                total_bbox_time += bbox_time
+                logger.info(f"⏱️  BBox matching (page {page_idx}): {bbox_time:.2f}s")
             else:
                 enriched_entities = []
             
@@ -365,7 +385,22 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
         }
         
         # Step 4: Write-through to Unity Catalog volume
+        write_start = time.time()
         self._write_to_uc_volume(session_id, result)
+        write_time = time.time() - write_start
+        logger.info(f"⏱️  UC volume write: {write_time:.2f}s")
+        
+        # Overall timing summary
+        overall_time = time.time() - overall_start
+        logger.info(f"\n{'='*80}")
+        logger.info(f"⏱️  TIMING SUMMARY for session {session_id}:")
+        logger.info(f"  - File fetch:      {fetch_time:6.2f}s ({fetch_time/overall_time*100:5.1f}%)")
+        logger.info(f"  - OCR processing:  {ocr_time:6.2f}s ({ocr_time/overall_time*100:5.1f}%)")
+        logger.info(f"  - Vision API:      {total_vision_time:6.2f}s ({total_vision_time/overall_time*100:5.1f}%)")
+        logger.info(f"  - BBox matching:   {total_bbox_time:6.2f}s ({total_bbox_time/overall_time*100:5.1f}%)")
+        logger.info(f"  - UC write:        {write_time:6.2f}s ({write_time/overall_time*100:5.1f}%)")
+        logger.info(f"  - TOTAL:           {overall_time:6.2f}s")
+        logger.info(f"{'='*80}\n")
         
         logger.info(f"Document processing complete for session {session_id}")
         return result

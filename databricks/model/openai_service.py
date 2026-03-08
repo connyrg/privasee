@@ -130,7 +130,7 @@ class OpenAIVisionService:
                         ]
                     }
                 ],
-                max_tokens=4096
+                max_tokens=20000
             )
 
             # Parse response
@@ -361,11 +361,15 @@ Begin analysis:"""
 
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse Azure OpenAI response as JSON: {e}")
-            logger.debug(f"Response text: {response_text[:500]}")
+            # IMPROVED: Log full response for debugging (up to 2000 chars)
+            logger.error(f"Full response text ({len(response_text)} chars): {response_text[:2000]}")
+            if len(response_text) > 2000:
+                logger.error(f"... (response truncated, total length: {len(response_text)} chars)")
             # Return empty list rather than failing completely
             return []
         except Exception as e:
             logger.error(f"Error parsing Azure OpenAI response: {e}")
+            logger.error(f"Response text: {response_text[:500]}")
             return []
 
     def _validate_entity(self, entity: Dict) -> bool:
