@@ -21,14 +21,28 @@ databricks/
 │   ├── bbox_matcher.py           Aligns extracted entities to OCR word bounding boxes
 │   └── __init__.py
 ├── notebooks/
-│   ├── register_model.py         Log and register a model in Unity Catalog
-│   └── deploy_endpoint.py        Create / update a Model Serving endpoint
+│   ├── register_model.py             Log and register Document Intelligence in Unity Catalog
+│   ├── register_masking_model.ipynb  Log and register Masking model in Unity Catalog
+│   ├── deploy_endpoint.py            Create / update a Model Serving endpoint
+│   ├── cleanup_sessions.py           Utility to delete old session files from UC volume
+│   └── test_endpoint.ipynb           Manual endpoint smoke-test notebook
+├── tests/
+│   ├── test_document_intelligence.py
+│   ├── test_masking_model.py
+│   ├── test_masking_service.py
+│   ├── test_masking_integration.py
+│   ├── test_bbox_matcher.py
+│   ├── test_claude_service.py
+│   ├── test_ocr_service.py
+│   └── test_openai_service.py
 ├── utils/
 │   └── databricks_utils.py       Databricks API helpers
 └── README.md
 ```
 
-## Pipeline
+## Pipelines
+
+### Document Intelligence
 
 ```
 POST /invocations  (session_id, field_definitions)
@@ -44,18 +58,42 @@ POST /invocations  (session_id, field_definitions)
     ├─ (per page) VisionService.extract_entities_from_base64()
     │   ├─ Azure OpenAI (default): GPT-4o with vision
     │   └─ Claude (alternative): Claude Vision
+    │   Note: digital PDF pages without a rendered image are skipped silently
     │
     ├─ BBoxMatcher.match_entities_to_words()
     │   └─ Aligns entity text spans to OCR word-level bounding boxes
+    │
+    ├─ Pre-generate replacement_text for user review
+    │   ├─ "Fake Data"     → realistic fake value (consistent per original_text)
+    │   └─ "Entity Label"  → sequential label, e.g. Full_Name_A, Full_Name_B
+    │                        (letters A–Z, then integers 27, 28, … per type)
     │
     ├─ Write entities.json to UC volume via Files REST API
     │
     └─ Return {session_id, status, pages: [{page_num, entities}]}
 ```
 
+### Masking
+
+```
+POST /invocations  (session_id, entities_to_mask)
+    │
+    ├─ Fetch original{ext} from UC volume via Files REST API
+    │
+    ├─ Apply masking
+    │   ├─ PDF   → MaskingService.apply_pdf_masks()  (PyMuPDF native)
+    │   └─ Image → MaskingService.apply_masks()      (PIL), then wrap in PDF
+    │
+    ├─ Write masked.pdf to UC volume via Files REST API
+    │
+    └─ Return {session_id, status: "complete", entities_masked: N}
+```
+
 ## MLflow Interface
 
-### Input (dataframe_records format)
+### Document Intelligence
+
+#### Input (dataframe_records format)
 
 ```json
 {
@@ -74,7 +112,7 @@ POST /invocations  (session_id, field_definitions)
 The model fetches the document from:
 `{UC_VOLUME_PATH}/{session_id}/original{ext}`
 
-### Output (MLflow predictions format)
+#### Output (MLflow predictions format)
 
 ```json
 {
@@ -105,11 +143,43 @@ The model fetches the document from:
 }
 ```
 
+### Masking
+
+#### Input (dataframe_records format)
+
+```json
+{
+  "dataframe_records": [
+    {
+      "session_id": "uuid-string",
+      "entities_to_mask": "[{\"id\": \"entity-uuid\", \"entity_type\": \"Full Name\", \"original_text\": \"John Doe\", \"replacement_text\": \"Jane Smith\", \"bounding_box\": [0.1, 0.2, 0.3, 0.05], \"strategy\": \"Fake Data\", \"approved\": true, \"page_number\": 1}]"
+    }
+  ]
+}
+```
+
+`entities_to_mask` is a **JSON string** (not a nested object) containing the list of
+approved entities. Only entities with `approved: true` are redacted.
+
+#### Output (MLflow predictions format)
+
+```json
+{
+  "predictions": [
+    {
+      "session_id": "uuid-string",
+      "status": "complete",
+      "entities_masked": 5
+    }
+  ]
+}
+```
+
 ## Environment Variables
 
-All of the following must be set on the Model Serving endpoint:
+### Document Intelligence endpoint
 
-### Databricks Files API (for UC volume access)
+#### Databricks Files API (for UC volume access)
 
 | Variable | Description |
 |---|---|
@@ -117,14 +187,14 @@ All of the following must be set on the Model Serving endpoint:
 | `DATABRICKS_TOKEN` | Service principal token with Files API read/write access |
 | `UC_VOLUME_PATH` | UC volume base path, e.g. `/Volumes/catalog/schema/privasee_sessions` |
 
-### Azure Document Intelligence (OCR)
+#### Azure Document Intelligence (OCR)
 
 | Variable | Description |
 |---|---|
 | `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT` | Azure DI endpoint URL |
 | `AZURE_DOCUMENT_INTELLIGENCE_KEY` | Azure DI API key |
 
-### Vision Service (choose one)
+#### Vision Service (choose one)
 
 **Azure OpenAI (default):**
 
@@ -143,9 +213,17 @@ All of the following must be set on the Model Serving endpoint:
 | `VISION_SERVICE_PROVIDER` | `claude` |
 | `ANTHROPIC_API_KEY` | Anthropic API key |
 
+### Masking endpoint
+
+| Variable | Description |
+|---|---|
+| `DATABRICKS_HOST` | Workspace URL |
+| `DATABRICKS_TOKEN` | Service principal token with Files API read/write access |
+| `UC_VOLUME_PATH` | UC volume base path (must match Document Intelligence endpoint) |
+
 ## UC Volume Layout
 
-The model reads and writes files under `{UC_VOLUME_PATH}/{session_id}/`:
+The models read and write files under `{UC_VOLUME_PATH}/{session_id}/`:
 
 ```
 {UC_VOLUME_PATH}/{session_id}/
@@ -155,29 +233,36 @@ The model reads and writes files under `{UC_VOLUME_PATH}/{session_id}/`:
     masked.pdf       — de-identified output (masking model)
 ```
 
-`entities.json` format written by the model:
+`entities.json` format written by the Document Intelligence model:
 
 ```json
 {
   "session_id": "...",
   "saved_at": "2025-01-01T00:00:00+00:00",
+  "status": "awaiting_review",
   "entities": [ ... ]
 }
 ```
 
 ## Deployment
 
-### 1. Register the model
+### 1. Register the Document Intelligence model
 
 Run `notebooks/register_model.py` in your Databricks workspace. Update the catalog,
 schema, and model name variables at the top of the notebook.
 
-### 2. Deploy the endpoint
+### 2. Register the Masking model
 
-Run `notebooks/deploy_endpoint.py`. Set `ENDPOINT_NAME` and `MODEL_VERSION` to match
-your registered model. The endpoint will have `scale_to_zero` enabled by default.
+Run `notebooks/register_masking_model.ipynb` in your Databricks workspace. Update
+the catalog, schema, and model name variables at the top of the notebook.
 
-### 3. Get the invocation URLs
+### 3. Deploy the endpoints
+
+Run `notebooks/deploy_endpoint.py` for each model. Set `ENDPOINT_NAME` and
+`MODEL_VERSION` to match your registered model. The endpoint will have
+`scale_to_zero` enabled by default.
+
+### 4. Get the invocation URLs
 
 After deployment, invocation URLs follow this pattern:
 ```
@@ -190,7 +275,7 @@ Masking endpoint URL as `DATABRICKS_MASKING_ENDPOINT` in the backend environment
 ## Testing
 
 ```bash
-# Run OCR service tests (no real API credentials needed — all mocked)
+# Run unit tests (no real API credentials needed — all mocked)
 python -m pytest databricks/tests/ -v
 
 # End-to-end workflow test (requires live credentials)
