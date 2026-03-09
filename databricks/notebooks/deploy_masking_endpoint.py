@@ -48,12 +48,12 @@
 # Model configuration - must match values from register_model.py
 CATALOG = "datascience_dev_bronze_sandbox"
 SCHEMA = "ds_document_deidentification"
-MODEL_NAME = "doc_deidentification"
+MODEL_NAME = "doc_masking"
 UC_MODEL_PATH = f"{CATALOG}.{SCHEMA}.{MODEL_NAME}"
 
 # Endpoint configuration
-ENDPOINT_NAME = "privasee_endpoint_local"
-MODEL_VERSION = "13"  # Update to your registered model version
+ENDPOINT_NAME = "doc_masking"
+MODEL_VERSION = "3"  # Update to your registered model version
 WORKLOAD_SIZE = "Small"  # Options: Small, Medium, Large
 SCALE_TO_ZERO = True  # Enable scale-to-zero to save costs
 
@@ -95,42 +95,45 @@ print("✅ Workspace client initialized")
 
 # Environment variables for the endpoint
 # These reference Databricks secrets - update scope and key names
-OPENAI_SECRET_SCOPE = "openai_00010_1"  # Update to your secret scope
-PROXY_SECRET_SCOPE = "nginx_proxy_sp"
+# OPENAI_SECRET_SCOPE = "openai_00010_1"  # Update to your secret scope
+# PROXY_SECRET_SCOPE = "nginx_proxy_sp"
 
 env_vars = {
-    "VISION_SERVICE_PROVIDER": VISION_PROVIDER,
+    # "VISION_SERVICE_PROVIDER": VISION_PROVIDER,
     "UC_VOLUME_PATH": UC_VOLUME_PATH,
+    "DATABRICKS_HOST": "https://suncorp-dev.cloud.databricks.com/",
+    "DATABRICKS_TOKEN": f"{{{{secrets/Conny.GUNADI@suncorp.com.au/DATABRICKS_TOKEN_DEV}}}}",
     # Azure Document Intelligence secrets
-    # "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT": f"{{{{secrets/{SECRET_SCOPE}/adi_endpoint}}}}",
-    # "AZURE_DOCUMENT_INTELLIGENCE_KEY": f"{{{{secrets/{SECRET_SCOPE}/adi_key}}}}",
-    "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT": "dummy_endpoint",
-    "AZURE_DOCUMENT_INTELLIGENCE_KEY": "dummy_key",
+    # # "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT": f"{{{{secrets/{SECRET_SCOPE}/adi_endpoint}}}}",
+    # # "AZURE_DOCUMENT_INTELLIGENCE_KEY": f"{{{{secrets/{SECRET_SCOPE}/adi_key}}}}",
+    # "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT": "dummy_endpoint",
+    # "AZURE_DOCUMENT_INTELLIGENCE_KEY": "dummy_key",
 }
 
+
 # Add OpenAI or Claude secrets based on provider
-if VISION_PROVIDER == "openai":
-    env_vars.update({
-        "DATABRICKS_HOST": "https://suncorp-dev.cloud.databricks.com/",
-        "DATABRICKS_TOKEN": f"{{{{secrets/Conny.GUNADI@suncorp.com.au/DATABRICKS_TOKEN_DEV}}}}",
-        "AZURE_OPENAI_API_KEY": f"{{{{secrets/{OPENAI_SECRET_SCOPE}/apikey}}}}",
-        "AZURE_OPENAI_ENDPOINT": "https://openai-00010-non-prod-1.openai.azure.com/",
-        "AZURE_OPENAI_API_VERSION": "2024-02-15-preview",
-        "AZURE_OPENAI_DEPLOYMENT_NAME": "gpt-5-global",
-        "WORKSPACE_URL": "https://suncorp-dev.cloud.databricks.com/",
-        "WORKSPACE_ID": "1238531023703058",
-        "PROXY_CLUSTER_ID": "0503-061117-o2rl78n9",
-        "PROXY_PORT": "8110",
-        "PROXY_ROUTE": "openai-00010-1",
-        "PROXY_CLIENT_ID": f"{{{{secrets/{PROXY_SECRET_SCOPE}/client_id}}}}",
-        "PROXY_CLIENT_SECRET": f"{{{{secrets/{PROXY_SECRET_SCOPE}/client_secret}}}}",
-    })
-    print("✅ OpenAI environment variables configured")
-elif VISION_PROVIDER == "claude":
-    env_vars.update({
-        "ANTHROPIC_API_KEY": "dummy_apikey",
-    })
-    print("✅ Claude environment variables configured")
+# if VISION_PROVIDER == "openai":
+#     env_vars.update({
+#         "DATABRICKS_HOST": "https://suncorp-dev.cloud.databricks.com/",
+#         "DATABRICKS_TOKEN": f"{{{{secrets/Conny.GUNADI@suncorp.com.au/DATABRICKS_TOKEN_DEV}}}}",
+#         "AZURE_OPENAI_API_KEY": f"{{{{secrets/{OPENAI_SECRET_SCOPE}/apikey}}}}",
+#         "AZURE_OPENAI_ENDPOINT": "https://openai-00010-non-prod-1.openai.azure.com/",
+#         "AZURE_OPENAI_API_VERSION": "2024-02-15-preview",
+#         "AZURE_OPENAI_DEPLOYMENT_NAME": "gpt-5-global",
+#         "WORKSPACE_URL": "https://suncorp-dev.cloud.databricks.com/",
+#         "WORKSPACE_ID": "1238531023703058",
+#         "PROXY_CLUSTER_ID": "0503-061117-o2rl78n9",
+#         "PROXY_PORT": "8110",
+#         "PROXY_ROUTE": "openai-00010-1",
+#         "PROXY_CLIENT_ID": f"{{{{secrets/{PROXY_SECRET_SCOPE}/client_id}}}}",
+#         "PROXY_CLIENT_SECRET": f"{{{{secrets/{PROXY_SECRET_SCOPE}/client_secret}}}}",
+#     })
+#     print("✅ OpenAI environment variables configured")
+# elif VISION_PROVIDER == "claude":
+#     env_vars.update({
+#         "ANTHROPIC_API_KEY": "dummy_apikey",
+#     })
+#     print("✅ Claude environment variables configured")
 
 print(f"\n📋 Environment variables:")
 for key, value in env_vars.items():
@@ -313,18 +316,38 @@ test_payload = {
     "dataframe_records": [
         {
             "session_id": "integration_test_002",
-            "field_definitions": [
+            "entities_to_mask": json.dumps([
                 {
-                    "name": "claimant_name",
-                    "description": "The name of the claimant of a personal injury claims. The claimant is the person who is injured and lodging a compensation claim.",
-                    "strategy": "Black Out"
+                    "id": "test_e1",
+                    "entity_type": "claimant_name",
+                    "original_text": "Stephen Parrot",
+                    "replacement_text": "John Doe",
+                    "bounding_box": [
+                        0.14965359893857966,
+                        0.16382730180575378,
+                        0.11323988798943745,
+                        0.01599838422713382
+                    ],  # [x, y, width, height]
+                    "strategy": "Fake Data",
+                    "approved": True,
+                    "page_number": 1,
                 },
                 {
-                    "name": "incident_date",
-                    "description": "The date when an incident happened",
-                    "strategy": "Black Out"
+                    "id": "test_e2",
+                    "entity_type": "incident_date",
+                    "original_text": "12 January 2020,",
+                    "replacement_text": "[REDACTED]",
+                    "bounding_box": [
+                        0.6438296945689354,
+                        0.286119207615939,
+                        0.1270384139471667,
+                        0.01599838422713382
+                    ],
+                    "strategy": "Black Out",
+                    "approved": True,
+                    "page_number": 1,
                 }
-            ]
+            ])
         }
     ]
 }
@@ -359,6 +382,10 @@ except Exception as e:
     print("   - Secrets are not properly configured")
     print("   - Test data is invalid")
     print("   - Model is still initializing")
+
+# COMMAND ----------
+
+print(test_payload['dataframe_records'][0]['entities_to_mask'])
 
 # COMMAND ----------
 
