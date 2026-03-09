@@ -1,5 +1,5 @@
-# PrivaSee backend dependencies
-# Generated from PoC requirements; review versions before deploying to Posit Connect.
+# PrivaSee backend — production dependencies
+# Installed by Posit Connect on deployment. Keep this lean: no test tools here.
 
 # --- Web framework ---
 fastapi>=0.109.0
@@ -16,17 +16,5 @@ httpx>=0.26.0
 # --- HTTP (UCSessionManager — Databricks Files REST API) ---
 requests>=2.31.0
 
-# --- Image processing (test fixtures) ---
-Pillow>=10.2.0
-
 # --- Environment / configuration ---
 python-dotenv>=1.0.0
-
-# --- Testing ---
-pytest>=7.4.0
-pytest-asyncio>=0.21.0
-pytest-cov>=4.1.0
-jsonschema>=4.19.0
-pymupdf>=1.23.0           # fitz — creates test PDFs with known text positions
-
-# --- TODO: pin exact versions once the environment is validated ---
