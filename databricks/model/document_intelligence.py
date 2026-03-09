@@ -328,7 +328,7 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
             for entity in enriched_entities:
                 entity['id'] = str(uuid.uuid4())
                 entity['approved'] = True  # Default to approved
-                
+
                 # Add strategy from field definitions
                 entity_type = entity.get('entity_type')
                 matching_field = next(
@@ -337,6 +337,19 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
                 )
                 if matching_field:
                     entity['strategy'] = matching_field.get('strategy', 'Black Out')
+
+                # Add bounding_box (singular flat list) derived from the first
+                # occurrence in bounding_boxes.  The backend Entity model requires
+                # this field; the masking service uses bounding_boxes (all
+                # occurrences) so every appearance in the document is redacted.
+                if 'bounding_box' not in entity:
+                    first = next(iter(entity.get('bounding_boxes', [])), None)
+                    if isinstance(first, dict):
+                        entity['bounding_box'] = [first['x'], first['y'], first['width'], first['height']]
+                    elif isinstance(first, (list, tuple)) and len(first) == 4:
+                        entity['bounding_box'] = list(first)
+                    else:
+                        entity['bounding_box'] = [0.0, 0.0, 0.0, 0.0]
 
                 # Pre-generate replacement_text so users can review/edit it in
                 # Step 2 before masking is applied.

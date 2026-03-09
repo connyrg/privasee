@@ -24,6 +24,7 @@ import logging
 
 import fitz  # PyMuPDF
 from docx import Document
+from PIL import Image
 from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.core.credentials import AzureKeyCredential
 
@@ -171,6 +172,10 @@ class OCRService:
         
         # Convert PyMuPDF format to our standard format
         # PyMuPDF returns: (x0, y0, x1, y1, word, block_no, line_no, word_no)
+        # Normalise to [0, 1] relative to page dimensions so masking_service
+        # can apply rect = fitz.Rect(x*W, y*H, ...) correctly.
+        page_w = page.rect.width
+        page_h = page.rect.height
         words = []
         for word_tuple in words_data:
             x0, y0, x1, y1, word_text = word_tuple[:5]
@@ -178,10 +183,10 @@ class OCRService:
                 "text": word_text,
                 "confidence": 1.0,  # Digital text is 100% confident
                 "bounding_box": {
-                    "x": float(x0),
-                    "y": float(y0),
-                    "width": float(x1 - x0),
-                    "height": float(y1 - y0)
+                    "x": float(x0) / page_w,
+                    "y": float(y0) / page_h,
+                    "width": float(x1 - x0) / page_w,
+                    "height": float(y1 - y0) / page_h,
                 }
             })
         
@@ -227,7 +232,20 @@ class OCRService:
         
         # OCR the rendered image
         ocr_result = self._ocr_with_adi(png_bytes)
-        
+
+        # Normalise ADI pixel coords (in the rendered PNG space) to [0, 1]
+        # relative to the original PDF page dimensions.
+        png_w = page.rect.width * self.RENDER_ZOOM_FACTOR
+        png_h = page.rect.height * self.RENDER_ZOOM_FACTOR
+        for word in ocr_result["words"]:
+            bb = word["bounding_box"]
+            word["bounding_box"] = {
+                "x": bb["x"] / png_w,
+                "y": bb["y"] / png_h,
+                "width": bb["width"] / png_w,
+                "height": bb["height"] / png_h,
+            }
+
         return {
             "page_num": page_num,
             "source": PageSource.SCANNED_PDF,
@@ -279,10 +297,24 @@ class OCRService:
         
         # Encode image to base64 for vision API
         image_b64 = base64.b64encode(image_bytes).decode('utf-8')
-        
+
+        # Get image dimensions for normalisation (no extra I/O — bytes already in memory)
+        img = Image.open(io.BytesIO(image_bytes))
+        img_w, img_h = img.size
+
         # OCR the image
         ocr_result = self._ocr_with_adi(image_bytes)
-        
+
+        # Normalise ADI pixel coords to [0, 1] relative to image dimensions
+        for word in ocr_result["words"]:
+            bb = word["bounding_box"]
+            word["bounding_box"] = {
+                "x": bb["x"] / img_w,
+                "y": bb["y"] / img_h,
+                "width": bb["width"] / img_w,
+                "height": bb["height"] / img_h,
+            }
+
         return [{
             "page_num": 1,
             "source": PageSource.IMAGE,

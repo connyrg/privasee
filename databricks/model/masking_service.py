@@ -173,7 +173,13 @@ class MaskingService:
     def _resolve_bboxes(entity: Dict[str, Any]) -> List[List[float]]:
         multi = entity.get("bounding_boxes")
         if multi:
-            return [b for b in multi if isinstance(b, (list, tuple)) and len(b) == 4]
+            result = []
+            for b in multi:
+                if isinstance(b, (list, tuple)) and len(b) == 4:
+                    result.append(list(b))
+                elif isinstance(b, dict) and all(k in b for k in ("x", "y", "width", "height")):
+                    result.append([b["x"], b["y"], b["width"], b["height"]])
+            return result
         single = entity.get("bounding_box")
         if single and len(single) == 4:
             return [list(single)]

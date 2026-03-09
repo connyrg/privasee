@@ -122,12 +122,14 @@ class TestDigitalPDFProcessing(unittest.TestCase):
                 return digital_text
         
         mock_page.get_text.side_effect = get_text_side_effect
-        
+        mock_page.rect.width = 595.0
+        mock_page.rect.height = 842.0
+
         # Mock pixmap for rendering page to PNG (needed for vision API)
         mock_pixmap = Mock()
         mock_pixmap.tobytes.return_value = b"fake png bytes"
         mock_page.get_pixmap.return_value = mock_pixmap
-        
+
         mock_doc.__len__.return_value = 1
         mock_doc.__iter__.return_value = [mock_page]
         mock_doc.__getitem__.return_value = mock_page
@@ -148,10 +150,10 @@ class TestDigitalPDFProcessing(unittest.TestCase):
         word = results[0]['words'][0]
         self.assertEqual(word['text'], 'This')
         self.assertEqual(word['confidence'], 1.0)
-        self.assertEqual(word['bounding_box']['x'], 100.0)
-        self.assertEqual(word['bounding_box']['y'], 200.0)
-        self.assertEqual(word['bounding_box']['width'], 40.0)
-        self.assertEqual(word['bounding_box']['height'], 15.0)
+        self.assertAlmostEqual(word['bounding_box']['x'],      100 / 595.0, places=5)
+        self.assertAlmostEqual(word['bounding_box']['y'],      200 / 842.0, places=5)
+        self.assertAlmostEqual(word['bounding_box']['width'],   40 / 595.0, places=5)
+        self.assertAlmostEqual(word['bounding_box']['height'],  15 / 842.0, places=5)
 
 
 class TestScannedPDFProcessing(unittest.TestCase):
@@ -173,12 +175,14 @@ class TestScannedPDFProcessing(unittest.TestCase):
         
         # Simulate scanned page with <50 chars of text
         mock_page.get_text.return_value = "  "  # Whitespace only
-        
+        mock_page.rect.width = 595.0
+        mock_page.rect.height = 842.0
+
         # Mock rendering to PNG
         mock_pixmap = Mock()
         mock_pixmap.tobytes.return_value = b"fake png bytes"
         mock_page.get_pixmap.return_value = mock_pixmap
-        
+
         mock_doc.__len__.return_value = 1
         mock_doc.__iter__.return_value = [mock_page]
         mock_doc.__getitem__.return_value = mock_page
@@ -217,8 +221,9 @@ class TestScannedPDFProcessing(unittest.TestCase):
         word = results[0]['words'][0]
         self.assertEqual(word['text'], 'Scanned')
         self.assertEqual(word['confidence'], 0.98)
-        self.assertEqual(word['bounding_box']['x'], 50.0)
-        self.assertEqual(word['bounding_box']['width'], 70.0)
+        # ADI pixel coords normalised by png dimensions (page_pts * zoom = 595*2, 842*2)
+        self.assertAlmostEqual(word['bounding_box']['x'],     50.0 / (595.0 * 2), places=5)
+        self.assertAlmostEqual(word['bounding_box']['width'], 70.0 / (595.0 * 2), places=5)
 
 
 class TestDocxProcessing(unittest.TestCase):
@@ -295,10 +300,13 @@ class TestImageProcessing(unittest.TestCase):
         mock_poller.result.return_value = mock_adi_result
         
         self.service.adi_client.begin_analyze_document = Mock(return_value=mock_poller)
-        
-        # Process image
+
+        # Process image — mock PIL so fake bytes don't raise
         image_bytes = b"fake image bytes"
-        results = self.service._process_image(image_bytes)
+        mock_pil_img = Mock()
+        mock_pil_img.size = (800, 600)
+        with patch('databricks.model.ocr_service.Image.open', return_value=mock_pil_img):
+            results = self.service._process_image(image_bytes)
         
         # Verify results
         self.assertEqual(len(results), 1)
