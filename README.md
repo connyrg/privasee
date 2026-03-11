@@ -55,9 +55,10 @@ privasee/
 ├── frontend/                Legacy React + Vite app (not actively deployed)
 ├── backend/
 │   ├── app/
-│   │   ├── main.py          FastAPI application — all endpoints
-│   │   ├── models.py        Pydantic request/response models
-│   │   └── session_manager.py  UC volume session persistence (Files REST API)
+│   │   ├── main.py              FastAPI application — all endpoints
+│   │   ├── models.py            Pydantic request/response models
+│   │   ├── config_manager.py    Named config persistence on UC volume
+│   │   └── session_manager.py   UC volume session persistence (Files REST API)
 │   ├── tests/
 │   ├── scripts/
 │   │   └── e2e_upload_test.py   End-to-end workflow validation script

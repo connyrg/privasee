@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -32,17 +33,24 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+from app.config_manager import ConfigManager
 from app.models import (
     ApprovalRequest,
     ApprovalResponse,
+    ConfigDetail,
+    ConfigSummary,
     DatabricksProcessRequest,
     DatabricksProcessResponse,
     Entity,
     ErrorResponse,
+    FieldDefinition,
     HealthResponse,
     ProcessRequest,
     ProcessResponse,
+    SaveConfigRequest,
     SessionInfo,
+    SystemTemplateDetail,
+    SystemTemplateSummary,
     UploadResponse,
 )
 from app.session_manager import UCSessionManager
@@ -116,6 +124,7 @@ app.add_middleware(
 # SessionManager is initialised lazily so the app still starts without
 # Databricks credentials (useful for local testing with MOCK_DATABRICKS=true).
 _session_manager: Optional[UCSessionManager] = None
+_config_manager: Optional[ConfigManager] = None
 
 if DATABRICKS_HOST and DATABRICKS_TOKEN and UC_VOLUME_PATH:
     _session_manager = UCSessionManager(
@@ -123,12 +132,26 @@ if DATABRICKS_HOST and DATABRICKS_TOKEN and UC_VOLUME_PATH:
         token=DATABRICKS_TOKEN,
         volume_path=UC_VOLUME_PATH,
     )
-    logger.info("UCSessionManager initialised")
+    _config_manager = ConfigManager(
+        databricks_host=DATABRICKS_HOST,
+        token=DATABRICKS_TOKEN,
+        sessions_volume_path=UC_VOLUME_PATH,
+    )
+    logger.info("UCSessionManager and ConfigManager initialised")
 else:
     logger.warning(
         "DATABRICKS_HOST / DATABRICKS_TOKEN / UC_VOLUME_PATH not fully configured. "
         "Session storage unavailable. Set MOCK_DATABRICKS=true for local testing."
     )
+
+
+def _require_config_manager() -> ConfigManager:
+    if _config_manager is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Config storage is not configured. Set DATABRICKS_HOST, DATABRICKS_TOKEN, and UC_VOLUME_PATH.",
+        )
+    return _config_manager
 
 
 def _require_session_manager() -> UCSessionManager:
@@ -148,6 +171,40 @@ def _require_session_manager() -> UCSessionManager:
         )
     return _session_manager
 
+
+# ---------------------------------------------------------------------------
+# System templates (hardcoded — no UC volume needed)
+# ---------------------------------------------------------------------------
+
+_SYSTEM_TEMPLATES: List[Dict[str, Any]] = [
+    {
+        "key": "common_pii",
+        "template_name": "Common PII",
+        "description": "Standard fields for Australian healthcare document de-identification",
+        "field_definitions": [
+            {
+                "name": "Full Name",
+                "description": "Patient or person's full name, including first and last name and any middle names",
+                "strategy": "Fake Data",
+            },
+            {
+                "name": "Date of Birth",
+                "description": "Date of birth in any format (e.g., 01/01/1980, 1 January 1980, DOB: 01-01-1980)",
+                "strategy": "Fake Data",
+            },
+            {
+                "name": "Medicare Number",
+                "description": "Australian Medicare card number, typically 10-11 digits, sometimes with a reference number suffix",
+                "strategy": "Black Out",
+            },
+            {
+                "name": "Physical Address",
+                "description": "Full residential or mailing address including street number, street name, suburb, state, and postcode",
+                "strategy": "Fake Data",
+            },
+        ],
+    },
+]
 
 # ---------------------------------------------------------------------------
 # Mock entity generation (MOCK_DATABRICKS=true)
@@ -878,6 +935,144 @@ async def get_session_info(session_id: str):
         entity_count=len(session.entities),
         has_masked_output=session.status == "completed",
     )
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/sessions/{session_id}
+# ---------------------------------------------------------------------------
+
+@app.delete("/api/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_session(session_id: str):
+    """
+    Delete all UC volume artefacts for a session.
+
+    Removes metadata.json, entities.json, original.{ext}, and masked.pdf.
+    Files that were never created are silently skipped.
+    Returns 204 on success, 404 if the session does not exist.
+    """
+    sm = _require_session_manager()
+
+    try:
+        session = sm.get_session(session_id)
+    except Exception as exc:
+        logger.error("get_session(%s) failed: %s", session_id, exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to read session from storage.",
+        )
+
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session not found: {session_id}",
+        )
+
+    try:
+        sm.delete_session(session_id)
+    except Exception as exc:
+        logger.error("delete_session(%s) failed: %s", session_id, exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to delete session artefacts from storage.",
+        )
+
+    logger.info("Deleted session %s", session_id)
+
+
+# ---------------------------------------------------------------------------
+# System templates
+# ---------------------------------------------------------------------------
+
+@app.get("/api/templates", response_model=List[SystemTemplateSummary])
+async def list_system_templates():
+    """List all built-in system templates (no auth required)."""
+    return [
+        SystemTemplateSummary(
+            key=t["key"],
+            template_name=t["template_name"],
+            description=t["description"],
+            field_count=len(t["field_definitions"]),
+        )
+        for t in _SYSTEM_TEMPLATES
+    ]
+
+
+@app.get("/api/templates/{key}", response_model=SystemTemplateDetail)
+async def get_system_template(key: str):
+    """Load a built-in system template by its key."""
+    tmpl = next((t for t in _SYSTEM_TEMPLATES if t["key"] == key), None)
+    if tmpl is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Template not found: {key}",
+        )
+    return SystemTemplateDetail(
+        key=tmpl["key"],
+        template_name=tmpl["template_name"],
+        description=tmpl["description"],
+        field_count=len(tmpl["field_definitions"]),
+        field_definitions=[FieldDefinition(**f) for f in tmpl["field_definitions"]],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Config management
+# ---------------------------------------------------------------------------
+
+@app.post("/api/configs", response_model=ConfigSummary, status_code=status.HTTP_201_CREATED)
+async def save_config(request: SaveConfigRequest):
+    """Save a named set of field definitions. Overwrites if the same name already exists."""
+    cm = _require_config_manager()
+    try:
+        key = cm.save_config(
+            config_name=request.config_name,
+            field_definitions=[f.model_dump() for f in request.field_definitions],
+        )
+    except Exception as exc:
+        logger.error("Failed to save config %r: %s", request.config_name, exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to save config to storage.",
+        )
+    return ConfigSummary(
+        config_name=request.config_name,
+        key=key,
+        saved_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+@app.get("/api/configs", response_model=List[ConfigSummary])
+async def list_configs():
+    """List all saved configs (name + key + timestamp, no field definitions)."""
+    cm = _require_config_manager()
+    try:
+        return cm.list_configs()
+    except Exception as exc:
+        logger.error("Failed to list configs: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to retrieve configs from storage.",
+        )
+
+
+@app.get("/api/configs/{key}", response_model=ConfigDetail)
+async def get_config(key: str):
+    """Load a saved config by its key (includes field definitions)."""
+    cm = _require_config_manager()
+    try:
+        config = cm.get_config(key)
+    except Exception as exc:
+        logger.error("Failed to load config %r: %s", key, exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to retrieve config from storage.",
+        )
+    if config is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Config not found: {key}",
+        )
+    return ConfigDetail(**config)
 
 
 # ---------------------------------------------------------------------------

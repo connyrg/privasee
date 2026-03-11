@@ -279,3 +279,42 @@ class UCSessionManager:
             )
         response.raise_for_status()
         return response.content
+
+    def delete_session(self, session_id: str) -> None:
+        """
+        Delete all artefacts for a session from the UC volume.
+
+        Attempts to delete each known file individually.  404 responses are
+        silently ignored (the file was never created or was already removed).
+        Any other non-2xx response raises ``requests.HTTPError``.
+
+        Args:
+            session_id: Session whose artefacts should be deleted.
+        """
+        # Determine the original file's extension so we can delete it by name.
+        original_ext = ".pdf"
+        try:
+            meta_path = self._session_path(session_id, "metadata.json")
+            meta_response = requests.get(self._url(meta_path), headers=self._headers())
+            if meta_response.ok:
+                meta = meta_response.json()
+                original_filename = meta.get("original_filename", "")
+                from pathlib import Path as _Path
+                ext = _Path(original_filename).suffix.lower()
+                if ext:
+                    original_ext = ext
+        except Exception:
+            pass  # Best-effort — fall back to .pdf
+
+        candidates = [
+            "metadata.json",
+            "entities.json",
+            f"original{original_ext}",
+            "masked.pdf",
+        ]
+        for filename in candidates:
+            path = self._session_path(session_id, filename)
+            response = requests.delete(self._url(path), headers=self._headers())
+            if response.status_code == 404:
+                continue  # File never existed — not an error
+            response.raise_for_status()

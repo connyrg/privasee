@@ -244,6 +244,56 @@ def _step1_layout() -> html.Div:
                     [
                         html.H5("De-identification Rules", className="card-title mb-1"),
                         html.Small(STRATEGY_GUIDE, className="text-muted d-block mb-3"),
+                        # System template row
+                        dbc.Row(
+                            [
+                                dbc.Col(html.Small("Templates:", className="text-muted fw-semibold"), width="auto", className="d-flex align-items-center"),
+                                dbc.Col(
+                                    dcc.Dropdown(
+                                        id="template-dropdown",
+                                        placeholder="Load a system template...",
+                                        options=[],
+                                        clearable=True,
+                                        style={"fontSize": "0.875rem"},
+                                    ),
+                                    width=5,
+                                ),
+                                dbc.Col(
+                                    dbc.Button("Load", id="template-load-btn", color="outline-secondary", size="sm", disabled=True),
+                                    width="auto",
+                                ),
+                            ],
+                            className="g-2 mb-2 align-items-center",
+                        ),
+                        # Config save / load row
+                        dbc.Row(
+                            [
+                                dbc.Col(
+                                    dcc.Dropdown(
+                                        id="config-load-dropdown",
+                                        placeholder="Load saved config...",
+                                        options=[],
+                                        clearable=True,
+                                        style={"fontSize": "0.875rem"},
+                                    ),
+                                    width=5,
+                                ),
+                                dbc.Col(
+                                    dbc.Button("Load", id="config-load-btn", color="outline-primary", size="sm", disabled=True),
+                                    width="auto",
+                                ),
+                                dbc.Col(
+                                    dbc.Input(id="config-save-name", placeholder="Save as...", size="sm", debounce=True),
+                                    width=3,
+                                ),
+                                dbc.Col(
+                                    dbc.Button("Save", id="config-save-btn", color="outline-success", size="sm", disabled=True),
+                                    width="auto",
+                                ),
+                            ],
+                            className="g-2 mb-2 align-items-center",
+                        ),
+                        html.Div(id="config-status", className="mb-2"),
                         # Column headers
                         dbc.Row(
                             [
@@ -558,6 +608,7 @@ app.layout = dbc.Container(
         dcc.Store(id="store-step", data=1),
         dcc.Store(id="store-session", data=None),
         dcc.Store(id="store-fields", data=DEFAULT_FIELDS),
+        dcc.Store(id="store-configs", data=[]),
         dcc.Store(id="store-entities", data=None),
         dcc.Store(id="store-mask-result", data=None),
         dcc.Store(id="error-msg", data=None),
@@ -1077,6 +1128,158 @@ def toggle_masked(show: bool):
 
 
 # ---------------------------------------------------------------------------
+# Config management
+# ---------------------------------------------------------------------------
+
+
+@callback(
+    Output("store-configs", "data"),
+    Output("config-load-dropdown", "options"),
+    Input("store-step", "data"),
+)
+def refresh_config_list(step: int):
+    """Fetch saved configs from the API whenever the user is on step 1."""
+    if step != 1:
+        raise PreventUpdate
+    headers = {"Authorization": f"Key {os.environ.get('POSIT_CONNECT_API_KEY', '')}"}
+    try:
+        r = req.get(f"{API_BASE_URL}/api/configs", headers=headers, verify=SSL_VERIFY, timeout=10)
+        if r.ok:
+            configs = r.json()
+            options = [{"label": c["config_name"], "value": c["key"]} for c in configs]
+            return configs, options
+    except Exception:
+        pass
+    return [], []
+
+
+@callback(
+    Output("config-load-btn", "disabled"),
+    Input("config-load-dropdown", "value"),
+)
+def toggle_load_btn(value):
+    return not bool(value)
+
+
+@callback(
+    Output("store-fields", "data", allow_duplicate=True),
+    Output("config-status", "children"),
+    Input("config-load-btn", "n_clicks"),
+    State("config-load-dropdown", "value"),
+    prevent_initial_call=True,
+)
+def load_config(n_clicks, key):
+    if not n_clicks or not key:
+        raise PreventUpdate
+    headers = {"Authorization": f"Key {os.environ.get('POSIT_CONNECT_API_KEY', '')}"}
+    try:
+        r = req.get(f"{API_BASE_URL}/api/configs/{key}", headers=headers, verify=SSL_VERIFY, timeout=10)
+        r.raise_for_status()
+        field_defs = r.json().get("field_definitions", [])
+        fields = [_new_field(f["name"], f["description"], f["strategy"]) for f in field_defs]
+        alert = dbc.Alert("Config loaded.", color="success", dismissable=True, duration=3000)
+        return fields, alert
+    except Exception as exc:
+        return no_update, dbc.Alert(f"Failed to load config: {exc}", color="danger", dismissable=True)
+
+
+@callback(
+    Output("config-save-btn", "disabled"),
+    Input("config-save-name", "value"),
+)
+def toggle_save_btn(name):
+    return not bool(name and name.strip())
+
+
+@callback(
+    Output("config-status", "children", allow_duplicate=True),
+    Output("store-configs", "data", allow_duplicate=True),
+    Output("config-load-dropdown", "options", allow_duplicate=True),
+    Input("config-save-btn", "n_clicks"),
+    State("config-save-name", "value"),
+    State("store-fields", "data"),
+    prevent_initial_call=True,
+)
+def save_config(n_clicks, name, fields):
+    if not n_clicks or not name:
+        raise PreventUpdate
+    # Filter out rows with empty name or description (same as process_document)
+    field_defs = [
+        {"name": f["name"], "description": f["description"], "strategy": f["strategy"]}
+        for f in (fields or [])
+        if f.get("name") and f.get("description")
+    ]
+    if not field_defs:
+        return dbc.Alert("Please fill in at least one field name and description before saving.", color="warning", dismissable=True), no_update, no_update
+    headers = {"Authorization": f"Key {os.environ.get('POSIT_CONNECT_API_KEY', '')}"}
+    try:
+        r = req.post(
+            f"{API_BASE_URL}/api/configs",
+            headers=headers,
+            json={"config_name": name, "field_definitions": field_defs},
+            verify=SSL_VERIFY,
+            timeout=10,
+        )
+        r.raise_for_status()
+        # Refresh the dropdown list
+        r2 = req.get(f"{API_BASE_URL}/api/configs", headers=headers, verify=SSL_VERIFY, timeout=10)
+        configs = r2.json() if r2.ok else []
+        options = [{"label": c["config_name"], "value": c["key"]} for c in configs]
+        alert = dbc.Alert(f"Config \"{name}\" saved.", color="success", dismissable=True, duration=3000)
+        return alert, configs, options
+    except Exception as exc:
+        return dbc.Alert(f"Failed to save config: {exc}", color="danger", dismissable=True), no_update, no_update
+
+
+@callback(
+    Output("template-dropdown", "options"),
+    Input("store-step", "data"),
+)
+def refresh_template_list(step: int):
+    """Populate the system template dropdown when the user is on step 1."""
+    if step != 1:
+        raise PreventUpdate
+    headers = {"Authorization": f"Key {os.environ.get('POSIT_CONNECT_API_KEY', '')}"}
+    try:
+        r = req.get(f"{API_BASE_URL}/api/templates", headers=headers, verify=SSL_VERIFY, timeout=10)
+        if r.ok:
+            return [{"label": t["template_name"], "value": t["key"]} for t in r.json()]
+    except Exception:
+        pass
+    return []
+
+
+@callback(
+    Output("template-load-btn", "disabled"),
+    Input("template-dropdown", "value"),
+)
+def toggle_template_load_btn(value):
+    return not bool(value)
+
+
+@callback(
+    Output("store-fields", "data", allow_duplicate=True),
+    Output("config-status", "children", allow_duplicate=True),
+    Input("template-load-btn", "n_clicks"),
+    State("template-dropdown", "value"),
+    prevent_initial_call=True,
+)
+def load_template(n_clicks, key):
+    if not n_clicks or not key:
+        raise PreventUpdate
+    headers = {"Authorization": f"Key {os.environ.get('POSIT_CONNECT_API_KEY', '')}"}
+    try:
+        r = req.get(f"{API_BASE_URL}/api/templates/{key}", headers=headers, verify=SSL_VERIFY, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        fields = [_new_field(f["name"], f["description"], f["strategy"]) for f in data.get("field_definitions", [])]
+        alert = dbc.Alert(f"Template \"{data['template_name']}\" loaded.", color="success", dismissable=True, duration=3000)
+        return fields, alert
+    except Exception as exc:
+        return no_update, dbc.Alert(f"Failed to load template: {exc}", color="danger", dismissable=True)
+
+
+# ---------------------------------------------------------------------------
 # Reset workflow
 # ---------------------------------------------------------------------------
 
@@ -1088,13 +1291,28 @@ def toggle_masked(show: bool):
     Output("store-entities", "data", allow_duplicate=True),
     Output("store-mask-result", "data", allow_duplicate=True),
     Output("error-msg", "data", allow_duplicate=True),
+    Output("upload-status", "children", allow_duplicate=True),
+    Output("session-banner", "children", allow_duplicate=True),
+    Output("pdf-upload", "contents", allow_duplicate=True),
     Input("reset-btn", "n_clicks"),
+    State("store-session", "data"),
     prevent_initial_call=True,
 )
-def reset_workflow(n_clicks: int):
+def reset_workflow(n_clicks: int, session_id: str):
     if not n_clicks:
         raise PreventUpdate
-    return 1, None, DEFAULT_FIELDS, None, None, None
+    if session_id:
+        headers = {"Authorization": f"Key {os.environ.get('POSIT_CONNECT_API_KEY', '')}"}
+        try:
+            req.delete(
+                f"{API_BASE_URL}/api/sessions/{session_id}",
+                headers=headers,
+                verify=SSL_VERIFY,
+                timeout=10,
+            )
+        except Exception:
+            pass  # Non-fatal — local stores are cleared regardless
+    return 1, None, DEFAULT_FIELDS, None, None, None, None, None, None
 
 
 # ---------------------------------------------------------------------------

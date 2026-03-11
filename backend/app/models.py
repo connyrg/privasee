@@ -233,6 +233,45 @@ class HealthResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Config management
+# ---------------------------------------------------------------------------
+
+class SaveConfigRequest(BaseModel):
+    """Request body for POST /api/configs."""
+    config_name: str = Field(..., min_length=1, max_length=80)
+    field_definitions: List[FieldDefinition] = Field(..., min_length=1)
+
+
+class ConfigSummary(BaseModel):
+    """Lightweight config metadata returned by GET /api/configs."""
+    config_name: str
+    key: str
+    saved_at: str
+
+
+class ConfigDetail(ConfigSummary):
+    """Full config including field definitions, returned by GET /api/configs/{key}."""
+    field_definitions: List[FieldDefinition]
+
+
+# ---------------------------------------------------------------------------
+# System templates
+# ---------------------------------------------------------------------------
+
+class SystemTemplateSummary(BaseModel):
+    """Lightweight system template metadata returned by GET /api/templates."""
+    key: str
+    template_name: str
+    description: str
+    field_count: int
+
+
+class SystemTemplateDetail(SystemTemplateSummary):
+    """Full system template with field definitions, returned by GET /api/templates/{key}."""
+    field_definitions: List[FieldDefinition]
+
+
+# ---------------------------------------------------------------------------
 # Error
 # ---------------------------------------------------------------------------
 

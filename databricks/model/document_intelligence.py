@@ -366,7 +366,7 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
                             .replace(' ', '_')
                             .replace('-', '_')
                         )
-                        entity_label_counters[etype] = entity_label_counters[etype].get(etype, 0) + 1
+                        entity_label_counters[etype] = entity_label_counters.get(etype, 0) + 1
                         count = entity_label_counters[etype]
                         suffix = chr(64 + count) if count <= 26 else str(count)
                         entity_label_consistency[key] = f"{etype}_{suffix}"
