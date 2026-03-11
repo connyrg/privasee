@@ -8,18 +8,14 @@ This test suite verifies:
 4. Image OCR processing
 5. Error handling for missing credentials
 
-All Azure Document Intelligence API calls are mocked.
+All Azure Document Intelligence API calls are mocked via adi_utils.
 """
 
 import unittest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch, MagicMock, mock_open
 import io
 import os
-
-# Mock the azure modules before importing ocr_service
-import sys
-sys.modules['azure.ai.documentintelligence'] = MagicMock()
-sys.modules['azure.core.credentials'] = MagicMock()
+import tempfile
 
 from databricks.model.ocr_service import OCRService, PageSource
 
@@ -28,30 +24,50 @@ class TestOCRServiceInit(unittest.TestCase):
     """Test OCR service initialization"""
     
     def test_init_success(self):
-        """Test successful initialization with valid credentials"""
+        """Test successful initialization with valid OAuth credentials"""
         with patch.dict(os.environ, {
-            'AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT': 'https://test.cognitiveservices.azure.com/',
-            'AZURE_DOCUMENT_INTELLIGENCE_KEY': 'test-key-123'
+            'ADI_TENANT_ID': '1356bcf3-c075-43d5-a54c-ba71df07ff70',
+            'ADI_CLIENT_ID': 'test-client-id',
+            'ADI_CLIENT_SECRET': 'test-secret',
+            'ADI_ENDPOINT': 'https://apim-nonprod-idp.azure-api.net/documentintelligence/documentModels/{model}:analyze',
+            'ADI_APPSPACE_ID': 'A-007100',
+            'HTTP_PROXY': 'http://awsproxy.int.corp.sun:8989',
+            'HTTPS_PROXY': 'http://awsproxy.int.corp.sun:8989'
         }):
             service = OCRService()
-            self.assertEqual(service.adi_endpoint, 'https://test.cognitiveservices.azure.com/')
-            self.assertEqual(service.adi_key, 'test-key-123')
+            self.assertEqual(service.adi_tenant_id, '1356bcf3-c075-43d5-a54c-ba71df07ff70')
+            self.assertEqual(service.adi_client_id, 'test-client-id')
+            self.assertEqual(service.adi_client_secret, 'test-secret')
+            self.assertTrue(service.adi_available)
     
     def test_init_missing_credentials(self):
         """Test initialization succeeds without credentials (for digital PDFs/DOCX only)"""
         with patch.dict(os.environ, {}, clear=True):
             service = OCRService()
-            self.assertIsNone(service.adi_client)
-            self.assertIsNone(service.adi_endpoint)
-            self.assertIsNone(service.adi_key)
+            self.assertFalse(service.adi_available)
+            self.assertIsNone(service.adi_tenant_id)
+            self.assertIsNone(service.adi_client_id)
+            self.assertIsNone(service.adi_client_secret)
+    
+    def test_init_with_dummy_credentials(self):
+        """Test that dummy credentials are treated as unavailable"""
+        with patch.dict(os.environ, {
+            'ADI_TENANT_ID': '1356bcf3-c075-43d5-a54c-ba71df07ff70',
+            'ADI_CLIENT_ID': 'dummy_client_id',
+            'ADI_CLIENT_SECRET': 'dummy_secret'
+        }):
+            service = OCRService()
+            self.assertFalse(service.adi_available)
+
 
 class TestPolygonToBBox(unittest.TestCase):
     """Test bounding box conversion from ADI polygon format"""
     
     def setUp(self):
         with patch.dict(os.environ, {
-            'AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT': 'https://test.cognitiveservices.azure.com/',
-            'AZURE_DOCUMENT_INTELLIGENCE_KEY': 'test-key-123'
+            'ADI_TENANT_ID': '1356bcf3-c075-43d5-a54c-ba71df07ff70',
+            'ADI_CLIENT_ID': 'test-client-id',
+            'ADI_CLIENT_SECRET': 'test-secret'
         }):
             self.service = OCRService()
     
@@ -95,8 +111,9 @@ class TestDigitalPDFProcessing(unittest.TestCase):
     
     def setUp(self):
         with patch.dict(os.environ, {
-            'AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT': 'https://test.cognitiveservices.azure.com/',
-            'AZURE_DOCUMENT_INTELLIGENCE_KEY': 'test-key-123'
+            'ADI_TENANT_ID': '1356bcf3-c075-43d5-a54c-ba71df07ff70',
+            'ADI_CLIENT_ID': 'test-client-id',
+            'ADI_CLIENT_SECRET': 'test-secret'
         }):
             self.service = OCRService()
     
@@ -161,13 +178,16 @@ class TestScannedPDFProcessing(unittest.TestCase):
     
     def setUp(self):
         with patch.dict(os.environ, {
-            'AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT': 'https://test.cognitiveservices.azure.com/',
-            'AZURE_DOCUMENT_INTELLIGENCE_KEY': 'test-key-123'
+            'ADI_TENANT_ID': '1356bcf3-c075-43d5-a54c-ba71df07ff70',
+            'ADI_CLIENT_ID': 'test-client-id',
+            'ADI_CLIENT_SECRET': 'test-secret'
         }):
             self.service = OCRService()
     
+    @patch('databricks.model.ocr_service.analyze_document_complete')
+    @patch('databricks.model.ocr_service.generate_adi_token')
     @patch('fitz.open')
-    def test_scanned_page_detection(self, mock_fitz_open):
+    def test_scanned_page_detection(self, mock_fitz_open, mock_gen_token, mock_analyze):
         """Test that pages with minimal text are detected as scanned"""
         # Create mock PDF with scanned page (no text)
         mock_doc = MagicMock()
@@ -188,23 +208,27 @@ class TestScannedPDFProcessing(unittest.TestCase):
         mock_doc.__getitem__.return_value = mock_page
         mock_fitz_open.return_value = mock_doc
         
-        # Mock ADI OCR response
-        mock_adi_result = Mock()
-        mock_adi_result.content = "Scanned"  # Set the text content
-        mock_adi_page = Mock()
+        # Mock OAuth token generation
+        mock_gen_token.return_value = "fake-oauth-token"
         
-        mock_word1 = Mock()
-        mock_word1.content = "Scanned"
-        mock_word1.confidence = 0.98
-        mock_word1.polygon = [50.0, 100.0, 120.0, 100.0, 120.0, 115.0, 50.0, 115.0]
-        
-        mock_adi_page.words = [mock_word1]
-        mock_adi_result.pages = [mock_adi_page]
-        
-        mock_poller = Mock()
-        mock_poller.result.return_value = mock_adi_result
-        
-        self.service.adi_client.begin_analyze_document = Mock(return_value=mock_poller)
+        # Mock ADI REST API response (analyzeResult format)
+        mock_adi_response = {
+            "analyzeResult": {
+                "content": "Scanned",
+                "pages": [
+                    {
+                        "words": [
+                            {
+                                "content": "Scanned",
+                                "confidence": 0.98,
+                                "polygon": [50.0, 100.0, 120.0, 100.0, 120.0, 115.0, 50.0, 115.0]
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+        mock_analyze.return_value = mock_adi_response
         
         # Process PDF
         pdf_bytes = b"fake pdf bytes"
@@ -215,6 +239,12 @@ class TestScannedPDFProcessing(unittest.TestCase):
         self.assertEqual(results[0]['source'], PageSource.SCANNED_PDF)
         self.assertEqual(results[0]['page_num'], 1)
         self.assertIn("Scanned", results[0]['text'])
+        
+        # Verify OAuth token was generated
+        mock_gen_token.assert_called_once()
+        
+        # Verify analyze_document_complete was called
+        mock_analyze.assert_called_once()
         
         # Verify OCR words have correct bounding boxes
         self.assertEqual(len(results[0]['words']), 1)
@@ -231,8 +261,9 @@ class TestDocxProcessing(unittest.TestCase):
     
     def setUp(self):
         with patch.dict(os.environ, {
-            'AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT': 'https://test.cognitiveservices.azure.com/',
-            'AZURE_DOCUMENT_INTELLIGENCE_KEY': 'test-key-123'
+            'ADI_TENANT_ID': '1356bcf3-c075-43d5-a54c-ba71df07ff70',
+            'ADI_CLIENT_ID': 'test-client-id',
+            'ADI_CLIENT_SECRET': 'test-secret'
         }):
             self.service = OCRService()
     
@@ -271,35 +302,42 @@ class TestImageProcessing(unittest.TestCase):
     
     def setUp(self):
         with patch.dict(os.environ, {
-            'AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT': 'https://test.cognitiveservices.azure.com/',
-            'AZURE_DOCUMENT_INTELLIGENCE_KEY': 'test-key-123'
+            'ADI_TENANT_ID': '1356bcf3-c075-43d5-a54c-ba71df07ff70',
+            'ADI_CLIENT_ID': 'test-client-id',
+            'ADI_CLIENT_SECRET': 'test-secret'
         }):
             self.service = OCRService()
     
-    def test_image_ocr(self):
+    @patch('databricks.model.ocr_service.analyze_document_complete')
+    @patch('databricks.model.ocr_service.generate_adi_token')
+    def test_image_ocr(self, mock_gen_token, mock_analyze):
         """Test OCR processing of image files"""
-        # Mock ADI OCR response
-        mock_adi_result = Mock()
-        mock_adi_result.content = "Image Text"  # Set the text content
-        mock_adi_page = Mock()
+        # Mock OAuth token generation
+        mock_gen_token.return_value = "fake-oauth-token"
         
-        mock_word1 = Mock()
-        mock_word1.content = "Image"
-        mock_word1.confidence = 0.99
-        mock_word1.polygon = [10.0, 20.0, 60.0, 20.0, 60.0, 35.0, 10.0, 35.0]
-        
-        mock_word2 = Mock()
-        mock_word2.content = "Text"
-        mock_word2.confidence = 0.97
-        mock_word2.polygon = [70.0, 20.0, 110.0, 20.0, 110.0, 35.0, 70.0, 35.0]
-        
-        mock_adi_page.words = [mock_word1, mock_word2]
-        mock_adi_result.pages = [mock_adi_page]
-        
-        mock_poller = Mock()
-        mock_poller.result.return_value = mock_adi_result
-        
-        self.service.adi_client.begin_analyze_document = Mock(return_value=mock_poller)
+        # Mock ADI REST API response (analyzeResult format)
+        mock_adi_response = {
+            "analyzeResult": {
+                "content": "Image Text",
+                "pages": [
+                    {
+                        "words": [
+                            {
+                                "content": "Image",
+                                "confidence": 0.99,
+                                "polygon": [10.0, 20.0, 60.0, 20.0, 60.0, 35.0, 10.0, 35.0]
+                            },
+                            {
+                                "content": "Text",
+                                "confidence": 0.97,
+                                "polygon": [70.0, 20.0, 110.0, 20.0, 110.0, 35.0, 70.0, 35.0]
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+        mock_analyze.return_value = mock_adi_response
 
         # Process image — mock PIL so fake bytes don't raise
         image_bytes = b"fake image bytes"
@@ -314,6 +352,12 @@ class TestImageProcessing(unittest.TestCase):
         self.assertEqual(results[0]['page_num'], 1)
         self.assertEqual(results[0]['text'], "Image Text")
         
+        # Verify OAuth token was generated
+        mock_gen_token.assert_called_once()
+        
+        # Verify analyze_document_complete was called
+        mock_analyze.assert_called_once()
+        
         # Verify words
         self.assertEqual(len(results[0]['words']), 2)
         self.assertEqual(results[0]['words'][0]['text'], 'Image')
@@ -326,8 +370,9 @@ class TestProcessDocument(unittest.TestCase):
     
     def setUp(self):
         with patch.dict(os.environ, {
-            'AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT': 'https://test.cognitiveservices.azure.com/',
-            'AZURE_DOCUMENT_INTELLIGENCE_KEY': 'test-key-123'
+            'ADI_TENANT_ID': '1356bcf3-c075-43d5-a54c-ba71df07ff70',
+            'ADI_CLIENT_ID': 'test-client-id',
+            'ADI_CLIENT_SECRET': 'test-secret'
         }):
             self.service = OCRService()
     
@@ -363,6 +408,40 @@ class TestProcessDocument(unittest.TestCase):
             mock_process_image.reset_mock()
             self.service.process_document(b"fake bytes", ext)
             mock_process_image.assert_called_once()
+
+
+class TestErrorHandling(unittest.TestCase):
+    """Test error handling for missing credentials"""
+    
+    def test_scanned_pdf_without_credentials(self):
+        """Test that scanned PDF processing fails without ADI credentials"""
+        with patch.dict(os.environ, {}, clear=True):
+            service = OCRService()
+            
+            # Create mock scanned page
+            with patch('fitz.open') as mock_fitz_open:
+                mock_doc = MagicMock()
+                mock_page = MagicMock()
+                mock_page.get_text.return_value = ""  # Scanned (no text)
+                mock_doc.__len__.return_value = 1
+                mock_doc.__iter__.return_value = [mock_page]
+                mock_doc.__getitem__.return_value = mock_page
+                mock_fitz_open.return_value = mock_doc
+                
+                with self.assertRaises(ValueError) as context:
+                    service._process_pdf(b"fake pdf")
+                
+                self.assertIn("credentials", str(context.exception).lower())
+    
+    def test_image_without_credentials(self):
+        """Test that image processing fails without ADI credentials"""
+        with patch.dict(os.environ, {}, clear=True):
+            service = OCRService()
+            
+            with self.assertRaises(ValueError) as context:
+                service._process_image(b"fake image")
+            
+            self.assertIn("credentials", str(context.exception).lower())
 
 
 if __name__ == '__main__':

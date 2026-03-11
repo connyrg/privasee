@@ -12,12 +12,13 @@ Features:
 - Images: OCR with Azure Document Intelligence
 - Accurate word-level bounding boxes for masking
 
-Dependencies: PyMuPDF (fitz), python-docx, azure-ai-documentintelligence
+Dependencies: PyMuPDF (fitz), python-docx, requests
 """
 
 import os
 import io
 import base64
+import tempfile
 from typing import List, Dict, Any
 from enum import Enum
 import logging
@@ -25,8 +26,8 @@ import logging
 import fitz  # PyMuPDF
 from docx import Document
 from PIL import Image
-from azure.ai.documentintelligence import DocumentIntelligenceClient
-from azure.core.credentials import AzureKeyCredential
+
+from ..utils.adi_utils import generate_adi_token, analyze_document_complete
 
 logger = logging.getLogger(__name__)
 
@@ -44,46 +45,60 @@ class OCRService:
     Service for extracting text and word-level bounding boxes from documents.
     
     Uses intelligent detection to minimize OCR calls:
-    - Digital PDF pages → direct text extraction
-    - Scanned PDF pages → render to PNG → OCR
-    - Word documents → direct text extraction
-    - Images → OCR
+    - Digital PDF pages -> direct text extraction
+    - Scanned PDF pages -> render to PNG -> OCR
+    - Word documents -> direct text extraction
+    - Images -> OCR
     """
     
     # Threshold for determining if a PDF page has enough text to be "digital"
     MIN_TEXT_LENGTH_FOR_DIGITAL = 50
     
-    # PyMuPDF zoom factor for rendering scanned pages (2.0 ≈ 144 DPI)
+    # PyMuPDF zoom factor for rendering scanned pages (2.0 ~= 144 DPI)
     RENDER_ZOOM_FACTOR = 2.0
     
     def __init__(self):
         """
-        Initialize OCR service with optional Azure Document Intelligence credentials.
+        Initialize OCR service with Azure Document Intelligence OAuth credentials.
         
         ADI credentials are only required for:
         - Scanned PDF pages (image-only, no text layer)
         - Image files (png, jpg, jpeg)
         
         Digital PDFs and DOCX files work without ADI.
-        """
-        self.adi_endpoint = os.environ.get("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT")
-        self.adi_key = os.environ.get("AZURE_DOCUMENT_INTELLIGENCE_KEY")
         
-        # Make ADI client optional - only create if credentials are provided
-        if self.adi_endpoint and self.adi_key and \
-           self.adi_endpoint != "dummy_endpoint" and self.adi_key != "dummy_key":
-            try:
-                self.adi_client = DocumentIntelligenceClient(
-                    endpoint=self.adi_endpoint,
-                    credential=AzureKeyCredential(self.adi_key)
-                )
-                logger.info("Azure Document Intelligence client initialized")
-            except Exception as e:
-                logger.warning(f"Failed to initialize ADI client: {e}. Will only work with digital PDFs/DOCX.")
-                self.adi_client = None
+        Note: HTTP_PROXY and HTTPS_PROXY environment variables are automatically
+        used by the requests library, so we don't need to pass them explicitly.
+        """
+        # OAuth credentials for Suncorp APIM gateway
+        self.adi_tenant_id = os.environ.get("ADI_TENANT_ID")
+        self.adi_client_id = os.environ.get("ADI_CLIENT_ID")
+        self.adi_client_secret = os.environ.get("ADI_CLIENT_SECRET")
+        self.adi_api_app_id_uri = os.environ.get(
+            "ADI_API_APP_ID_URI",
+            "api://aeddc053-d47f-4352-9977-4313e0625905"
+        )
+        
+        # APIM endpoint configuration
+        self.adi_endpoint = os.environ.get(
+            "ADI_ENDPOINT",
+            "https://apim-nonprod-idp.azure-api.net/documentintelligence/documentModels/{model}:analyze"
+        )
+        self.adi_appspace_id = os.environ.get("ADI_APPSPACE_ID", "A-007100")
+        self.adi_model_id = os.environ.get("ADI_MODEL_ID", "prebuilt-layout")
+        
+        # Check if ADI credentials are available
+        self.adi_available = all([
+            self.adi_tenant_id,
+            self.adi_client_id,
+            self.adi_client_secret,
+            self.adi_endpoint
+        ]) and self.adi_client_id != "dummy_client_id" and self.adi_client_secret != "dummy_secret"
+        
+        if self.adi_available:
+            logger.info("Azure Document Intelligence OAuth credentials configured")
         else:
-            logger.info("No ADI credentials provided. Service will work with digital PDFs and DOCX only.")
-            self.adi_client = None
+            logger.info("No ADI OAuth credentials provided. Service will work with digital PDFs and DOCX only.")
     
     def process_document(
         self, 
@@ -213,16 +228,16 @@ class OCRService:
         Render scanned PDF page to PNG and OCR with Azure Document Intelligence.
         Also includes the PNG as base64 for vision API processing.
         
-        Requires Azure Document Intelligence credentials.
+        Requires Azure Document Intelligence OAuth credentials.
         """
-        if not self.adi_client:
+        if not self.adi_available:
             raise ValueError(
                 "Scanned PDF page detected but no Azure Document Intelligence credentials provided. "
-                "Please set AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT and AZURE_DOCUMENT_INTELLIGENCE_KEY "
+                "Please set ADI_TENANT_ID, ADI_CLIENT_ID, and ADI_CLIENT_SECRET "
                 "environment variables with valid credentials."
             )
         
-        # Render page to PNG at 2x zoom (≈144 DPI)
+        # Render page to PNG at 2x zoom (~=144 DPI)
         mat = fitz.Matrix(self.RENDER_ZOOM_FACTOR, self.RENDER_ZOOM_FACTOR)
         pix = page.get_pixmap(matrix=mat)
         png_bytes = pix.tobytes("png")
@@ -286,19 +301,19 @@ class OCRService:
         OCR an image file with Azure Document Intelligence.
         Also includes the image as base64 for vision API processing.
         
-        Requires Azure Document Intelligence credentials.
+        Requires Azure Document Intelligence OAuth credentials.
         """
-        if not self.adi_client:
+        if not self.adi_available:
             raise ValueError(
                 "Image file detected but no Azure Document Intelligence credentials provided. "
-                "Please set AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT and AZURE_DOCUMENT_INTELLIGENCE_KEY "
+                "Please set ADI_TENANT_ID, ADI_CLIENT_ID, and ADI_CLIENT_SECRET "
                 "environment variables with valid credentials."
             )
         
         # Encode image to base64 for vision API
         image_b64 = base64.b64encode(image_bytes).decode('utf-8')
 
-        # Get image dimensions for normalisation (no extra I/O — bytes already in memory)
+        # Get image dimensions for normalisation (no extra I/O - bytes already in memory)
         img = Image.open(io.BytesIO(image_bytes))
         img_w, img_h = img.size
 
@@ -325,7 +340,11 @@ class OCRService:
     
     def _ocr_with_adi(self, image_bytes: bytes) -> Dict[str, Any]:
         """
-        Perform OCR using Azure Document Intelligence prebuilt-read model.
+        Perform OCR using Azure Document Intelligence via Suncorp APIM gateway.
+        
+        Uses OAuth authentication and direct REST API calls through adi_utils.
+        Proxies are configured via HTTP_PROXY and HTTPS_PROXY environment variables,
+        which are automatically used by the requests library.
         
         Returns:
             {
@@ -333,32 +352,53 @@ class OCRService:
                 "words": [...]  # Word-level bounding boxes
             }
         """
-        # Use prebuilt-read model for layout-aware OCR
-        poller = self.adi_client.begin_analyze_document(
-            "prebuilt-read",
-            analyze_request=image_bytes,
-            content_type="application/octet-stream"
-        )
-        result = poller.result()
+        # Write image bytes to temporary file (required by adi_utils)
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+            tmp_file.write(image_bytes)
+            tmp_file_path = tmp_file.name
         
-        # Extract text and words
-        full_text = result.content
-        words = []
+        try:
+            # Generate OAuth token (proxies automatically used from env vars)
+            token = generate_adi_token(
+                tenant_id=self.adi_tenant_id,
+                client_id=self.adi_client_id,
+                client_secret=self.adi_client_secret,
+                api_app_id_uri=self.adi_api_app_id_uri
+            )
+            
+            # Call ADI via adi_utils (proxies automatically used from env vars)
+            result = analyze_document_complete(
+                file_path=tmp_file_path,
+                token=token,
+                endpoint_url=self.adi_endpoint,
+                appspace_id=self.adi_appspace_id,
+                model_id=self.adi_model_id
+            )
+            
+            # Extract text and words from analyzeResult
+            analyze_result = result.get("analyzeResult", {})
+            full_text = analyze_result.get("content", "")
+            words = []
+            
+            for page in analyze_result.get("pages", []):
+                for word in page.get("words", []):
+                    # Convert ADI polygon to bounding box
+                    bbox = self._polygon_to_bbox(word.get("polygon", []))
+                    words.append({
+                        "text": word.get("content", ""),
+                        "confidence": word.get("confidence", 0.0),
+                        "bounding_box": bbox
+                    })
+            
+            return {
+                "text": full_text,
+                "words": words
+            }
         
-        for page in result.pages:
-            for word in page.words:
-                # Convert ADI polygon to bounding box
-                bbox = self._polygon_to_bbox(word.polygon)
-                words.append({
-                    "text": word.content,
-                    "confidence": word.confidence,
-                    "bounding_box": bbox
-                })
-        
-        return {
-            "text": full_text,
-            "words": words
-        }
+        finally:
+            # Clean up temporary file
+            if os.path.exists(tmp_file_path):
+                os.unlink(tmp_file_path)
     
     def _polygon_to_bbox(self, polygon: List[float]) -> Dict[str, float]:
         """

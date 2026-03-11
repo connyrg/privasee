@@ -2,7 +2,7 @@
 Document Intelligence Model for Databricks Model Serving
 
 This MLflow PyFunc model chains:
-1. OCR Service (Azure Document Intelligence) - Extract text and bounding boxes
+1. OCR Service (Azure Document Intelligence via Suncorp APIM OAuth) - Extract text and bounding boxes
 2. Vision Service (Claude or Azure OpenAI) - Detect sensitive entities
 3. BBox Matcher - Match entities to OCR words for precise redaction coordinates
 
@@ -15,6 +15,12 @@ Environment Variables:
 - AZURE_OPENAI_ENDPOINT: Required if provider is "openai"
 - AZURE_OPENAI_API_VERSION: Optional, defaults to "2024-02-15-preview"
 - AZURE_OPENAI_DEPLOYMENT_NAME: Optional, defaults to "gpt-4o"
+- ADI_TENANT_ID: Azure tenant ID for OAuth (defaults to Suncorp tenant)
+- ADI_CLIENT_ID: OAuth client ID for ADI
+- ADI_CLIENT_SECRET: OAuth client secret for ADI
+- ADI_ENDPOINT: APIM endpoint for Document Intelligence
+- ADI_APPSPACE_ID: Suncorp AppSpace ID
+- ADI_MODEL_ID: Document Intelligence model ID (defaults to "prebuilt-layout")
 """
 
 import mlflow.pyfunc
@@ -28,10 +34,6 @@ import time
 from typing import Dict, List, Any
 import io
 from mimetypes import guess_type
-
-# Azure Document Intelligence
-from azure.ai.documentintelligence import DocumentIntelligenceClient
-from azure.core.credentials import AzureKeyCredential
 
 # Our service modules
 from .ocr_service import OCRService
@@ -48,7 +50,7 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
     MLflow model for document de-identification using vision AI and Azure DI.
     
     Implements the complete pipeline:
-    - Document OCR (text + word-level bounding boxes)
+    - Document OCR (text + word-level bounding boxes) via ADI OAuth
     - Entity detection with vision AI (Claude or Azure OpenAI)
     - Bounding box matching for precise redaction
     - Write-through storage to Unity Catalog volumes
@@ -68,21 +70,9 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
         """
         logger.info("Initializing Document Intelligence Model")
         
-        # Initialize Azure Document Intelligence client
-        adi_endpoint = os.environ.get("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT")
-        adi_key = os.environ.get("AZURE_DOCUMENT_INTELLIGENCE_KEY")
-        
-        if not adi_endpoint or not adi_key:
-            raise ValueError(
-                "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT and "
-                "AZURE_DOCUMENT_INTELLIGENCE_KEY must be set"
-            )
-        
-        self.adi_client = DocumentIntelligenceClient(
-            endpoint=adi_endpoint,
-            credential=AzureKeyCredential(adi_key)
-        )
-        logger.info("Azure Document Intelligence client initialized")
+        # Initialize OCR service (handles ADI OAuth internally)
+        self.ocr_service = OCRService()
+        logger.info("OCR service initialized (ADI OAuth)")
         
         # Determine vision service provider
         vision_provider = os.environ.get("VISION_SERVICE_PROVIDER", "openai").lower()
@@ -135,8 +125,7 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
             )
             logger.info(f"Azure OpenAI vision service initialized (deployment: {azure_openai_deployment})")
         
-        # Initialize OCR service, BBox matcher, and fake data generator
-        self.ocr_service = OCRService()
+        # Initialize BBox matcher and fake data generator
         self.bbox_matcher = BBoxMatcher()
         self.fake_data_service = FakeDataService()
         
@@ -241,7 +230,7 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
         fetch_time = time.time() - fetch_start
         logger.info(f"⏱️  File fetch: {fetch_time:.2f}s")
 
-        # Extract file extension from stored filename (e.g. "original.pdf" → "pdf")
+        # Extract file extension from stored filename (e.g. "original.pdf" -> "pdf")
         file_extension = document_filename.split('.')[-1].lower()
 
         # Step 1: OCR - Extract text and word-level bounding boxes
@@ -356,7 +345,7 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
 
                 if entity.get('strategy') == 'Fake Data' and not entity.get('replacement_text'):
                     # Realistic fake value — same original always maps to same
-                    # replacement (e.g. "John Smith" → "Jane Doe" everywhere).
+                    # replacement (e.g. "John Smith" -> "Jane Doe" everywhere).
                     original = entity.get('original_text', '')
                     key = original.lower().strip()
                     if key not in fake_data_consistency:
@@ -377,7 +366,7 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
                             .replace(' ', '_')
                             .replace('-', '_')
                         )
-                        entity_label_counters[etype] = entity_label_counters.get(etype, 0) + 1
+                        entity_label_counters[etype] = entity_label_counters[etype].get(etype, 0) + 1
                         count = entity_label_counters[etype]
                         suffix = chr(64 + count) if count <= 26 else str(count)
                         entity_label_consistency[key] = f"{etype}_{suffix}"

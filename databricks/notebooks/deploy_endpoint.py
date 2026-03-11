@@ -53,7 +53,7 @@ UC_MODEL_PATH = f"{CATALOG}.{SCHEMA}.{MODEL_NAME}"
 
 # Endpoint configuration
 ENDPOINT_NAME = "privasee_endpoint_local"
-MODEL_VERSION = "13"  # Update to your registered model version
+MODEL_VERSION = "15"  # Update to your registered model version
 WORKLOAD_SIZE = "Small"  # Options: Small, Medium, Large
 SCALE_TO_ZERO = True  # Enable scale-to-zero to save costs
 
@@ -113,6 +113,21 @@ if VISION_PROVIDER == "openai":
     env_vars.update({
         "DATABRICKS_HOST": "https://suncorp-dev.cloud.databricks.com/",
         "DATABRICKS_TOKEN": f"{{{{secrets/Conny.GUNADI@suncorp.com.au/DATABRICKS_TOKEN_DEV}}}}",
+        "ADI_TENANT_ID": "1356bcf3-c075-43d5-a54c-ba71df07ff70",
+        "ADI_CLIENT_ID": f"{{{{secrets/apim_00010_1/client_id}}}}",
+        "ADI_CLIENT_SECRET": f"{{{{secrets/apim_00010_1/client_secret}}}}",   
+
+
+        "ADI_API_APP_ID_URI": "api://aeddc053-d47f-4352-9977-4313e0625905",
+        # Suncorp APIM Gateway endpoint for Azure Document Intelligence
+        "ADI_ENDPOINT": 'https://apim-nonprod-idp.azure-api.net/documentintelligence/documentModels/{model}:analyze',
+
+        # APIM AppSpace ID header value
+        "ADI_APPSPACE_ID": "A-007100",
+
+        # Azure Document Intelligence model to use
+        "ADI_MODEL_ID": "prebuilt-read" , 
+
         "AZURE_OPENAI_API_KEY": f"{{{{secrets/{OPENAI_SECRET_SCOPE}/apikey}}}}",
         "AZURE_OPENAI_ENDPOINT": "https://openai-00010-non-prod-1.openai.azure.com/",
         "AZURE_OPENAI_API_VERSION": "2024-02-15-preview",
