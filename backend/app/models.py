@@ -81,7 +81,12 @@ class Entity(BaseModel):
     original_text: str = Field(..., description="Original text found in the document")
     replacement_text: str = Field(default="", description="Text to replace it with")
     bounding_box: List[float] = Field(
-        ..., description="Normalised [x, y, width, height]"
+        ..., description="Normalised [x, y, width, height] — first occurrence, used for preview"
+    )
+    bounding_boxes: Optional[List[Any]] = Field(
+        default=None,
+        description="All occurrences in the document: list of [x,y,w,h] or {x,y,width,height}. "
+                    "Passed through to the masking model so every appearance is redacted.",
     )
     confidence: float = Field(default=0.9, ge=0.0, le=1.0)
     approved: bool = Field(default=True)

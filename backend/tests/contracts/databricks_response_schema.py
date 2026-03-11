@@ -107,6 +107,7 @@ DATABRICKS_RESPONSE_SCHEMA: dict = {
                 "confidence",
                 "approved",
                 "bounding_boxes",
+                "bounding_box",
             ],
             "additionalProperties": True,
             "properties": {
@@ -141,6 +142,14 @@ DATABRICKS_RESPONSE_SCHEMA: dict = {
                 "bounding_boxes": {
                     "type": "array",
                     "items": {"$ref": "#/$defs/bounding_box"},
+                },
+                "bounding_box": {
+                    # Flat [x, y, width, height] derived from bounding_boxes[0].
+                    # Required by the backend Entity model for preview display.
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "minItems": 4,
+                    "maxItems": 4,
                 },
             },
         },

@@ -179,3 +179,30 @@ def test_from_mlflow_response_model_version_defaults_to_none():
     result = DatabricksProcessResponse.from_mlflow_response(raw)
 
     assert result.model_version is None
+
+
+# ===========================================================================
+# bounding_boxes round-trip
+# ===========================================================================
+
+
+@pytest.mark.unit
+def test_from_mlflow_response_preserves_bounding_boxes():
+    """bounding_boxes (all occurrences) must survive Entity parsing intact.
+
+    The masking model reads this field to redact every occurrence of an entity,
+    not just the first one stored in bounding_box.
+    """
+    bboxes = [
+        {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.04},
+        {"x": 0.5, "y": 0.6, "width": 0.3, "height": 0.04},
+    ]
+    entity = _entity(bounding_boxes=bboxes)
+    raw = {"predictions": [{"pages": [{"page_num": 1, "entities": [entity]}]}]}
+
+    result = DatabricksProcessResponse.from_mlflow_response(raw)
+
+    assert result.entities[0].bounding_boxes == bboxes, (
+        "bounding_boxes was dropped during Entity parsing — "
+        "masking will only redact the first occurrence"
+    )

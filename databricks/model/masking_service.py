@@ -133,34 +133,33 @@ class MaskingService:
         draw = ImageDraw.Draw(image)
         img_width, img_height = image.size
 
-        sorted_entities = sorted(
-            entities,
-            key=lambda e: e["bounding_box"][2] * e["bounding_box"][3],
-            reverse=True,
-        )
-
-        for entity in sorted_entities:
-            bbox = entity["bounding_box"]
+        for entity in entities:
             raw_strategy = entity.get("strategy", "")
             strategy = self._STRATEGY_MAP.get(raw_strategy, "redact")
             replacement_text = entity.get("replacement_text", "")
-            x, y, width, height = self._normalize_bbox(bbox, img_width, img_height)
+            bboxes = self._resolve_bboxes(entity)
 
-            if width <= 0 or height <= 0:
-                continue
-
-            # Black Out → solid black rectangle, no text
-            # Fake Data / Entity Label → white rectangle + replacement text
             fill = (0, 0, 0) if strategy == "redact" else mask_color
-            draw.rectangle(
-                [x, y, x + width, y + height],
-                fill=fill,
-                outline=border_color,
-                width=1,
-            )
 
-            if strategy != "redact" and replacement_text:
-                self._draw_text(draw, replacement_text, x, y, width, height, text_color)
+            for bbox in bboxes:
+                if len(bbox) != 4:
+                    continue
+                x, y, width, height = self._normalize_bbox(bbox, img_width, img_height)
+
+                if width <= 0 or height <= 0:
+                    continue
+
+                # Black Out → solid black rectangle, no text
+                # Fake Data / Entity Label → white rectangle + replacement text
+                draw.rectangle(
+                    [x, y, x + width, y + height],
+                    fill=fill,
+                    outline=border_color,
+                    width=1,
+                )
+
+                if strategy != "redact" and replacement_text:
+                    self._draw_text(draw, replacement_text, x, y, width, height, text_color)
 
         image.save(output_path, "PNG", quality=95)
         return output_path
