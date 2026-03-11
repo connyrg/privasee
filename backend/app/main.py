@@ -381,14 +381,22 @@ async def upload_document(file: UploadFile = File(...)):
 
     logger.info("Uploaded %s → session %s (%d bytes)", filename, session_id, len(contents))
 
-    # The frontend hardcodes the original URL as /api/files/uploads/{session_id}.pdf
-    # (App.jsx line 48).  The file-serving endpoint looks up the session to find
-    # the actual stored filename, so the URL extension does not need to match.
+    # Count pages for PDFs using PyMuPDF (already a dependency).
+    page_count = 1
+    if ext == ".pdf":
+        try:
+            import fitz
+            doc = fitz.open(stream=contents, filetype="pdf")
+            page_count = doc.page_count
+            doc.close()
+        except Exception as exc:
+            logger.warning("Could not count pages for %s: %s", filename, exc)
+
     return UploadResponse(
         session_id=session_id,
         filename=filename,
         file_size=len(contents),
-        page_count=1,   # accurate page count requires PDF parsing — deferred to processing
+        page_count=page_count,
         preview_url=f"/api/files/uploads/{session_id}{ext}",
         message="File uploaded successfully",
     )

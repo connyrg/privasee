@@ -10,6 +10,9 @@ aiofiles>=23.0.0              # required by StaticFiles (conditionally mounted)
 # --- Data validation ---
 pydantic>=2.5.0
 
+# --- PDF page counting (upload endpoint) ---
+pymupdf>=1.23.0
+
 # --- HTTP client (for Databricks Model Serving calls) ---
 httpx>=0.26.0
 

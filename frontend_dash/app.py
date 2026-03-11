@@ -9,6 +9,7 @@ Set API_BASE_URL env var to point at the deployed FastAPI backend.
 from __future__ import annotations
 
 import base64
+import json
 import os
 import time
 import uuid
@@ -91,8 +92,8 @@ def proxy_masked_pdf(session_id: str) -> Response:
 STRATEGIES = ["Fake Data", "Black Out", "Entity Label"]
 
 
-def _new_field(name: str = "", description: str = "", strategy: str = "Fake Data") -> dict:
-    return {"id": str(uuid.uuid4()), "name": name, "description": description, "strategy": strategy}
+def _new_field(name: str = "", description: str = "", strategy: str = "Fake Data", source: str = "custom") -> dict:
+    return {"id": str(uuid.uuid4()), "name": name, "description": description, "strategy": strategy, "source": source}
 
 
 DEFAULT_FIELDS = [_new_field()]
@@ -154,6 +155,13 @@ def _step_indicator_content(step: int) -> list:
 
 def _field_row(field: dict, idx: int, total: int) -> html.Div:
     """Render one field-definition row."""
+    source = field.get("source", "custom")
+    badge = dbc.Badge(
+        "System" if source == "system" else "Custom",
+        color="primary" if source == "system" else "secondary",
+        pill=True,
+        style={"fontSize": "0.7rem"},
+    )
     return html.Div(
         dbc.Row(
             [
@@ -175,7 +183,7 @@ def _field_row(field: dict, idx: int, total: int) -> html.Div:
                         debounce=True,
                         size="sm",
                     ),
-                    width=5,
+                    width=4,
                 ),
                 dbc.Col(
                     dcc.Dropdown(
@@ -187,6 +195,7 @@ def _field_row(field: dict, idx: int, total: int) -> html.Div:
                     ),
                     width=3,
                 ),
+                dbc.Col(badge, width="auto", className="d-flex align-items-center"),
                 dbc.Col(
                     dbc.Button(
                         html.I(className="bi bi-trash"),
@@ -293,13 +302,48 @@ def _step1_layout() -> html.Div:
                             ],
                             className="g-2 mb-2 align-items-center",
                         ),
+                        # JSON import row
+                        dbc.Row(
+                            [
+                                dbc.Col(html.Small("Import JSON:", className="text-muted fw-semibold"), width="auto", className="d-flex align-items-center"),
+                                dbc.Col(
+                                    dcc.Upload(
+                                        id="config-json-upload",
+                                        children=dbc.Button("Browse...", color="outline-secondary", size="sm"),
+                                        accept=".json",
+                                        multiple=False,
+                                    ),
+                                    width="auto",
+                                ),
+                                dbc.Col(
+                                    html.Small("Upload a saved config .json file to load its fields.", className="text-muted"),
+                                    className="d-flex align-items-center",
+                                ),
+                            ],
+                            className="g-2 mb-2 align-items-center",
+                        ),
                         html.Div(id="config-status", className="mb-2"),
                         # Column headers
                         dbc.Row(
                             [
                                 dbc.Col(html.Small("Field Name", className="text-muted fw-semibold"), width=3),
-                                dbc.Col(html.Small("Description", className="text-muted fw-semibold"), width=5),
-                                dbc.Col(html.Small("Strategy", className="text-muted fw-semibold"), width=3),
+                                dbc.Col(html.Small("Description", className="text-muted fw-semibold"), width=4),
+                                dbc.Col(
+                                    html.Small(
+                                        [
+                                            "Strategy",
+                                            html.I(
+                                                className="bi bi-info-circle ms-1",
+                                                id="strategy-header-info",
+                                                style={"cursor": "pointer"},
+                                            ),
+                                            dbc.Tooltip(STRATEGY_GUIDE, target="strategy-header-info", placement="top"),
+                                        ],
+                                        className="text-muted fw-semibold",
+                                    ),
+                                    width=3,
+                                ),
+                                dbc.Col(width="auto"),
                                 dbc.Col(width=1),
                             ],
                             className="g-2 mb-2 px-2",
@@ -429,6 +473,13 @@ def _step2_layout() -> html.Div:
                     ]
                 ),
                 className="mb-4",
+            ),
+            dbc.Button(
+                [html.I(className="bi bi-arrow-left me-2"), "Back to Configure"],
+                id="back-to-configure-btn",
+                color="outline-secondary",
+                size="sm",
+                className="mb-3",
             ),
             dbc.Button(
                 [html.I(className="bi bi-shield-check me-2"), "Generate Masked PDF"],
@@ -585,6 +636,15 @@ def _step3_layout() -> html.Div:
                         className="mb-3",
                     ),
                 ]
+            ),
+            dbc.Alert(
+                [
+                    html.I(className="bi bi-shield-lock me-2"),
+                    "Your documents are processed server-side only. Files are stored temporarily in your "
+                    "organisation's cloud storage and are never sent to external services.",
+                ],
+                color="primary",
+                className="mb-4",
             ),
             dbc.Button(
                 [html.I(className="bi bi-arrow-counterclockwise me-2"), "Process New Document"],
@@ -1272,11 +1332,56 @@ def load_template(n_clicks, key):
         r = req.get(f"{API_BASE_URL}/api/templates/{key}", headers=headers, verify=SSL_VERIFY, timeout=10)
         r.raise_for_status()
         data = r.json()
-        fields = [_new_field(f["name"], f["description"], f["strategy"]) for f in data.get("field_definitions", [])]
+        fields = [_new_field(f["name"], f["description"], f["strategy"], "system") for f in data.get("field_definitions", [])]
         alert = dbc.Alert(f"Template \"{data['template_name']}\" loaded.", color="success", dismissable=True, duration=3000)
         return fields, alert
     except Exception as exc:
         return no_update, dbc.Alert(f"Failed to load template: {exc}", color="danger", dismissable=True)
+
+
+# ---------------------------------------------------------------------------
+# Back to Configure (Step 2 → Step 1)
+# ---------------------------------------------------------------------------
+
+
+@callback(
+    Output("store-step", "data", allow_duplicate=True),
+    Input("back-to-configure-btn", "n_clicks"),
+    prevent_initial_call=True,
+)
+def back_to_configure(n_clicks: int):
+    if not n_clicks:
+        raise PreventUpdate
+    return 1
+
+
+# ---------------------------------------------------------------------------
+# Import config from local JSON file
+# ---------------------------------------------------------------------------
+
+
+@callback(
+    Output("store-fields", "data", allow_duplicate=True),
+    Output("config-status", "children", allow_duplicate=True),
+    Input("config-json-upload", "contents"),
+    State("config-json-upload", "filename"),
+    prevent_initial_call=True,
+)
+def import_config_json(contents, filename):
+    if not contents:
+        raise PreventUpdate
+    try:
+        _, encoded = contents.split(",", 1)
+        raw = json.loads(base64.b64decode(encoded).decode("utf-8"))
+        # Accept both {"field_definitions": [...]} and bare [...]
+        field_defs = raw if isinstance(raw, list) else raw.get("field_definitions", [])
+        if not field_defs:
+            raise ValueError("No field_definitions found in JSON.")
+        fields = [_new_field(f.get("name", ""), f.get("description", ""), f.get("strategy", "Fake Data")) for f in field_defs]
+        alert = dbc.Alert(f"Imported {len(fields)} field(s) from {filename}.", color="success", dismissable=True, duration=3000)
+        return fields, alert
+    except Exception as exc:
+        return no_update, dbc.Alert(f"Failed to import config: {exc}", color="danger", dismissable=True)
 
 
 # ---------------------------------------------------------------------------
