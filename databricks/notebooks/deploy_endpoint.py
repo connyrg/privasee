@@ -53,7 +53,7 @@ UC_MODEL_PATH = f"{CATALOG}.{SCHEMA}.{MODEL_NAME}"
 
 # Endpoint configuration
 ENDPOINT_NAME = "privasee_endpoint_local"
-MODEL_VERSION = "15"  # Update to your registered model version
+MODEL_VERSION = "16"  # Update to your registered model version
 WORKLOAD_SIZE = "Small"  # Options: Small, Medium, Large
 SCALE_TO_ZERO = True  # Enable scale-to-zero to save costs
 

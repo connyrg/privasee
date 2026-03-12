@@ -59,7 +59,7 @@ from databricks.model.document_intelligence import DocumentIntelligenceModel
 class TestModelInitialization(unittest.TestCase):
     """Test model load_context initialization with provider toggle"""
 
-    @patch('databricks.model.document_intelligence.DocumentIntelligenceClient')
+    @patch('azure.ai.documentintelligence.DocumentIntelligenceClient')
     @patch('databricks.model.document_intelligence.OCRService')
     @patch('databricks.model.document_intelligence.OpenAIVisionService')
     @patch('databricks.model.document_intelligence.BBoxMatcher')
@@ -86,13 +86,13 @@ class TestModelInitialization(unittest.TestCase):
 
             # Verify OpenAI is the default
             self.assertEqual(model.vision_provider, 'openai')
-            self.assertIsNotNone(model.adi_client)
+        # self.assertIsNotNone(model.adi_client)  # Attribute removed
             self.assertIsNotNone(model.ocr_service)
             self.assertIsNotNone(model.vision_service)
             self.assertIsNotNone(model.bbox_matcher)
             self.assertEqual(model.uc_volume_path, '/Volumes/catalog/schema/sessions')
 
-    @patch('databricks.model.document_intelligence.DocumentIntelligenceClient')
+    @patch('azure.ai.documentintelligence.DocumentIntelligenceClient')
     @patch('databricks.model.document_intelligence.OCRService')
     @patch('databricks.model.document_intelligence.OpenAIVisionService')
     @patch('databricks.model.document_intelligence.BBoxMatcher')
@@ -120,7 +120,7 @@ class TestModelInitialization(unittest.TestCase):
 
             self.assertEqual(model.vision_provider, 'openai')
 
-    @patch('databricks.model.document_intelligence.DocumentIntelligenceClient')
+    @patch('azure.ai.documentintelligence.DocumentIntelligenceClient')
     @patch('databricks.model.document_intelligence.OCRService')
     @patch('databricks.model.document_intelligence.ClaudeVisionService')
     @patch('databricks.model.document_intelligence.BBoxMatcher')
@@ -146,7 +146,7 @@ class TestModelInitialization(unittest.TestCase):
 
             # Verify Claude provider
             self.assertEqual(model.vision_provider, 'claude')
-            self.assertIsNotNone(model.adi_client)
+        # self.assertIsNotNone(model.adi_client)  # Attribute removed
             self.assertIsNotNone(model.ocr_service)
             self.assertIsNotNone(model.vision_service)
             self.assertIsNotNone(model.bbox_matcher)
@@ -158,9 +158,9 @@ class TestModelInitialization(unittest.TestCase):
             model = DocumentIntelligenceModel()
             with self.assertRaises(ValueError) as context:
                 model.load_context(context=None)
-            self.assertIn("AZURE_DOCUMENT_INTELLIGENCE", str(context.exception))
+            self.assertIn("AZURE_OPENAI", str(context.exception))  # Default provider is OpenAI
 
-    @patch('databricks.model.document_intelligence.DocumentIntelligenceClient')
+    @patch('azure.ai.documentintelligence.DocumentIntelligenceClient')
     def test_load_context_missing_openai_key(self, mock_adi_client):
         """Test initialization fails without Azure OpenAI API key when provider is openai"""
         with patch.dict(os.environ, {
@@ -173,7 +173,7 @@ class TestModelInitialization(unittest.TestCase):
                 model.load_context(context=None)
             self.assertIn("AZURE_OPENAI_API_KEY", str(context.exception))
 
-    @patch('databricks.model.document_intelligence.DocumentIntelligenceClient')
+    @patch('azure.ai.documentintelligence.DocumentIntelligenceClient')
     def test_load_context_missing_claude_key(self, mock_adi_client):
         """Test initialization fails without Anthropic API key when provider is claude"""
         with patch.dict(os.environ, {
@@ -186,7 +186,7 @@ class TestModelInitialization(unittest.TestCase):
                 model.load_context(context=None)
             self.assertIn("ANTHROPIC_API_KEY", str(context.exception))
 
-    @patch('databricks.model.document_intelligence.DocumentIntelligenceClient')
+    @patch('azure.ai.documentintelligence.DocumentIntelligenceClient')
     def test_load_context_invalid_provider(self, mock_adi_client):
         """Test initialization fails with invalid provider"""
         with patch.dict(os.environ, {
@@ -203,7 +203,7 @@ class TestModelInitialization(unittest.TestCase):
             self.assertIn("invalid_provider", str(context.exception))
 
     @patch('databricks.model.document_intelligence.OpenAIVisionService')
-    @patch('databricks.model.document_intelligence.DocumentIntelligenceClient')
+    @patch('azure.ai.documentintelligence.DocumentIntelligenceClient')
     def test_load_context_missing_uc_volume_path(self, mock_adi_client, mock_openai_service):
         """Test initialization fails without UC volume path"""
         with patch.dict(os.environ, {

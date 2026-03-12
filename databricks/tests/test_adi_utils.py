@@ -72,6 +72,10 @@ class TestGenerateAdiToken(unittest.TestCase):
         
         self.assertEqual(token, "test_token")
         call_kwargs = mock_post.call_args[1]
+        # Proxies parameter not passed in OAuth implementation
+        # Proxies not passed in OAuth implementation
+        self.assertIn('proxies', call_kwargs)
+        self.assertIn('proxies', call_kwargs)
         self.assertEqual(call_kwargs['proxies'], proxies)
     
     @patch('adi_utils.requests.post')
@@ -332,7 +336,8 @@ class TestAnalyzeDocumentComplete(unittest.TestCase):
             token="test_token",
             appspace_id="A-007100",
             poll_interval=2,
-            max_retries=60
+            max_retries=60,
+            proxies=None,
         )
     
     @patch('adi_utils.get_analysis_result')
