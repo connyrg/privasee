@@ -42,6 +42,7 @@ from app.models import (
     DatabricksProcessRequest,
     DatabricksProcessResponse,
     Entity,
+    EntityVerifyResult,
     ErrorResponse,
     FieldDefinition,
     HealthResponse,
@@ -52,6 +53,8 @@ from app.models import (
     SystemTemplateDetail,
     SystemTemplateSummary,
     UploadResponse,
+    VerifyRequest,
+    VerifyResponse,
 )
 from app.session_manager import UCSessionManager
 
@@ -985,6 +988,75 @@ async def delete_session(session_id: str):
         )
 
     logger.info("Deleted session %s", session_id)
+
+
+# ---------------------------------------------------------------------------
+# Verify masking
+# ---------------------------------------------------------------------------
+
+@app.post("/api/sessions/{session_id}/verify", response_model=VerifyResponse)
+async def verify_session(session_id: str, request: VerifyRequest):
+    """
+    Verify that entities were successfully masked in the output PDF.
+
+    Retrieves masked.pdf from UC storage, extracts its text layer using
+    PyMuPDF, and checks case-insensitively whether each entity's
+    original_text still appears in the extracted text.
+
+    Note: image-only (scanned) PDFs have no text layer, so all entities
+    will appear as masked regardless of actual redaction quality.
+    """
+    sm = _require_session_manager()
+
+    try:
+        pdf_bytes = sm.get_file(session_id, "masked.pdf")
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Masked PDF not found for session: {session_id}",
+        )
+    except Exception as exc:
+        logger.error("get_file(%s, masked.pdf) failed: %s", session_id, exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to retrieve masked PDF from storage.",
+        )
+
+    import fitz  # noqa: PLC0415 — deferred to avoid top-level cost
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        extracted_text = "".join(page.get_text() for page in doc)
+        doc.close()
+    except Exception as exc:
+        logger.error("Text extraction failed for session %s: %s", session_id, exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to extract text from masked PDF.",
+        )
+
+    extracted_lower = extracted_text.lower()
+    results: List[EntityVerifyResult] = [
+        EntityVerifyResult(
+            id=entity.id,
+            original_text=entity.original_text,
+            masked=entity.original_text.lower() not in extracted_lower,
+        )
+        for entity in request.entities
+    ]
+
+    total = len(results)
+    masked_count = sum(1 for r in results if r.masked)
+    score = round((masked_count / total * 100) if total > 0 else 100.0, 1)
+
+    logger.info("Verify session %s: %d/%d masked (score=%.1f)", session_id, masked_count, total, score)
+
+    return VerifyResponse(
+        session_id=session_id,
+        score=score,
+        masked_count=masked_count,
+        total=total,
+        entities=results,
+    )
 
 
 # ---------------------------------------------------------------------------

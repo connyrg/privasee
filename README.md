@@ -3,6 +3,8 @@
 Document de-identification tool — intelligently masks sensitive information
 in PDFs and images using Azure Document Intelligence, Claude Vision, and Azure OpenAI.
 
+Supports both **single document** and **batch** processing modes.
+
 ## Architecture
 
 Three independently deployable components:

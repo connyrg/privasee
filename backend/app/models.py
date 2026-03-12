@@ -272,6 +272,31 @@ class SystemTemplateDetail(SystemTemplateSummary):
 
 
 # ---------------------------------------------------------------------------
+# Verify
+# ---------------------------------------------------------------------------
+
+class EntityVerifyResult(BaseModel):
+    """Verification result for a single entity."""
+    id: str
+    original_text: str
+    masked: bool
+
+
+class VerifyRequest(BaseModel):
+    """Request body for POST /api/sessions/{session_id}/verify."""
+    entities: List[Entity]
+
+
+class VerifyResponse(BaseModel):
+    """Response from POST /api/sessions/{session_id}/verify."""
+    session_id: str
+    score: float = Field(..., ge=0.0, le=100.0, description="Masking score 0–100")
+    masked_count: int
+    total: int
+    entities: List[EntityVerifyResult]
+
+
+# ---------------------------------------------------------------------------
 # Error
 # ---------------------------------------------------------------------------
 

@@ -126,8 +126,11 @@ def _navbar() -> dbc.Navbar:
     )
 
 
-def _step_indicator_content(step: int) -> list:
-    labels = ["Configure", "Review", "Compare"]
+def _step_indicator_content(step: int, mode: str = "single") -> list:
+    if mode == "batch":
+        labels = ["Configure", "Processing", "Results"]
+    else:
+        labels = ["Configure", "Review", "Compare"]
     items = []
     for i, label in enumerate(labels, start=1):
         if i < step:
@@ -222,7 +225,31 @@ def _field_row(field: dict, idx: int, total: int) -> html.Div:
 def _step1_layout() -> html.Div:
     return html.Div(
         [
-            # Upload card
+            # Mode toggle
+            dbc.Card(
+                dbc.CardBody(
+                    dbc.Row(
+                        [
+                            dbc.Col(html.Small("Mode:", className="text-muted fw-semibold"), width="auto", className="d-flex align-items-center"),
+                            dbc.Col(
+                                dbc.RadioItems(
+                                    id="mode-toggle",
+                                    options=[
+                                        {"label": "Single Document", "value": "single"},
+                                        {"label": "Batch (Multiple Documents)", "value": "batch"},
+                                    ],
+                                    value="single",
+                                    inline=True,
+                                    className="mb-0",
+                                ),
+                            ),
+                        ],
+                        align="center",
+                    )
+                ),
+                className="mb-3",
+            ),
+            # Upload card — single mode
             dbc.Card(
                 dbc.CardBody(
                     [
@@ -246,6 +273,32 @@ def _step1_layout() -> html.Div:
                     ]
                 ),
                 className="mb-4",
+                id="single-upload-card",
+            ),
+            # Upload card — batch mode (hidden by default)
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.H5("Upload Documents", className="card-title mb-3"),
+                        dcc.Upload(
+                            id="batch-upload",
+                            children=html.Div(
+                                [
+                                    html.I(className="bi bi-cloud-upload fs-2 text-muted"),
+                                    html.P("Drag & drop PDFs, or click to browse", className="mt-2 mb-1 text-muted"),
+                                    html.Small("PDF only · max 10 MB each · up to 20 files", className="text-muted"),
+                                ]
+                            ),
+                            accept=".pdf",
+                            multiple=True,
+                            className="upload-zone",
+                        ),
+                        html.Div(id="batch-file-list", className="mt-2"),
+                    ]
+                ),
+                className="mb-4",
+                id="batch-upload-card",
+                style={"display": "none"},
             ),
             # Field definitions card
             dbc.Card(
@@ -363,7 +416,7 @@ def _step1_layout() -> html.Div:
                 ),
                 className="mb-4",
             ),
-            # Process button
+            # Process button — single mode
             dbc.Button(
                 [html.I(className="bi bi-play-fill me-2"), "Process Document"],
                 id="process-btn",
@@ -371,6 +424,16 @@ def _step1_layout() -> html.Div:
                 size="lg",
                 className="w-100",
                 disabled=True,
+            ),
+            # Process button — batch mode (hidden by default)
+            dbc.Button(
+                [html.I(className="bi bi-play-fill me-2"), "Process Documents"],
+                id="batch-process-btn",
+                color="primary",
+                size="lg",
+                className="w-100",
+                disabled=True,
+                style={"display": "none"},
             ),
             # Loading indicator shown while processing
             dcc.Loading(html.Div(id="process-loading"), type="circle", color="#0284c7"),
@@ -659,6 +722,72 @@ def _step3_layout() -> html.Div:
 
 
 # ---------------------------------------------------------------------------
+# Batch Step 2 — Processing (shown in batch mode when store-step == 2)
+# ---------------------------------------------------------------------------
+
+
+def _batch_step2_layout() -> html.Div:
+    return html.Div(
+        [
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.H5("Processing Documents", className="card-title mb-3"),
+                        dcc.Loading(
+                            html.Div(id="batch-progress-label", className="text-muted"),
+                            type="circle",
+                            color="#0284c7",
+                        ),
+                    ]
+                ),
+                className="mb-4",
+            ),
+        ],
+        id="batch-step-2-content",
+        style={"display": "none"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Batch Step 3 — Results (shown in batch mode when store-step == 3)
+# ---------------------------------------------------------------------------
+
+
+def _batch_step3_layout() -> html.Div:
+    return html.Div(
+        [
+            html.Div(id="batch-summary-banner", className="mb-4"),
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.H5("Batch Results", className="card-title mb-3"),
+                        html.Div(id="batch-results-table"),
+                    ]
+                ),
+                className="mb-4",
+            ),
+            dbc.Alert(
+                [
+                    html.I(className="bi bi-shield-lock me-2"),
+                    "Your documents are processed server-side only. Files are stored temporarily in your "
+                    "organisation's cloud storage and are never sent to external services.",
+                ],
+                color="primary",
+                className="mb-4",
+            ),
+            dbc.Button(
+                [html.I(className="bi bi-arrow-counterclockwise me-2"), "Process Another Batch"],
+                id="batch-reset-btn",
+                color="outline-secondary",
+                className="w-100",
+            ),
+        ],
+        id="batch-step-3-content",
+        style={"display": "none"},
+    )
+
+
+# ---------------------------------------------------------------------------
 # App layout
 # ---------------------------------------------------------------------------
 
@@ -672,6 +801,9 @@ app.layout = dbc.Container(
         dcc.Store(id="store-entities", data=None),
         dcc.Store(id="store-mask-result", data=None),
         dcc.Store(id="error-msg", data=None),
+        dcc.Store(id="store-mode", data="single"),
+        dcc.Store(id="store-batch-files", data=[]),
+        dcc.Store(id="store-batch-results", data=[]),
         # --- UI ---
         _navbar(),
         # Step indicator
@@ -688,6 +820,8 @@ app.layout = dbc.Container(
         _step1_layout(),
         _step2_layout(),
         _step3_layout(),
+        _batch_step2_layout(),
+        _batch_step3_layout(),
         # Footer
         html.Footer(
             html.Small("PrivaSee — Document De-identification · All processing is server-side", className="text-muted"),
@@ -707,9 +841,13 @@ app.layout = dbc.Container(
 # ---------------------------------------------------------------------------
 
 
-@callback(Output("step-indicator", "children"), Input("store-step", "data"))
-def update_step_indicator(step: int) -> list:
-    return _step_indicator_content(step or 1)
+@callback(
+    Output("step-indicator", "children"),
+    Input("store-step", "data"),
+    Input("store-mode", "data"),
+)
+def update_step_indicator(step: int, mode: str) -> list:
+    return _step_indicator_content(step or 1, mode or "single")
 
 
 # ---------------------------------------------------------------------------
@@ -737,16 +875,22 @@ def show_error(msg: str | None):
     Output("step-1-content", "style"),
     Output("step-2-content", "style"),
     Output("step-3-content", "style"),
+    Output("batch-step-2-content", "style"),
+    Output("batch-step-3-content", "style"),
     Input("store-step", "data"),
+    Input("store-mode", "data"),
 )
-def toggle_steps(step: int):
+def toggle_steps(step: int, mode: str):
     show = {}
     hide = {"display": "none"}
     step = step or 1
+    batch = (mode == "batch")
     return (
         show if step == 1 else hide,
-        show if step == 2 else hide,
-        show if step == 3 else hide,
+        show if (step == 2 and not batch) else hide,
+        show if (step == 3 and not batch) else hide,
+        show if (step == 2 and batch) else hide,
+        show if (step == 3 and batch) else hide,
     )
 
 
@@ -1382,6 +1526,362 @@ def import_config_json(contents, filename):
         return fields, alert
     except Exception as exc:
         return no_update, dbc.Alert(f"Failed to import config: {exc}", color="danger", dismissable=True)
+
+
+# ---------------------------------------------------------------------------
+# Batch mode callbacks
+# ---------------------------------------------------------------------------
+
+
+@callback(
+    Output("store-mode", "data"),
+    Output("store-batch-files", "data", allow_duplicate=True),
+    Input("mode-toggle", "value"),
+    prevent_initial_call=True,
+)
+def toggle_mode(mode: str):
+    return mode, []
+
+
+@callback(
+    Output("single-upload-card", "style"),
+    Output("batch-upload-card", "style"),
+    Output("process-btn", "style"),
+    Output("batch-process-btn", "style"),
+    Input("store-mode", "data"),
+)
+def show_upload_zones(mode: str):
+    show = {}
+    hide = {"display": "none"}
+    batch = (mode == "batch")
+    return (
+        hide if batch else show,
+        show if batch else hide,
+        hide if batch else show,
+        show if batch else hide,
+    )
+
+
+@callback(
+    Output("store-batch-files", "data", allow_duplicate=True),
+    Input("batch-upload", "contents"),
+    State("batch-upload", "filename"),
+    State("store-batch-files", "data"),
+    prevent_initial_call=True,
+)
+def handle_batch_upload(contents_list, filenames, existing_files):
+    if not contents_list:
+        raise PreventUpdate
+    files = list(existing_files or [])
+    errors = []
+    for contents, filename in zip(contents_list, filenames):
+        if not filename.lower().endswith(".pdf"):
+            errors.append(f"{filename}: only PDF files are accepted.")
+            continue
+        _, content_string = contents.split(",", 1)
+        file_bytes = base64.b64decode(content_string)
+        if len(file_bytes) > 10 * 1024 * 1024:
+            errors.append(f"{filename}: file exceeds 10 MB limit.")
+            continue
+        # Avoid duplicates by filename
+        if any(f["filename"] == filename for f in files):
+            continue
+        files.append({"filename": filename, "content": content_string})
+    return files
+
+
+@callback(
+    Output("batch-file-list", "children"),
+    Input("store-batch-files", "data"),
+)
+def render_batch_file_list(files: list):
+    if not files:
+        return html.Small("No files selected.", className="text-muted")
+    rows = []
+    for i, f in enumerate(files):
+        size_kb = len(base64.b64decode(f["content"])) // 1024
+        rows.append(
+            dbc.Row(
+                [
+                    dbc.Col(html.I(className="bi bi-file-earmark-pdf text-danger"), width="auto", className="d-flex align-items-center"),
+                    dbc.Col(html.Small(f["filename"], className="fw-semibold"), className="d-flex align-items-center"),
+                    dbc.Col(html.Small(f"{size_kb} KB", className="text-muted"), width="auto", className="d-flex align-items-center"),
+                    dbc.Col(
+                        dbc.Button(
+                            html.I(className="bi bi-x"),
+                            id={"type": "batch-remove-btn", "index": i},
+                            color="outline-danger",
+                            size="sm",
+                            n_clicks=0,
+                        ),
+                        width="auto",
+                    ),
+                ],
+                className="g-2 mb-1 align-items-center",
+                key=str(i),
+            )
+        )
+    return rows
+
+
+@callback(
+    Output("store-batch-files", "data", allow_duplicate=True),
+    Input({"type": "batch-remove-btn", "index": ALL}, "n_clicks"),
+    State("store-batch-files", "data"),
+    prevent_initial_call=True,
+)
+def remove_batch_file(n_clicks_list, files):
+    if not any(n for n in n_clicks_list):
+        raise PreventUpdate
+    triggered = ctx.triggered_id
+    if triggered is None:
+        raise PreventUpdate
+    idx = triggered["index"]
+    return [f for i, f in enumerate(files) if i != idx]
+
+
+@callback(
+    Output("batch-process-btn", "disabled"),
+    Input("store-batch-files", "data"),
+)
+def toggle_batch_process_btn(files: list):
+    return not bool(files)
+
+
+@callback(
+    Output("store-batch-results", "data"),
+    Output("store-step", "data", allow_duplicate=True),
+    Output("batch-progress-label", "children"),
+    Output("process-loading", "children", allow_duplicate=True),
+    Input("batch-process-btn", "n_clicks"),
+    State("store-batch-files", "data"),
+    State("store-fields", "data"),
+    prevent_initial_call=True,
+)
+def run_batch(n_clicks: int, files: list, fields: list):
+    if not n_clicks or not files:
+        raise PreventUpdate
+
+    headers = {
+        "accept": "application/json",
+        "Authorization": f"Key {os.environ.get('POSIT_CONNECT_API_KEY', '')}",
+    }
+    field_defs = [
+        {"name": f["name"], "description": f["description"], "strategy": f.get("strategy", "Fake Data")}
+        for f in (fields or [])
+        if f.get("name") and f.get("description")
+    ]
+    if not field_defs:
+        raise PreventUpdate  # Should not happen — process-btn is disabled without valid fields, but guard anyway
+
+    results = []
+
+    for file_info in files:
+        filename = file_info["filename"]
+        file_bytes = base64.b64decode(file_info["content"])
+        session_id = None
+        error = None
+        entities_found = 0
+        entities_masked = 0
+        score = None
+        verdict = None
+
+        # Step 1: Upload
+        try:
+            resp = req.post(
+                f"{API_BASE_URL}/api/upload",
+                headers=headers,
+                files={"file": (filename, file_bytes, "application/pdf")},
+                timeout=120,
+                verify=SSL_VERIFY,
+            )
+            resp.raise_for_status()
+            session_id = resp.json()["session_id"]
+        except Exception as exc:
+            results.append({"filename": filename, "session_id": None, "entities_found": 0,
+                            "entities_masked": 0, "score": None, "verdict": "Upload failed", "error": str(exc)})
+            continue
+
+        # Step 2: Process
+        try:
+            resp = req.post(
+                f"{API_BASE_URL}/api/process",
+                headers=headers,
+                json={"session_id": session_id, "field_definitions": field_defs},
+                timeout=300,
+                verify=SSL_VERIFY,
+            )
+            resp.raise_for_status()
+            entities = resp.json().get("entities", [])
+            entities_found = len(entities)
+        except Exception as exc:
+            # Clean up session
+            try:
+                req.delete(f"{API_BASE_URL}/api/sessions/{session_id}", headers=headers, verify=SSL_VERIFY, timeout=10)
+            except Exception:
+                pass
+            results.append({"filename": filename, "session_id": session_id, "entities_found": 0,
+                            "entities_masked": 0, "score": None, "verdict": "Processing failed", "error": str(exc)})
+            continue
+
+        if not entities:
+            results.append({"filename": filename, "session_id": session_id, "entities_found": 0,
+                            "entities_masked": 0, "score": 100.0, "verdict": "No entities found", "error": None})
+            continue
+
+        # Step 3: Mask (all entities approved)
+        try:
+            approved_ids = [e["id"] for e in entities]
+            resp = req.post(
+                f"{API_BASE_URL}/api/approve-and-mask",
+                headers=headers,
+                json={"session_id": session_id, "approved_entity_ids": approved_ids},
+                timeout=300,
+                verify=SSL_VERIFY,
+            )
+            resp.raise_for_status()
+            entities_masked = resp.json().get("entities_masked", 0)
+        except Exception as exc:
+            results.append({"filename": filename, "session_id": session_id, "entities_found": entities_found,
+                            "entities_masked": 0, "score": None, "verdict": "Masking failed", "error": str(exc)})
+            continue
+
+        # Step 4: Verify
+        try:
+            resp = req.post(
+                f"{API_BASE_URL}/api/sessions/{session_id}/verify",
+                headers=headers,
+                json={"entities": entities},
+                timeout=60,
+                verify=SSL_VERIFY,
+            )
+            resp.raise_for_status()
+            verify_data = resp.json()
+            score = verify_data["score"]
+            if score >= 90:
+                verdict = "Excellent"
+            elif score >= 70:
+                verdict = "Review recommended"
+            else:
+                verdict = "Masking incomplete"
+        except Exception as exc:
+            score = None
+            verdict = "Verify failed"
+            error = str(exc)
+
+        results.append({
+            "filename": filename,
+            "session_id": session_id,
+            "entities_found": entities_found,
+            "entities_masked": entities_masked,
+            "score": score,
+            "verdict": verdict,
+            "error": error,
+        })
+
+    return results, 3, f"Processed {len(results)} of {len(files)} files.", None
+
+
+@callback(
+    Output("batch-summary-banner", "children"),
+    Output("batch-results-table", "children"),
+    Input("store-batch-results", "data"),
+    Input("store-step", "data"),
+    Input("store-mode", "data"),
+    prevent_initial_call=True,
+)
+def render_batch_results(results: list, step: int, mode: str):
+    if mode != "batch" or step != 3 or not results:
+        raise PreventUpdate
+
+    total = len(results)
+    excellent = sum(1 for r in results if r.get("verdict") == "Excellent")
+    errors = sum(1 for r in results if r.get("error"))
+
+    if errors == 0 and excellent == total:
+        banner_color = "success"
+        banner_icon = "bi-shield-fill-check"
+        banner_msg = f"All {total} document(s) masked successfully."
+    elif errors > 0:
+        banner_color = "warning"
+        banner_icon = "bi-exclamation-triangle"
+        banner_msg = f"{total - errors}/{total} document(s) processed. {errors} error(s) occurred."
+    else:
+        banner_color = "info"
+        banner_icon = "bi-info-circle"
+        banner_msg = f"{total} document(s) processed."
+
+    banner = dbc.Alert(
+        [html.I(className=f"bi {banner_icon} me-2"), banner_msg],
+        color=banner_color,
+        className="mb-0",
+    )
+
+    VERDICT_COLORS = {
+        "Excellent": "success",
+        "Review recommended": "warning",
+        "Masking incomplete": "danger",
+        "No entities found": "secondary",
+    }
+
+    rows = []
+    for r in results:
+        verdict = r.get("verdict") or "—"
+        score = r.get("score")
+        score_str = f"{score:.0f}%" if score is not None else "—"
+        badge_color = VERDICT_COLORS.get(verdict, "secondary")
+        if r.get("error") and verdict not in ("No entities found",):
+            verdict_badge = dbc.Badge(verdict, color="danger", className="ms-1")
+        else:
+            verdict_badge = dbc.Badge(verdict, color=badge_color, className="ms-1")
+        rows.append(
+            html.Tr([
+                html.Td(r["filename"]),
+                html.Td(str(r.get("entities_found", 0))),
+                html.Td(str(r.get("entities_masked", 0))),
+                html.Td(score_str),
+                html.Td(verdict_badge),
+            ])
+        )
+
+    table = dbc.Table(
+        [
+            html.Thead(html.Tr([
+                html.Th("File"), html.Th("Entities Found"),
+                html.Th("Entities Masked"), html.Th("Score"), html.Th("Status"),
+            ])),
+            html.Tbody(rows),
+        ],
+        bordered=True,
+        hover=True,
+        responsive=True,
+        size="sm",
+        className="mb-0",
+    )
+    return banner, table
+
+
+@callback(
+    Output("store-step", "data", allow_duplicate=True),
+    Output("store-batch-files", "data", allow_duplicate=True),
+    Output("store-batch-results", "data", allow_duplicate=True),
+    Output("error-msg", "data", allow_duplicate=True),
+    Input("batch-reset-btn", "n_clicks"),
+    State("store-batch-results", "data"),
+    prevent_initial_call=True,
+)
+def batch_reset_workflow(n_clicks: int, results: list):
+    if not n_clicks:
+        raise PreventUpdate
+    headers = {"Authorization": f"Key {os.environ.get('POSIT_CONNECT_API_KEY', '')}"}
+    for r in (results or []):
+        sid = r.get("session_id")
+        if sid:
+            try:
+                req.delete(f"{API_BASE_URL}/api/sessions/{sid}", headers=headers, verify=SSL_VERIFY, timeout=10)
+            except Exception:
+                pass
+    return 1, [], [], None
 
 
 # ---------------------------------------------------------------------------

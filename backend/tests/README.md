@@ -86,6 +86,7 @@ Practical examples:
 - New endpoint `POST /api/export` → integration tests in `tests/integration/test_export_endpoint.py`
 - New field added to the Databricks response → contract test update in `tests/contracts/`
 - New field added to the masking payload → integration test update in `tests/integration/test_approve_and_mask_endpoint.py`
+- New endpoint `POST /api/sessions/{id}/verify` → integration tests in `tests/integration/test_verify_endpoint.py` (not yet written — covers 200 with text extraction, 404 on missing masked.pdf, empty entity list)
 
 Every test must carry one of `@pytest.mark.unit`, `@pytest.mark.integration`,
 or `@pytest.mark.contract` so the Makefile targets select the right subset.
@@ -105,3 +106,8 @@ Databricks Model Serving endpoint. This means integration tests cannot catch:
 
 These are caught by the end-to-end test script (`backend/scripts/e2e_upload_test.py`),
 which must be run against a live environment with real Databricks credentials.
+
+**`POST /api/sessions/{id}/verify` reports score = 100 for scanned PDFs.** The endpoint
+extracts text using PyMuPDF's text layer. Image-only (scanned) PDFs have no text layer,
+so every entity appears "masked" even if no redaction was applied. This is a known
+limitation documented in the endpoint's docstring and surfaced as a tooltip in the UI.
