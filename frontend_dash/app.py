@@ -436,7 +436,7 @@ def _step1_layout() -> html.Div:
                 style={"display": "none"},
             ),
             # Loading indicator shown while processing
-            dcc.Loading(html.Div(id="process-loading"), type="circle", color="#0284c7"),
+            html.Div(id="process-loading", className="mt-2"),
         ],
         id="step-1-content",
     )
@@ -1084,7 +1084,7 @@ def sync_fields(names: list, descs: list, strategies: list, fields: list) -> lis
     Output("store-step", "data", allow_duplicate=True),
     Output("error-msg", "data", allow_duplicate=True),
     Output("process-loading", "children"),
-    Output("poll-interval", "disabled"),
+    Output("poll-interval", "disabled", allow_duplicate=True),
     Input("process-btn", "n_clicks"),
     State("store-session", "data"),
     State("store-fields", "data"),
@@ -1125,7 +1125,11 @@ def process_document(n_clicks: int, session: dict | None, fields: list | None):
         return no_update, no_update, f"Processing failed: {exc}", no_update, no_update
 
     # 202 accepted — start polling
-    return no_update, no_update, None, "Extracting entities, please wait...", False
+    loading_indicator = html.Div(
+        [dbc.Spinner(size="sm", color="primary"), html.Span(" Extracting entities, please wait...", className="ms-2 text-muted")],
+        className="d-flex align-items-center",
+    )
+    return no_update, no_update, None, loading_indicator, False
 
 
 @callback(
@@ -1503,6 +1507,7 @@ def refresh_template_list(step: int):
     except Exception:
         pass
     return []
+
 
 
 @callback(
@@ -1988,6 +1993,7 @@ def batch_reset_workflow(n_clicks: int, results: list):
     Output("session-banner", "children", allow_duplicate=True),
     Output("pdf-upload", "contents", allow_duplicate=True),
     Output("poll-interval", "disabled", allow_duplicate=True),
+    Output("process-loading", "children", allow_duplicate=True),
     Input("reset-btn", "n_clicks"),
     State("store-session", "data"),
     prevent_initial_call=True,
@@ -2008,7 +2014,7 @@ def reset_workflow(n_clicks: int, session: dict | None):
                 )
             except Exception:
                 pass  # Non-fatal — local stores are cleared regardless
-    return 1, None, DEFAULT_FIELDS, None, None, None, None, None, None, True
+    return 1, None, DEFAULT_FIELDS, None, None, None, None, None, None, True, None
 
 
 # ---------------------------------------------------------------------------
