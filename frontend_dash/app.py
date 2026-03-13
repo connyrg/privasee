@@ -804,6 +804,8 @@ app.layout = dbc.Container(
         dcc.Store(id="store-mode", data="single"),
         dcc.Store(id="store-batch-files", data=[]),
         dcc.Store(id="store-batch-results", data=[]),
+        # Polling interval — disabled until process endpoint returns 202
+        dcc.Interval(id="poll-interval", interval=5000, n_intervals=0, disabled=True),
         # --- UI ---
         _navbar(),
         # Step indicator
@@ -1082,6 +1084,7 @@ def sync_fields(names: list, descs: list, strategies: list, fields: list) -> lis
     Output("store-step", "data", allow_duplicate=True),
     Output("error-msg", "data", allow_duplicate=True),
     Output("process-loading", "children"),
+    Output("poll-interval", "disabled"),
     Input("process-btn", "n_clicks"),
     State("store-session", "data"),
     State("store-fields", "data"),
@@ -1103,7 +1106,7 @@ def process_document(n_clicks: int, session: dict | None, fields: list | None):
     ]
 
     if not field_definitions:
-        return no_update, no_update, "Please fill in at least one field name and description.", no_update
+        return no_update, no_update, "Please fill in at least one field name and description.", no_update, no_update
 
     headers = {
         "accept": "application/json",
@@ -1113,16 +1116,65 @@ def process_document(n_clicks: int, session: dict | None, fields: list | None):
         resp = req.post(
             f"{API_BASE_URL}/api/process",
             json={"session_id": session_id, "field_definitions": field_definitions},
-            timeout=900,  # 15 minutes — AI model call can be slow
+            timeout=30,
             headers=headers,
             verify=SSL_VERIFY,
         )
         resp.raise_for_status()
-        entities = resp.json().get("entities", [])
     except Exception as exc:
-        return no_update, no_update, f"Processing failed: {exc}", no_update
+        return no_update, no_update, f"Processing failed: {exc}", no_update, no_update
 
-    return entities, 2, None, no_update
+    # 202 accepted — start polling
+    return no_update, no_update, None, "Extracting entities, please wait...", False
+
+
+@callback(
+    Output("store-entities", "data", allow_duplicate=True),
+    Output("store-step", "data", allow_duplicate=True),
+    Output("error-msg", "data", allow_duplicate=True),
+    Output("process-loading", "children", allow_duplicate=True),
+    Output("poll-interval", "disabled", allow_duplicate=True),
+    Input("poll-interval", "n_intervals"),
+    State("store-session", "data"),
+    State("poll-interval", "disabled"),
+    prevent_initial_call=True,
+)
+def poll_status(n_intervals: int, session: dict | None, interval_disabled: bool):
+    if interval_disabled or not session:
+        raise PreventUpdate
+
+    session_id = session.get("session_id")
+    if not session_id:
+        raise PreventUpdate
+
+    headers = {
+        "accept": "application/json",
+        "Authorization": f"Key {os.environ.get('POSIT_CONNECT_API_KEY', '')}"
+    }
+    try:
+        resp = req.get(
+            f"{API_BASE_URL}/api/sessions/{session_id}",
+            headers=headers,
+            timeout=10,
+            verify=SSL_VERIFY,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        return no_update, no_update, f"Status check failed: {exc}", no_update, no_update
+
+    poll_status_value = data.get("status")
+
+    if poll_status_value == "awaiting_review":
+        entities = data.get("entities", [])
+        return entities, 2, None, None, True
+
+    if poll_status_value == "error":
+        err = data.get("error_message") or "Entity extraction failed."
+        return no_update, no_update, err, None, True
+
+    # Still processing — keep polling
+    return no_update, no_update, no_update, no_update, no_update
 
 
 # ---------------------------------------------------------------------------
@@ -1702,18 +1754,16 @@ def run_batch(n_clicks: int, files: list, fields: list):
                             "entities_masked": 0, "score": None, "verdict": "Upload failed", "error": str(exc)})
             continue
 
-        # Step 2: Process
+        # Step 2: Process (fire-and-forget — returns 202, then poll for completion)
         try:
             resp = req.post(
                 f"{API_BASE_URL}/api/process",
                 headers=headers,
                 json={"session_id": session_id, "field_definitions": field_defs},
-                timeout=300,
+                timeout=30,
                 verify=SSL_VERIFY,
             )
             resp.raise_for_status()
-            entities = resp.json().get("entities", [])
-            entities_found = len(entities)
         except Exception as exc:
             # Clean up session
             try:
@@ -1723,6 +1773,44 @@ def run_batch(n_clicks: int, files: list, fields: list):
             results.append({"filename": filename, "session_id": session_id, "entities_found": 0,
                             "entities_masked": 0, "score": None, "verdict": "Processing failed", "error": str(exc)})
             continue
+
+        # Poll until extraction completes (max 10 minutes)
+        entities = []
+        process_error = None
+        for _ in range(200):
+            time.sleep(3)
+            try:
+                poll_resp = req.get(
+                    f"{API_BASE_URL}/api/sessions/{session_id}",
+                    headers=headers,
+                    timeout=10,
+                    verify=SSL_VERIFY,
+                )
+                poll_resp.raise_for_status()
+                poll_data = poll_resp.json()
+            except Exception as exc:
+                process_error = f"Status check failed: {exc}"
+                break
+            poll_status_val = poll_data.get("status")
+            if poll_status_val == "awaiting_review":
+                entities = poll_data.get("entities", [])
+                break
+            if poll_status_val == "error":
+                process_error = poll_data.get("error_message") or "Entity extraction failed."
+                break
+        else:
+            process_error = "Entity extraction timed out after 10 minutes."
+
+        if process_error:
+            try:
+                req.delete(f"{API_BASE_URL}/api/sessions/{session_id}", headers=headers, verify=SSL_VERIFY, timeout=10)
+            except Exception:
+                pass
+            results.append({"filename": filename, "session_id": session_id, "entities_found": 0,
+                            "entities_masked": 0, "score": None, "verdict": "Processing failed", "error": process_error})
+            continue
+
+        entities_found = len(entities)
 
         if not entities:
             results.append({"filename": filename, "session_id": session_id, "entities_found": 0,
@@ -1899,25 +1987,28 @@ def batch_reset_workflow(n_clicks: int, results: list):
     Output("upload-status", "children", allow_duplicate=True),
     Output("session-banner", "children", allow_duplicate=True),
     Output("pdf-upload", "contents", allow_duplicate=True),
+    Output("poll-interval", "disabled", allow_duplicate=True),
     Input("reset-btn", "n_clicks"),
     State("store-session", "data"),
     prevent_initial_call=True,
 )
-def reset_workflow(n_clicks: int, session_id: str):
+def reset_workflow(n_clicks: int, session: dict | None):
     if not n_clicks:
         raise PreventUpdate
-    if session_id:
-        headers = {"Authorization": f"Key {os.environ.get('POSIT_CONNECT_API_KEY', '')}"}
-        try:
-            req.delete(
-                f"{API_BASE_URL}/api/sessions/{session_id}",
-                headers=headers,
-                verify=SSL_VERIFY,
-                timeout=10,
-            )
-        except Exception:
-            pass  # Non-fatal — local stores are cleared regardless
-    return 1, None, DEFAULT_FIELDS, None, None, None, None, None, None
+    if session:
+        session_id = session.get("session_id")
+        if session_id:
+            headers = {"Authorization": f"Key {os.environ.get('POSIT_CONNECT_API_KEY', '')}"}
+            try:
+                req.delete(
+                    f"{API_BASE_URL}/api/sessions/{session_id}",
+                    headers=headers,
+                    verify=SSL_VERIFY,
+                    timeout=10,
+                )
+            except Exception:
+                pass  # Non-fatal — local stores are cleared regardless
+    return 1, None, DEFAULT_FIELDS, None, None, None, None, None, None, True
 
 
 # ---------------------------------------------------------------------------

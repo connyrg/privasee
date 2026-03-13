@@ -119,9 +119,10 @@ class SessionData(BaseModel):
     filename: str
     file_size: int
     page_count: int = 1
-    status: str = "uploaded"          # uploaded | processing | awaiting_review | completed
+    status: str = "uploaded"          # uploaded | processing | awaiting_review | completed | error
     entities: List[Entity] = []
     field_definitions: List[FieldDefinition] = []
+    error_message: Optional[str] = None
 
     # UC volume path for this session, e.g. /Volumes/cat/schema/sessions/<id>/
     session_path: Optional[str] = None
@@ -170,6 +171,14 @@ class ProcessResponse(BaseModel):
     message: str = "Document processed successfully"
 
 
+class ProcessAcceptedResponse(BaseModel):
+    """202 response from POST /api/process — entity extraction running in background."""
+
+    session_id: str
+    status: str = "processing"
+    message: str = "Entity extraction started. Poll GET /api/sessions/{session_id} for status."
+
+
 # ---------------------------------------------------------------------------
 # Approve and mask
 # ---------------------------------------------------------------------------
@@ -207,7 +216,7 @@ class ApprovalResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class SessionInfo(BaseModel):
-    """Public session metadata — no file paths or entity details."""
+    """Public session metadata returned by GET /api/sessions/{session_id}."""
 
     session_id: str
     filename: str
@@ -215,6 +224,8 @@ class SessionInfo(BaseModel):
     status: str
     entity_count: int
     has_masked_output: bool
+    entities: List[Entity] = []
+    error_message: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

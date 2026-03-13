@@ -207,7 +207,7 @@ def sample_entities() -> List[dict]:
                 "confidence": 0.95,
                 "approved": True,
                 "page_number": 1,
-                "replacement_strategy": strategy,
+                "strategy": strategy,
             }
         )
     return entities

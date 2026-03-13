@@ -21,6 +21,7 @@ export http_proxy="" && export https_proxy="" && rsconnect deploy fastapi  --ser
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -30,7 +31,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile, status
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from app.config_manager import ConfigManager
@@ -46,6 +47,7 @@ from app.models import (
     ErrorResponse,
     FieldDefinition,
     HealthResponse,
+    ProcessAcceptedResponse,
     ProcessRequest,
     ProcessResponse,
     SaveConfigRequest,
@@ -406,21 +408,107 @@ async def upload_document(file: UploadFile = File(...)):
 
 
 # ---------------------------------------------------------------------------
-# POST /api/process
+# POST /api/process  (fire-and-forget — returns 202 immediately)
 # ---------------------------------------------------------------------------
 
-@app.post("/api/process", response_model=ProcessResponse)
-async def process_document(request: ProcessRequest):
+async def _process_background(
+    session_id: str,
+    field_definitions: List[FieldDefinition],
+    sm: UCSessionManager,
+) -> None:
+    """
+    Background task: call Databricks, persist entities, update session status.
+
+    Runs after the 202 response has been sent to the client.  All blocking
+    UCSessionManager calls are wrapped in asyncio.to_thread so they don't
+    stall the event loop.
+    """
+    if MOCK_DATABRICKS:
+        logger.info("MOCK_DATABRICKS=true — using mock entities for session %s", session_id)
+        entities = _mock_entities(session_id, field_definitions)
+    else:
+        if not DATABRICKS_MODEL_ENDPOINT:
+            err = "DATABRICKS_MODEL_ENDPOINT is not configured."
+            logger.error(err)
+            try:
+                await asyncio.to_thread(sm.update_session, session_id, status="error", error_message=err)
+            except Exception:
+                pass
+            return
+
+        db_request = DatabricksProcessRequest(
+            session_id=session_id,
+            field_definitions=field_definitions,
+        )
+        logger.info("Calling Databricks for session %s", session_id)
+        try:
+            async with httpx.AsyncClient(timeout=600.0) as client:
+                response = await client.post(
+                    DATABRICKS_MODEL_ENDPOINT,
+                    json=db_request.to_mlflow_payload(),
+                    headers={
+                        "Authorization": f"Bearer {DATABRICKS_TOKEN}",
+                        "Content-Type": "application/json",
+                    },
+                )
+            response.raise_for_status()
+            raw: Dict[str, Any] = response.json()
+        except httpx.TimeoutException as exc:
+            err = "Entity extraction timed out. The document may be complex or the endpoint is under load."
+            logger.error("Databricks timed out for session %s: %s", session_id, exc)
+            try:
+                await asyncio.to_thread(sm.update_session, session_id, status="error", error_message=err)
+            except Exception:
+                pass
+            return
+        except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            err = f"Databricks request failed: {exc}"
+            logger.error("Databricks error for session %s: %s", session_id, exc)
+            try:
+                await asyncio.to_thread(sm.update_session, session_id, status="error", error_message=err)
+            except Exception:
+                pass
+            return
+
+        try:
+            db_response = DatabricksProcessResponse.from_mlflow_response(raw)
+            entities = db_response.entities
+        except Exception as exc:
+            err = f"Could not parse entity list returned by Databricks: {exc}"
+            logger.error("Parse error for session %s: %s — raw: %s", session_id, exc, raw)
+            try:
+                await asyncio.to_thread(sm.update_session, session_id, status="error", error_message=err)
+            except Exception:
+                pass
+            return
+
+    # --- Persist entities and mark session ready for review ---
+    try:
+        await asyncio.to_thread(sm.save_entities, session_id, [e.model_dump() for e in entities])
+        await asyncio.to_thread(sm.update_session, session_id, status="awaiting_review")
+    except Exception as exc:
+        logger.error("Could not persist entities for session %s: %s", session_id, exc)
+        try:
+            await asyncio.to_thread(
+                sm.update_session, session_id, status="error",
+                error_message=f"Failed to save extraction results: {exc}",
+            )
+        except Exception:
+            pass
+        return
+
+    suffix = " (mock)" if MOCK_DATABRICKS else ""
+    logger.info("Background processing done for session %s — %d entities%s", session_id, len(entities), suffix)
+
+
+@app.post("/api/process", response_model=ProcessAcceptedResponse, status_code=202)
+async def process_document(request: ProcessRequest, background_tasks: BackgroundTasks):
     """
     Trigger entity extraction for an uploaded document.
 
-    Saves the field definitions to the UC session, then delegates extraction
-    to the Databricks Model Serving endpoint (or mock).  Persists the
-    returned entities to the session and returns them to the frontend.
-
-    The Databricks call has a 60-second timeout.  If MOCK_DATABRICKS=true
-    a hard-coded entity list is returned instead — essential for Phase 3
-    validation before the Databricks endpoint is deployed.
+    Returns 202 immediately and runs the Databricks call in the background.
+    Poll GET /api/sessions/{session_id} until status is 'awaiting_review' (done)
+    or 'error' (failed).  The response will include entities once ready.
     """
     sm = _require_session_manager()
 
@@ -445,139 +533,28 @@ async def process_document(request: ProcessRequest):
             detail=f"Session not found: {request.session_id}",
         )
 
-    # --- Persist field definitions so masking can retrieve them later ---
+    # --- Persist field definitions and set status to processing ---
     try:
-        sm.update_session(
+        await asyncio.to_thread(
+            sm.update_session,
             request.session_id,
             status="processing",
             field_definitions=[f.model_dump() for f in request.field_definitions],
         )
     except NotImplementedError:
-        pass  # Non-fatal — proceed without persisting
+        pass
     except Exception as exc:
         logger.warning("Could not update field_definitions for %s: %s", request.session_id, exc)
 
-    # --- Entity extraction ---
-    if MOCK_DATABRICKS:
-        logger.info(
-            "MOCK_DATABRICKS=true — returning mock entities for session %s",
-            request.session_id,
-        )
-        entities = _mock_entities(request.session_id, request.field_definitions)
-
-    else:
-        if not DATABRICKS_MODEL_ENDPOINT:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=(
-                    "DATABRICKS_MODEL_ENDPOINT is not configured. "
-                    "Set the environment variable or enable MOCK_DATABRICKS=true."
-                ),
-            )
-
-        db_request = DatabricksProcessRequest(
-            session_id=request.session_id,
-            field_definitions=request.field_definitions,
-        )
-        print(f"DATABRICKS_MODEL_ENDPOINT: {DATABRICKS_MODEL_ENDPOINT}")
-        print(f"db_request: {db_request}")
-        print(f"db_request: {db_request.to_mlflow_payload()}")
-        try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.post(
-                    DATABRICKS_MODEL_ENDPOINT,
-                    json=db_request.to_mlflow_payload(),
-                    headers={
-                        "Authorization": f"Bearer {DATABRICKS_TOKEN}",
-                        "Content-Type": "application/json",
-                    },
-                )
-            response.raise_for_status()
-            raw: Dict[str, Any] = response.json()
-
-        except httpx.TimeoutException:
-            logger.error(
-                "Databricks endpoint timed out for session %s", request.session_id
-            )
-            raise HTTPException(
-                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail=(
-                    "Entity extraction timed out (> 60 s). "
-                    "The document may be complex or the endpoint is under load. "
-                    "Try again or reduce the number of pages."
-                ),
-            )
-        except httpx.HTTPStatusError as exc:
-            logger.error(
-                "Databricks returned HTTP %s for session %s: %s",
-                exc.response.status_code,
-                request.session_id,
-                exc.response.text,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=(
-                    f"Databricks Model Serving returned HTTP {exc.response.status_code}. "
-                    "Check that the endpoint is deployed and the token is valid."
-                ),
-            )
-        except httpx.RequestError as exc:
-            logger.error(
-                "Could not reach Databricks endpoint for session %s: %s",
-                request.session_id,
-                exc,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=(
-                    "Could not reach the Databricks Model Serving endpoint. "
-                    "Verify DATABRICKS_MODEL_ENDPOINT and network connectivity."
-                ),
-            )
-
-        try:
-            print(f"raw: {raw}")
-            db_response = DatabricksProcessResponse.from_mlflow_response(raw)
-            print(f"db_response: {db_response}")
-            entities = db_response.entities
-            print(f"entities: {entities}")
-        except Exception as exc:
-            logger.error(
-                "Failed to parse Databricks response for session %s: %s — raw: %s",
-                request.session_id,
-                exc,
-                raw,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="Could not parse the entity list returned by Databricks.",
-            )
-
-    # --- Persist entities to UC session ---
-    try:
-        sm.save_entities(request.session_id, [e.model_dump() for e in entities])
-        sm.update_session(request.session_id, status="awaiting_review")
-    except NotImplementedError:
-        pass  # Non-fatal — entities are returned to the frontend regardless
-    except Exception as exc:
-        logger.warning(
-            "Could not persist entities for session %s: %s", request.session_id, exc
-        )
-
-    suffix = " (mock)" if MOCK_DATABRICKS else ""
-    logger.info(
-        "Processed session %s — %d entities found%s",
+    # --- Schedule background extraction and return immediately ---
+    background_tasks.add_task(
+        _process_background,
         request.session_id,
-        len(entities),
-        suffix,
+        request.field_definitions,
+        sm,
     )
 
-    return ProcessResponse(
-        session_id=request.session_id,
-        entities=entities,
-        total_entities=len(entities),
-        message=f"Found {len(entities)} entities{suffix}",
-    )
+    return ProcessAcceptedResponse(session_id=request.session_id)
 
 
 # ---------------------------------------------------------------------------
@@ -938,13 +915,27 @@ async def get_session_info(session_id: str):
             detail=f"Session not found: {session_id}",
         )
 
+    # Load entities from entities.json when the session has completed extraction.
+    # get_session() only reads metadata.json, so we must fetch entities separately.
+    entities: List[Entity] = []
+    if session.status in ("awaiting_review", "completed"):
+        try:
+            raw_entities = sm.get_entities(session_id)
+            entities = [Entity(**e) for e in raw_entities]
+        except FileNotFoundError:
+            pass  # entities.json not yet written — return empty list
+        except Exception as exc:
+            logger.warning("Could not load entities for session %s: %s", session_id, exc)
+
     return SessionInfo(
         session_id=session.session_id,
         filename=session.filename,
         file_size=session.file_size,
         status=session.status,
-        entity_count=len(session.entities),
+        entity_count=len(entities),
         has_masked_output=session.status == "completed",
+        entities=entities,
+        error_message=session.error_message,
     )
 
 

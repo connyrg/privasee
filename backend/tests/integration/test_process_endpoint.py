@@ -1,13 +1,15 @@
 """
 Integration tests for POST /api/process.
 
-Uses the `client` fixture (httpx.AsyncClient + ASGITransport) and
-`override_databricks_dependency`.  Entity extraction is tested with
-MOCK_DATABRICKS=true (monkeypatched at module level) so no real Databricks
-endpoint is required.
+The endpoint now returns 202 immediately and runs entity extraction as a
+background task.  All Databricks/UC interactions happen after the response
+is sent.  With ASGITransport the background task completes before the
+awaited `client.post(...)` call returns, so assertions on mock side-effects
+(save_entities, update_session) remain synchronous from the test's perspective.
 
-Databricks failure tests (504, 502) temporarily disable MOCK_DATABRICKS and
-patch `httpx.AsyncClient` directly so no live endpoint is contacted.
+Happy-path tests use MOCK_DATABRICKS=True (set by override_databricks_dependency).
+Error-path tests for Databricks failures patch httpx.AsyncClient to simulate
+network errors and then verify that the session is marked with status='error'.
 """
 
 import pytest
@@ -41,37 +43,24 @@ VALID_PAYLOAD = {
 
 
 @pytest.mark.integration
-async def test_process_returns_entity_list(client, override_databricks_dependency):
-    """With MOCK_DATABRICKS=True the response must include a non-empty entity list
-    and every entity must carry the required fields."""
+async def test_process_returns_202_accepted(client, override_databricks_dependency):
+    """POST /api/process must return 202 with session_id and status='processing'."""
     response = await client.post("/api/process", json=VALID_PAYLOAD)
 
-    assert response.status_code == 200
+    assert response.status_code == 202
     body = response.json()
     assert body["session_id"] == "test-session-id"
-    assert body["total_entities"] >= 1
-    assert len(body["entities"]) >= 1
-
-    entity = body["entities"][0]
-    for field in (
-        "id",
-        "entity_type",
-        "original_text",
-        "replacement_text",
-        "bounding_box",
-        "page_number",
-    ):
-        assert field in entity, f"Entity missing required field '{field}'"
+    assert body["status"] == "processing"
 
 
 @pytest.mark.integration
 async def test_process_saves_entities_to_uc(client, override_databricks_dependency):
-    """Entities returned by the mock must be persisted via save_entities."""
+    """Entities returned by the mock must be persisted via save_entities (background task)."""
     sm = override_databricks_dependency
 
     response = await client.post("/api/process", json=VALID_PAYLOAD)
 
-    assert response.status_code == 200
+    assert response.status_code == 202
     sm.save_entities.assert_called_once()
     saved_session_id = sm.save_entities.call_args.args[0]
     saved_entities = sm.save_entities.call_args.args[1]
@@ -88,7 +77,7 @@ async def test_process_updates_session_status_to_processing_then_awaiting_review
 
     response = await client.post("/api/process", json=VALID_PAYLOAD)
 
-    assert response.status_code == 200
+    assert response.status_code == 202
     calls = sm.update_session.call_args_list
     statuses = [c.kwargs.get("status") for c in calls]
     assert "processing" in statuses, (
@@ -155,29 +144,38 @@ async def test_process_returns_503_when_session_manager_not_configured(monkeypat
 
 # ===========================================================================
 # Group 3 — Databricks errors (MOCK_DATABRICKS=False)
+#
+# Errors now happen asynchronously in the background task.  The HTTP response
+# is always 202; failures are reflected by status='error' written to the
+# session via update_session.
 # ===========================================================================
 
 
 @pytest.mark.integration
-async def test_process_returns_503_when_databricks_endpoint_not_configured(
+async def test_process_sets_session_error_when_databricks_endpoint_not_configured(
     client, override_databricks_dependency, monkeypatch
 ):
-    """503 when MOCK_DATABRICKS=False and DATABRICKS_MODEL_ENDPOINT is empty."""
+    """Background task sets status='error' when MOCK_DATABRICKS=False and endpoint is empty."""
+    sm = override_databricks_dependency
     monkeypatch.setattr(main_module, "MOCK_DATABRICKS", False)
     monkeypatch.setattr(main_module, "DATABRICKS_MODEL_ENDPOINT", "")
 
     response = await client.post("/api/process", json=VALID_PAYLOAD)
 
-    assert response.status_code == 503
-    body = response.json()
-    assert "error" in body
+    assert response.status_code == 202
+    calls = sm.update_session.call_args_list
+    statuses = [c.kwargs.get("status") for c in calls]
+    assert "error" in statuses, f"Expected 'error' status set; got: {statuses}"
+    error_call = next(c for c in calls if c.kwargs.get("status") == "error")
+    assert error_call.kwargs.get("error_message")
 
 
 @pytest.mark.integration
-async def test_process_returns_504_on_databricks_timeout(
+async def test_process_sets_session_error_on_databricks_timeout(
     client, override_databricks_dependency, monkeypatch
 ):
-    """504 when the Databricks HTTP call times out (httpx.TimeoutException)."""
+    """Background task sets status='error' when the Databricks HTTP call times out."""
+    sm = override_databricks_dependency
     monkeypatch.setattr(main_module, "MOCK_DATABRICKS", False)
     monkeypatch.setattr(
         main_module, "DATABRICKS_MODEL_ENDPOINT", "https://fake.databricks/endpoint"
@@ -191,16 +189,18 @@ async def test_process_returns_504_on_databricks_timeout(
         MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
         response = await client.post("/api/process", json=VALID_PAYLOAD)
 
-    assert response.status_code == 504
-    body = response.json()
-    assert "error" in body
+    assert response.status_code == 202
+    calls = sm.update_session.call_args_list
+    statuses = [c.kwargs.get("status") for c in calls]
+    assert "error" in statuses, f"Expected 'error' status set; got: {statuses}"
 
 
 @pytest.mark.integration
-async def test_process_returns_502_on_databricks_non_200_status(
+async def test_process_sets_session_error_on_databricks_non_200_status(
     client, override_databricks_dependency, monkeypatch
 ):
-    """502 when Databricks returns a non-200 HTTP status (httpx.HTTPStatusError)."""
+    """Background task sets status='error' when Databricks returns a non-200 HTTP status."""
+    sm = override_databricks_dependency
     monkeypatch.setattr(main_module, "MOCK_DATABRICKS", False)
     monkeypatch.setattr(
         main_module, "DATABRICKS_MODEL_ENDPOINT", "https://fake.databricks/endpoint"
@@ -222,24 +222,25 @@ async def test_process_returns_502_on_databricks_non_200_status(
         MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
         response = await client.post("/api/process", json=VALID_PAYLOAD)
 
-    assert response.status_code == 502
-    body = response.json()
-    assert "error" in body
+    assert response.status_code == 202
+    calls = sm.update_session.call_args_list
+    statuses = [c.kwargs.get("status") for c in calls]
+    assert "error" in statuses, f"Expected 'error' status set; got: {statuses}"
 
 
 @pytest.mark.integration
-async def test_process_returns_502_when_databricks_response_cannot_be_parsed(
+async def test_process_sets_session_error_when_databricks_response_cannot_be_parsed(
     client, override_databricks_dependency, monkeypatch
 ):
-    """502 when the Databricks response JSON cannot be mapped to Entity objects."""
+    """Background task sets status='error' when Databricks response JSON is malformed."""
+    sm = override_databricks_dependency
     monkeypatch.setattr(main_module, "MOCK_DATABRICKS", False)
     monkeypatch.setattr(
         main_module, "DATABRICKS_MODEL_ENDPOINT", "https://fake.databricks/endpoint"
     )
 
-    # Entities with missing required fields → pydantic ValidationError during parsing
     mock_db_response = MagicMock()
-    mock_db_response.raise_for_status = MagicMock()  # no-op
+    mock_db_response.raise_for_status = MagicMock()
     mock_db_response.json.return_value = {
         "predictions": [{"entities": [{"invalid_field": True}]}]
     }
@@ -252,9 +253,10 @@ async def test_process_returns_502_when_databricks_response_cannot_be_parsed(
         MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
         response = await client.post("/api/process", json=VALID_PAYLOAD)
 
-    assert response.status_code == 502
-    body = response.json()
-    assert "error" in body
+    assert response.status_code == 202
+    calls = sm.update_session.call_args_list
+    statuses = [c.kwargs.get("status") for c in calls]
+    assert "error" in statuses, f"Expected 'error' status set; got: {statuses}"
 
 
 # ===========================================================================

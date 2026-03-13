@@ -26,7 +26,7 @@ from app.models import SessionData
 
 logger = logging.getLogger(__name__)
 
-_VALID_STATUSES = ["uploaded", "processing", "awaiting_review", "completed"]
+_VALID_STATUSES = ["uploaded", "processing", "awaiting_review", "completed", "error"]
 
 
 class UCSessionManager:
@@ -122,6 +122,7 @@ class UCSessionManager:
             filename=meta.get("original_filename", ""),
             file_size=meta.get("file_size", 0),
             status=meta.get("status", "uploaded"),
+            error_message=meta.get("error_message"),
         )
 
     def update_status(self, session_id: str, status: str) -> None:
