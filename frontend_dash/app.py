@@ -128,7 +128,7 @@ def _navbar() -> dbc.Navbar:
 
 def _step_indicator_content(step: int, mode: str = "single") -> list:
     if mode == "batch":
-        labels = ["Configure", "Processing", "Results"]
+        labels = ["Configure", "Results"]
     else:
         labels = ["Configure", "Review", "Compare"]
     items = []
@@ -435,8 +435,12 @@ def _step1_layout() -> html.Div:
                 disabled=True,
                 style={"display": "none"},
             ),
-            # Loading indicator shown while processing
-            html.Div(id="process-loading", className="mt-2"),
+            # Loading indicator shown while processing (dcc.Loading shows spinner during long callbacks)
+            dcc.Loading(
+                html.Div(id="process-loading", className="mt-2"),
+                type="circle",
+                color="#0284c7",
+            ),
         ],
         id="step-1-content",
     )
@@ -722,34 +726,7 @@ def _step3_layout() -> html.Div:
 
 
 # ---------------------------------------------------------------------------
-# Batch Step 2 — Processing (shown in batch mode when store-step == 2)
-# ---------------------------------------------------------------------------
-
-
-def _batch_step2_layout() -> html.Div:
-    return html.Div(
-        [
-            dbc.Card(
-                dbc.CardBody(
-                    [
-                        html.H5("Processing Documents", className="card-title mb-3"),
-                        dcc.Loading(
-                            html.Div(id="batch-progress-label", className="text-muted"),
-                            type="circle",
-                            color="#0284c7",
-                        ),
-                    ]
-                ),
-                className="mb-4",
-            ),
-        ],
-        id="batch-step-2-content",
-        style={"display": "none"},
-    )
-
-
-# ---------------------------------------------------------------------------
-# Batch Step 3 — Results (shown in batch mode when store-step == 3)
+# Batch Step 2 — Results (shown in batch mode when store-step == 2)
 # ---------------------------------------------------------------------------
 
 
@@ -805,6 +782,7 @@ app.layout = dbc.Container(
         dcc.Store(id="store-batch-files", data=[]),
         dcc.Store(id="store-batch-results", data=[]),
         dcc.Store(id="store-upload-error", data=None),
+        dcc.Download(id="batch-download"),
         # Polling interval — disabled until process endpoint returns 202
         dcc.Interval(id="poll-interval", interval=5000, n_intervals=0, disabled=True),
         # --- UI ---
@@ -823,7 +801,6 @@ app.layout = dbc.Container(
         _step1_layout(),
         _step2_layout(),
         _step3_layout(),
-        _batch_step2_layout(),
         _batch_step3_layout(),
         # Footer
         html.Footer(
@@ -878,7 +855,6 @@ def show_error(msg: str | None):
     Output("step-1-content", "style"),
     Output("step-2-content", "style"),
     Output("step-3-content", "style"),
-    Output("batch-step-2-content", "style"),
     Output("batch-step-3-content", "style"),
     Input("store-step", "data"),
     Input("store-mode", "data"),
@@ -893,7 +869,6 @@ def toggle_steps(step: int, mode: str):
         show if (step == 2 and not batch) else hide,
         show if (step == 3 and not batch) else hide,
         show if (step == 2 and batch) else hide,
-        show if (step == 3 and batch) else hide,
     )
 
 
@@ -1105,6 +1080,7 @@ def sync_fields(names: list, descs: list, strategies: list, fields: list) -> lis
     Input("process-btn", "n_clicks"),
     State("store-session", "data"),
     State("store-fields", "data"),
+    running=[(Output("process-btn", "disabled"), True, False)],
     prevent_initial_call=True,
 )
 def process_document(n_clicks: int, session: dict | None, fields: list | None):
@@ -1475,9 +1451,10 @@ def toggle_save_btn(name):
     Input("config-save-btn", "n_clicks"),
     State("config-save-name", "value"),
     State("store-fields", "data"),
+    State("store-configs", "data"),
     prevent_initial_call=True,
 )
-def save_config(n_clicks, name, fields):
+def save_config(n_clicks, name, fields, current_configs):
     if not n_clicks or not name:
         raise PreventUpdate
     # Filter out rows with empty name or description (same as process_document)
@@ -1498,12 +1475,14 @@ def save_config(n_clicks, name, fields):
             timeout=10,
         )
         r.raise_for_status()
-        # Refresh the dropdown list
-        r2 = req.get(f"{API_BASE_URL}/api/configs", headers=headers, verify=SSL_VERIFY, timeout=10)
-        configs = r2.json() if r2.ok else []
-        options = [{"label": c["config_name"], "value": c["key"]} for c in configs]
+        saved = r.json()  # ConfigSummary: {config_name, key, saved_at}
+        # Update the in-memory list directly — avoids a second round-trip and
+        # any read-after-write delay on the Databricks volume directory listing.
+        existing = [c for c in (current_configs or []) if c.get("key") != saved.get("key")]
+        updated = existing + [saved]
+        options = [{"label": c["config_name"], "value": c["key"]} for c in updated]
         alert = dbc.Alert(f"Config \"{name}\" saved.", color="success", dismissable=True, duration=3000)
-        return alert, configs, options
+        return alert, updated, options
     except Exception as exc:
         return dbc.Alert(f"Failed to save config: {exc}", color="danger", dismissable=True), no_update, no_update
 
@@ -1725,11 +1704,11 @@ def toggle_batch_process_btn(files: list):
 @callback(
     Output("store-batch-results", "data"),
     Output("store-step", "data", allow_duplicate=True),
-    Output("batch-progress-label", "children"),
     Output("process-loading", "children", allow_duplicate=True),
     Input("batch-process-btn", "n_clicks"),
     State("store-batch-files", "data"),
     State("store-fields", "data"),
+    running=[(Output("batch-process-btn", "disabled"), True, False)],
     prevent_initial_call=True,
 )
 def run_batch(n_clicks: int, files: list, fields: list):
@@ -1889,7 +1868,7 @@ def run_batch(n_clicks: int, files: list, fields: list):
             "error": error,
         })
 
-    return results, 3, f"Processed {len(results)} of {len(files)} files.", None
+    return results, 2, None
 
 
 @callback(
@@ -1901,7 +1880,7 @@ def run_batch(n_clicks: int, files: list, fields: list):
     prevent_initial_call=True,
 )
 def render_batch_results(results: list, step: int, mode: str):
-    if mode != "batch" or step != 3 or not results:
+    if mode != "batch" or step != 2 or not results:
         raise PreventUpdate
 
     total = len(results)
@@ -1944,6 +1923,16 @@ def render_batch_results(results: list, step: int, mode: str):
             verdict_badge = dbc.Badge(verdict, color="danger", className="ms-1")
         else:
             verdict_badge = dbc.Badge(verdict, color=badge_color, className="ms-1")
+        session_id = r.get("session_id")
+        download_cell = (
+            dbc.Button(
+                [html.I(className="bi bi-download me-1"), "Download"],
+                id={"type": "batch-dl-btn", "index": session_id},
+                color="outline-primary",
+                size="sm",
+                n_clicks=0,
+            ) if session_id and not r.get("error") and r.get("verdict") != "No entities found" else html.Span("—", className="text-muted")
+        )
         rows.append(
             html.Tr([
                 html.Td(r["filename"]),
@@ -1951,6 +1940,7 @@ def render_batch_results(results: list, step: int, mode: str):
                 html.Td(str(r.get("entities_masked", 0))),
                 html.Td(score_str),
                 html.Td(verdict_badge),
+                html.Td(download_cell),
             ])
         )
 
@@ -1959,6 +1949,7 @@ def render_batch_results(results: list, step: int, mode: str):
             html.Thead(html.Tr([
                 html.Th("File"), html.Th("Entities Found"),
                 html.Th("Entities Masked"), html.Th("Score"), html.Th("Status"),
+                html.Th("Download"),
             ])),
             html.Tbody(rows),
         ],
@@ -1969,6 +1960,33 @@ def render_batch_results(results: list, step: int, mode: str):
         className="mb-0",
     )
     return banner, table
+
+
+@callback(
+    Output("batch-download", "data"),
+    Input({"type": "batch-dl-btn", "index": ALL}, "n_clicks"),
+    prevent_initial_call=True,
+)
+def download_masked_batch(n_clicks_list):
+    if not any(n_clicks_list):
+        raise PreventUpdate
+    triggered = ctx.triggered[0]["prop_id"]
+    session_id = json.loads(triggered.rsplit(".", 1)[0])["index"]
+    headers = {
+        "accept": "application/pdf",
+        "Authorization": f"Key {os.environ.get('POSIT_CONNECT_API_KEY', '')}",
+    }
+    try:
+        r = req.get(
+            f"{API_BASE_URL}/api/files/output/{session_id}_masked.pdf",
+            headers=headers,
+            verify=SSL_VERIFY,
+            timeout=30,
+        )
+        r.raise_for_status()
+        return dcc.send_bytes(r.content, filename=f"{session_id}_masked.pdf")
+    except Exception:
+        raise PreventUpdate
 
 
 @callback(
