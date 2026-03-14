@@ -804,6 +804,7 @@ app.layout = dbc.Container(
         dcc.Store(id="store-mode", data="single"),
         dcc.Store(id="store-batch-files", data=[]),
         dcc.Store(id="store-batch-results", data=[]),
+        dcc.Store(id="store-upload-error", data=None),
         # Polling interval — disabled until process endpoint returns 202
         dcc.Interval(id="poll-interval", interval=5000, n_intervals=0, disabled=True),
         # --- UI ---
@@ -905,6 +906,7 @@ def toggle_steps(step: int, mode: str):
     Output("store-session", "data"),
     Output("upload-status", "children"),
     Output("session-banner", "children"),
+    Output("store-upload-error", "data"),
     Input("pdf-upload", "contents"),
     State("pdf-upload", "filename"),
     prevent_initial_call=True,
@@ -915,14 +917,14 @@ def handle_upload(contents: str | None, filename: str | None):
 
     if not filename.lower().endswith(".pdf"):
         err = dbc.Alert("Only PDF files are accepted.", color="danger", dismissable=True)
-        return no_update, err, no_update
+        return no_update, err, no_update, str(time.time())
 
     _, content_string = contents.split(",", 1)
     file_bytes = base64.b64decode(content_string)
 
     if len(file_bytes) > 10 * 1024 * 1024:
         err = dbc.Alert("File must be under 10 MB.", color="danger", dismissable=True)
-        return no_update, err, no_update
+        return no_update, err, no_update, str(time.time())
 
     headers = {
         "accept": "application/json",
@@ -941,7 +943,7 @@ def handle_upload(contents: str | None, filename: str | None):
         data = resp.json()
     except Exception as exc:
         err = dbc.Alert(f"Upload failed: {exc}", color="danger", dismissable=True)
-        return no_update, err, no_update
+        return no_update, err, no_update, str(time.time())
 
     session = {
         "session_id": data["session_id"],
@@ -982,7 +984,19 @@ def handle_upload(contents: str | None, filename: str | None):
             className="mb-0 py-2",
         )
 
-    return session, file_card, banner
+    return session, file_card, banner, None
+
+
+@callback(
+    Output("pdf-upload", "contents", allow_duplicate=True),
+    Input("store-upload-error", "data"),
+    prevent_initial_call=True,
+)
+def clear_upload_on_error(err):
+    """Reset the upload component after a failed upload so the file picker works again."""
+    if not err:
+        raise PreventUpdate
+    return None
 
 
 # ---------------------------------------------------------------------------
