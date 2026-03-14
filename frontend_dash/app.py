@@ -987,16 +987,19 @@ def handle_upload(contents: str | None, filename: str | None):
     return session, file_card, banner, None
 
 
-@callback(
+app.clientside_callback(
+    """
+    function(err) {
+        if (!err) return window.dash_clientside.no_update;
+        var input = document.querySelector('#pdf-upload input[type="file"]');
+        if (input) input.value = '';
+        return null;
+    }
+    """,
     Output("pdf-upload", "contents", allow_duplicate=True),
     Input("store-upload-error", "data"),
     prevent_initial_call=True,
 )
-def clear_upload_on_error(err):
-    """Reset the upload component after a failed upload so the file picker works again."""
-    if not err:
-        raise PreventUpdate
-    return None
 
 
 # ---------------------------------------------------------------------------
