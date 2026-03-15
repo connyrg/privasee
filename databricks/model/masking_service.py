@@ -75,6 +75,10 @@ class MaskingService:
 
             inserts: List[Tuple[fitz.Rect, str]] = []
 
+            # Collect widgets once per page into a plain list so we can
+            # safely look them up without re-iterating the live generator.
+            page_widgets = list(page.widgets())
+
             for entity in page_entities:
                 raw_strategy = entity.get("strategy", "redact")
                 strategy = self._STRATEGY_MAP.get(raw_strategy, "redact")
@@ -93,9 +97,25 @@ class MaskingService:
                         continue
                     x, y, w, h = bbox
                     rect = fitz.Rect(x * W, y * H, (x + w) * W, (y + h) * H)
-                    page.add_redact_annot(rect, fill=fill_color)
-                    if replacement:
-                        inserts.append((rect, replacement))
+
+                    # If this bbox covers a form widget, update the widget
+                    # value directly instead of painting a redact rect on top.
+                    # Painting over a widget annotation does not clear it —
+                    # the widget renders its value on top of whatever is in
+                    # the content stream, causing the original value to show
+                    # through.  Updating the value in place avoids that while
+                    # keeping the form field structure intact.
+                    overlapping_widget = next(
+                        (wgt for wgt in page_widgets if not (wgt.rect & rect).is_empty),
+                        None,
+                    )
+                    if overlapping_widget is not None:
+                        overlapping_widget.field_value = replacement or ""
+                        overlapping_widget.update()
+                    else:
+                        page.add_redact_annot(rect, fill=fill_color)
+                        if replacement:
+                            inserts.append((rect, replacement))
 
             page.apply_redactions()
 
@@ -108,7 +128,10 @@ class MaskingService:
                 )
 
         buf = io.BytesIO()
-        doc.save(buf)
+        # garbage=4: full cross-reference rebuild — purges all unreferenced
+        # objects, including old widget appearance streams that contained the
+        # original (sensitive) field values before they were overwritten.
+        doc.save(buf, garbage=4, deflate=True)
         doc.close()
         return buf.getvalue()
 
