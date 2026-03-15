@@ -1273,6 +1273,7 @@ def toggle_generate_btn(selected_rows: list):
     State("store-session", "data"),
     State("entity-table", "data"),
     State("entity-table", "selected_rows"),
+    running=[(Output("generate-btn", "disabled"), True, False)],
     prevent_initial_call=True,
 )
 def approve_and_mask(n_clicks: int, session: dict | None, table_data: list | None, selected_rows: list | None):
@@ -1419,6 +1420,7 @@ def toggle_load_btn(value):
     Output("config-status", "children"),
     Input("config-load-btn", "n_clicks"),
     State("config-load-dropdown", "value"),
+    running=[(Output("config-load-btn", "disabled"), True, False)],
     prevent_initial_call=True,
 )
 def load_config(n_clicks, key):
@@ -1452,6 +1454,7 @@ def toggle_save_btn(name):
     State("config-save-name", "value"),
     State("store-fields", "data"),
     State("store-configs", "data"),
+    running=[(Output("config-save-btn", "disabled"), True, False)],
     prevent_initial_call=True,
 )
 def save_config(n_clicks, name, fields, current_configs):
@@ -1519,6 +1522,7 @@ def toggle_template_load_btn(value):
     Output("config-status", "children", allow_duplicate=True),
     Input("template-load-btn", "n_clicks"),
     State("template-dropdown", "value"),
+    running=[(Output("template-load-btn", "disabled"), True, False)],
     prevent_initial_call=True,
 )
 def load_template(n_clicks, key):
@@ -1996,6 +2000,7 @@ def download_masked_batch(n_clicks_list):
     Output("error-msg", "data", allow_duplicate=True),
     Input("batch-reset-btn", "n_clicks"),
     State("store-batch-results", "data"),
+    running=[(Output("batch-reset-btn", "disabled"), True, False)],
     prevent_initial_call=True,
 )
 def batch_reset_workflow(n_clicks: int, results: list):
@@ -2031,6 +2036,7 @@ def batch_reset_workflow(n_clicks: int, results: list):
     Output("process-loading", "children", allow_duplicate=True),
     Input("reset-btn", "n_clicks"),
     State("store-session", "data"),
+    running=[(Output("reset-btn", "disabled"), True, False)],
     prevent_initial_call=True,
 )
 def reset_workflow(n_clicks: int, session: dict | None):
