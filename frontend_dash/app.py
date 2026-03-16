@@ -1795,7 +1795,7 @@ def batch_tick(n_intervals, cursor, phase, session_id, poll_count, current_entit
         next_cursor = cursor + 1
         if next_cursor >= n_files:
             # All files processed — disable interval and move to results step
-            return next_cursor, None, None, 0, [], new_results, True, 3, None
+            return next_cursor, None, None, 0, [], new_results, True, 2, None
         next_fname = files[next_cursor]["filename"]
         progress = html.Div(
             [dbc.Spinner(size="sm", color="primary"), html.Span(f" File {next_cursor + 1} of {n_files} — {next_fname}: Uploading...", className="ms-2 text-muted")],
