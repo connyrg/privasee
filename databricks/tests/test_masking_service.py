@@ -177,6 +177,74 @@ class TestFakeData(unittest.TestCase):
         self.assertEqual(page_text.count("Jane Doe"), 2)
         self.assertNotIn("Should Be Overridden", page_text)
 
+    def test_first_name_inherits_replacement_from_full_name(self):
+        """A standalone first name entity must use the first token of the full name's replacement."""
+        entities = [
+            _entity("Full Name", "John Smith", 50, 100, 90,
+                    strategy="Fake Data", replacement_text="Jane Doe"),
+            _entity("Full Name", "John", 50, 200, 40,
+                    strategy="Fake Data", replacement_text="Unrelated"),
+        ]
+        pdf_bytes = create_pdf_with_text([("John Smith", 50, 100), ("John", 50, 200)])
+        svc = MaskingService()
+        result_bytes = svc.apply_pdf_masks(pdf_bytes, entities)
+        doc = fitz.open(stream=result_bytes, filetype="pdf")
+        page_text = doc[0].get_text()
+        doc.close()
+        self.assertIn("Jane", page_text)
+        self.assertNotIn("Unrelated", page_text)
+        self.assertNotIn("John", page_text)
+
+    def test_middle_name_contiguous_slice_inherits_replacement(self):
+        """First+middle and middle+last name slices derive replacement from the full name."""
+        entities = [
+            _entity("Full Name", "John Michael Smith", 50, 100, 130,
+                    strategy="Fake Data", replacement_text="Jane Alice Doe"),
+            _entity("Full Name", "John Michael", 50, 200, 90,
+                    strategy="Fake Data", replacement_text="Ignored"),
+            _entity("Full Name", "Michael Smith", 50, 300, 90,
+                    strategy="Fake Data", replacement_text="Ignored"),
+        ]
+        pdf = create_pdf_with_text([
+            ("John Michael Smith", 50, 100),
+            ("John Michael", 50, 200),
+            ("Michael Smith", 50, 300),
+        ])
+        svc = MaskingService()
+        result_bytes = svc.apply_pdf_masks(pdf, entities)
+        doc = fitz.open(stream=result_bytes, filetype="pdf")
+        text = doc[0].get_text()
+        doc.close()
+        self.assertIn("Jane Alice", text)   # John Michael → Jane Alice
+        self.assertIn("Alice Doe", text)    # Michael Smith → Alice Doe
+        self.assertNotIn("Ignored", text)
+        self.assertNotIn("John Michael", text)
+        self.assertNotIn("Michael Smith", text)
+
+    def test_overlapping_bbox_not_double_masked(self):
+        """An entity whose bbox is contained within a larger entity's bbox is dropped."""
+        # Full name entity
+        full_entity = _entity("Full Name", "John Smith", 50, 100, 90, strategy="Black Out")
+        # First name entity at the same location (subset of full name bbox)
+        first_name_bbox = _bbox(50, 100, 40)  # smaller, same position
+        first_entity = {
+            "entity_type": "First Name",
+            "original_text": "John",
+            "replacement_text": "",
+            "bounding_box": first_name_bbox,
+            "strategy": "Black Out",
+            "approved": True,
+            "page_number": 1,
+        }
+        pdf_bytes = create_pdf_with_text([("John Smith", 50, 100)])
+        svc = MaskingService()
+        result_bytes = svc.apply_pdf_masks(pdf_bytes, [full_entity, first_entity])
+        doc = fitz.open(stream=result_bytes, filetype="pdf")
+        black_rects = [d["rect"] for d in doc[0].get_drawings() if d.get("fill") == (0.0, 0.0, 0.0)]
+        doc.close()
+        # Only one redaction rectangle should appear, not two
+        self.assertEqual(len(black_rects), 1)
+
 
 # ===========================================================================
 # Entity Label strategy
