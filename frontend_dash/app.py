@@ -435,12 +435,7 @@ def _step1_layout() -> html.Div:
                 disabled=True,
                 style={"display": "none"},
             ),
-            # Loading indicator shown while processing (dcc.Loading shows spinner during long callbacks)
-            dcc.Loading(
-                html.Div(id="process-loading", className="mt-2"),
-                type="circle",
-                color="#0284c7",
-            ),
+            html.Div(id="process-loading", className="mt-2"),
         ],
         id="step-1-content",
     )
@@ -781,10 +776,17 @@ app.layout = dbc.Container(
         dcc.Store(id="store-mode", data="single"),
         dcc.Store(id="store-batch-files", data=[]),
         dcc.Store(id="store-batch-results", data=[]),
+        dcc.Store(id="store-batch-cursor", data=0),
+        dcc.Store(id="store-batch-phase", data=None),
+        dcc.Store(id="store-batch-current-session", data=None),
+        dcc.Store(id="store-batch-poll-count", data=0),
+        dcc.Store(id="store-batch-current-entities", data=[]),
         dcc.Store(id="store-upload-error", data=None),
         dcc.Download(id="batch-download"),
         # Polling interval — disabled until process endpoint returns 202
         dcc.Interval(id="poll-interval", interval=5000, n_intervals=0, disabled=True),
+        # Batch processing interval — drives the per-file state machine
+        dcc.Interval(id="batch-interval", interval=3000, n_intervals=0, disabled=True),
         # --- UI ---
         _navbar(),
         # Step indicator
@@ -1700,14 +1702,22 @@ def remove_batch_file(n_clicks_list, files):
 @callback(
     Output("batch-process-btn", "disabled"),
     Input("store-batch-files", "data"),
+    Input("store-batch-phase", "data"),
 )
-def toggle_batch_process_btn(files: list):
+def toggle_batch_process_btn(files: list, phase: str | None):
+    if phase is not None:
+        return True
     return not bool(files)
 
 
 @callback(
-    Output("store-batch-results", "data"),
-    Output("store-step", "data", allow_duplicate=True),
+    Output("store-batch-cursor", "data"),
+    Output("store-batch-phase", "data"),
+    Output("store-batch-results", "data", allow_duplicate=True),
+    Output("store-batch-current-session", "data"),
+    Output("store-batch-poll-count", "data"),
+    Output("store-batch-current-entities", "data"),
+    Output("batch-interval", "disabled"),
     Output("process-loading", "children", allow_duplicate=True),
     Input("batch-process-btn", "n_clicks"),
     State("store-batch-files", "data"),
@@ -1715,10 +1725,54 @@ def toggle_batch_process_btn(files: list):
     running=[(Output("batch-process-btn", "disabled"), True, False)],
     prevent_initial_call=True,
 )
-def run_batch(n_clicks: int, files: list, fields: list):
+def start_batch(n_clicks: int, files: list, fields: list):
+    """Initialise batch state and enable the interval. Returns immediately — no API calls."""
     if not n_clicks or not files:
         raise PreventUpdate
+    field_defs = [
+        {"name": f["name"], "description": f["description"], "strategy": f.get("strategy", "Fake Data")}
+        for f in (fields or [])
+        if f.get("name") and f.get("description")
+    ]
+    if not field_defs:
+        raise PreventUpdate
+    n = len(files)
+    first_filename = files[0]["filename"]
+    progress = html.Div(
+        [dbc.Spinner(size="sm", color="primary"), html.Span(f" File 1 of {n} — {first_filename}: Uploading...", className="ms-2 text-muted")],
+        className="d-flex align-items-center",
+    )
+    return 0, "upload", [], None, 0, [], False, progress
 
+
+@callback(
+    Output("store-batch-cursor", "data", allow_duplicate=True),
+    Output("store-batch-phase", "data", allow_duplicate=True),
+    Output("store-batch-current-session", "data", allow_duplicate=True),
+    Output("store-batch-poll-count", "data", allow_duplicate=True),
+    Output("store-batch-current-entities", "data", allow_duplicate=True),
+    Output("store-batch-results", "data", allow_duplicate=True),
+    Output("batch-interval", "disabled", allow_duplicate=True),
+    Output("store-step", "data", allow_duplicate=True),
+    Output("process-loading", "children", allow_duplicate=True),
+    Input("batch-interval", "n_intervals"),
+    State("store-batch-cursor", "data"),
+    State("store-batch-phase", "data"),
+    State("store-batch-current-session", "data"),
+    State("store-batch-poll-count", "data"),
+    State("store-batch-current-entities", "data"),
+    State("store-batch-files", "data"),
+    State("store-batch-results", "data"),
+    State("store-fields", "data"),
+    prevent_initial_call=True,
+)
+def batch_tick(n_intervals, cursor, phase, session_id, poll_count, current_entities, files, results, fields):
+    """State machine: performs exactly one API call per interval tick."""
+    if phase is None or not files:
+        raise PreventUpdate
+
+    n_files = len(files)
+    results = results or []
     headers = {
         "accept": "application/json",
         "Authorization": f"Key {os.environ.get('POSIT_CONNECT_API_KEY', '')}",
@@ -1728,23 +1782,36 @@ def run_batch(n_clicks: int, files: list, fields: list):
         for f in (fields or [])
         if f.get("name") and f.get("description")
     ]
-    if not field_defs:
-        raise PreventUpdate  # Should not happen — process-btn is disabled without valid fields, but guard anyway
 
-    results = []
+    def _progress(msg):
+        fname = files[cursor]["filename"]
+        return html.Div(
+            [dbc.Spinner(size="sm", color="primary"), html.Span(f" File {cursor + 1} of {n_files} — {fname}: {msg}", className="ms-2 text-muted")],
+            className="d-flex align-items-center",
+        )
 
-    for file_info in files:
-        filename = file_info["filename"]
-        file_bytes = base64.b64decode(file_info["content"])
-        session_id = None
-        error = None
-        entities_found = 0
-        entities_masked = 0
-        score = None
-        verdict = None
+    def _advance(new_results):
+        """Move to the next file, or finish the batch if all files are done."""
+        next_cursor = cursor + 1
+        if next_cursor >= n_files:
+            # All files processed — disable interval and move to results step
+            return next_cursor, None, None, 0, [], new_results, True, 3, None
+        next_fname = files[next_cursor]["filename"]
+        progress = html.Div(
+            [dbc.Spinner(size="sm", color="primary"), html.Span(f" File {next_cursor + 1} of {n_files} — {next_fname}: Uploading...", className="ms-2 text-muted")],
+            className="d-flex align-items-center",
+        )
+        return next_cursor, "upload", None, 0, [], new_results, no_update, no_update, progress
 
-        # Step 1: Upload
+    file_info = files[cursor]
+    filename = file_info["filename"]
+
+    # ------------------------------------------------------------------
+    # Upload
+    # ------------------------------------------------------------------
+    if phase == "upload":
         try:
+            file_bytes = base64.b64decode(file_info["content"])
             resp = req.post(
                 f"{API_BASE_URL}/api/upload",
                 headers=headers,
@@ -1753,13 +1820,17 @@ def run_batch(n_clicks: int, files: list, fields: list):
                 verify=SSL_VERIFY,
             )
             resp.raise_for_status()
-            session_id = resp.json()["session_id"]
+            new_session_id = resp.json()["session_id"]
         except Exception as exc:
-            results.append({"filename": filename, "session_id": None, "entities_found": 0,
-                            "entities_masked": 0, "score": None, "verdict": "Upload failed", "error": str(exc)})
-            continue
+            new_results = results + [{"filename": filename, "session_id": None, "entities_found": 0,
+                                      "entities_masked": 0, "score": None, "verdict": "Upload failed", "error": str(exc)}]
+            return _advance(new_results)
+        return cursor, "process", new_session_id, 0, [], no_update, no_update, no_update, _progress("Starting extraction...")
 
-        # Step 2: Process (fire-and-forget — returns 202, then poll for completion)
+    # ------------------------------------------------------------------
+    # Fire extraction job (returns 202 immediately)
+    # ------------------------------------------------------------------
+    if phase == "process":
         try:
             resp = req.post(
                 f"{API_BASE_URL}/api/process",
@@ -1770,59 +1841,65 @@ def run_batch(n_clicks: int, files: list, fields: list):
             )
             resp.raise_for_status()
         except Exception as exc:
-            # Clean up session
             try:
                 req.delete(f"{API_BASE_URL}/api/sessions/{session_id}", headers=headers, verify=SSL_VERIFY, timeout=10)
             except Exception:
                 pass
-            results.append({"filename": filename, "session_id": session_id, "entities_found": 0,
-                            "entities_masked": 0, "score": None, "verdict": "Processing failed", "error": str(exc)})
-            continue
+            new_results = results + [{"filename": filename, "session_id": session_id, "entities_found": 0,
+                                      "entities_masked": 0, "score": None, "verdict": "Processing failed", "error": str(exc)}]
+            return _advance(new_results)
+        return cursor, "polling", session_id, 0, [], no_update, no_update, no_update, _progress("Extracting entities...")
 
-        # Poll until extraction completes (max 10 minutes)
-        entities = []
-        process_error = None
-        for _ in range(200):
-            time.sleep(3)
-            try:
-                poll_resp = req.get(
-                    f"{API_BASE_URL}/api/sessions/{session_id}",
-                    headers=headers,
-                    timeout=10,
-                    verify=SSL_VERIFY,
-                )
-                poll_resp.raise_for_status()
-                poll_data = poll_resp.json()
-            except Exception as exc:
-                process_error = f"Status check failed: {exc}"
-                break
-            poll_status_val = poll_data.get("status")
-            if poll_status_val == "awaiting_review":
-                entities = poll_data.get("entities", [])
-                break
-            if poll_status_val == "error":
-                process_error = poll_data.get("error_message") or "Entity extraction failed."
-                break
-        else:
-            process_error = "Entity extraction timed out after 10 minutes."
-
-        if process_error:
+    # ------------------------------------------------------------------
+    # Poll extraction status
+    # ------------------------------------------------------------------
+    if phase == "polling":
+        if poll_count >= 200:
             try:
                 req.delete(f"{API_BASE_URL}/api/sessions/{session_id}", headers=headers, verify=SSL_VERIFY, timeout=10)
             except Exception:
                 pass
-            results.append({"filename": filename, "session_id": session_id, "entities_found": 0,
-                            "entities_masked": 0, "score": None, "verdict": "Processing failed", "error": process_error})
-            continue
+            new_results = results + [{"filename": filename, "session_id": session_id, "entities_found": 0,
+                                      "entities_masked": 0, "score": None, "verdict": "Processing failed", "error": "Timed out after 10 minutes."}]
+            return _advance(new_results)
+        try:
+            poll_resp = req.get(
+                f"{API_BASE_URL}/api/sessions/{session_id}",
+                headers=headers,
+                timeout=10,
+                verify=SSL_VERIFY,
+            )
+            poll_resp.raise_for_status()
+            poll_data = poll_resp.json()
+        except Exception as exc:
+            new_results = results + [{"filename": filename, "session_id": session_id, "entities_found": 0,
+                                      "entities_masked": 0, "score": None, "verdict": "Processing failed", "error": f"Status check failed: {exc}"}]
+            return _advance(new_results)
+        status_val = poll_data.get("status")
+        if status_val == "awaiting_review":
+            entities = poll_data.get("entities", [])
+            if not entities:
+                new_results = results + [{"filename": filename, "session_id": session_id, "entities_found": 0,
+                                          "entities_masked": 0, "score": 100.0, "verdict": "No entities found", "error": None}]
+                return _advance(new_results)
+            return cursor, "masking", session_id, 0, entities, no_update, no_update, no_update, _progress("Masking entities...")
+        if status_val == "error":
+            err = poll_data.get("error_message") or "Entity extraction failed."
+            try:
+                req.delete(f"{API_BASE_URL}/api/sessions/{session_id}", headers=headers, verify=SSL_VERIFY, timeout=10)
+            except Exception:
+                pass
+            new_results = results + [{"filename": filename, "session_id": session_id, "entities_found": 0,
+                                      "entities_masked": 0, "score": None, "verdict": "Processing failed", "error": err}]
+            return _advance(new_results)
+        # Still processing — wait for next tick
+        return cursor, "polling", session_id, poll_count + 1, no_update, no_update, no_update, no_update, _progress("Extracting entities...")
 
-        entities_found = len(entities)
-
-        if not entities:
-            results.append({"filename": filename, "session_id": session_id, "entities_found": 0,
-                            "entities_masked": 0, "score": 100.0, "verdict": "No entities found", "error": None})
-            continue
-
-        # Step 3: Mask (all entities approved)
+    # ------------------------------------------------------------------
+    # Mask all entities
+    # ------------------------------------------------------------------
+    if phase == "masking":
+        entities = current_entities or []
         try:
             approved_ids = [e["id"] for e in entities]
             resp = req.post(
@@ -1833,13 +1910,20 @@ def run_batch(n_clicks: int, files: list, fields: list):
                 verify=SSL_VERIFY,
             )
             resp.raise_for_status()
-            entities_masked = resp.json().get("entities_masked", 0)
         except Exception as exc:
-            results.append({"filename": filename, "session_id": session_id, "entities_found": entities_found,
-                            "entities_masked": 0, "score": None, "verdict": "Masking failed", "error": str(exc)})
-            continue
+            new_results = results + [{"filename": filename, "session_id": session_id, "entities_found": len(entities),
+                                      "entities_masked": 0, "score": None, "verdict": "Masking failed", "error": str(exc)}]
+            return _advance(new_results)
+        return cursor, "verifying", session_id, 0, entities, no_update, no_update, no_update, _progress("Verifying...")
 
-        # Step 4: Verify
+    # ------------------------------------------------------------------
+    # Verify masking quality
+    # ------------------------------------------------------------------
+    if phase == "verifying":
+        entities = current_entities or []
+        score = None
+        verdict = "Verify failed"
+        error = None
         try:
             resp = req.post(
                 f"{API_BASE_URL}/api/sessions/{session_id}/verify",
@@ -1858,21 +1942,19 @@ def run_batch(n_clicks: int, files: list, fields: list):
             else:
                 verdict = "Masking incomplete"
         except Exception as exc:
-            score = None
-            verdict = "Verify failed"
             error = str(exc)
-
-        results.append({
+        new_results = results + [{
             "filename": filename,
             "session_id": session_id,
-            "entities_found": entities_found,
-            "entities_masked": entities_masked,
+            "entities_found": len(entities),
+            "entities_masked": len(entities),  # all entities approved in batch mode
             "score": score,
             "verdict": verdict,
             "error": error,
-        })
+        }]
+        return _advance(new_results)
 
-    return results, 2, None
+    raise PreventUpdate
 
 
 @callback(
@@ -1997,16 +2079,25 @@ def download_masked_batch(n_clicks_list):
     Output("store-step", "data", allow_duplicate=True),
     Output("store-batch-files", "data", allow_duplicate=True),
     Output("store-batch-results", "data", allow_duplicate=True),
+    Output("store-batch-cursor", "data", allow_duplicate=True),
+    Output("store-batch-phase", "data", allow_duplicate=True),
+    Output("store-batch-current-session", "data", allow_duplicate=True),
+    Output("store-batch-poll-count", "data", allow_duplicate=True),
+    Output("store-batch-current-entities", "data", allow_duplicate=True),
+    Output("batch-interval", "disabled", allow_duplicate=True),
     Output("error-msg", "data", allow_duplicate=True),
+    Output("process-loading", "children", allow_duplicate=True),
     Input("batch-reset-btn", "n_clicks"),
     State("store-batch-results", "data"),
+    State("store-batch-current-session", "data"),
     running=[(Output("batch-reset-btn", "disabled"), True, False)],
     prevent_initial_call=True,
 )
-def batch_reset_workflow(n_clicks: int, results: list):
+def batch_reset_workflow(n_clicks: int, results: list, current_session: str | None):
     if not n_clicks:
         raise PreventUpdate
     headers = {"Authorization": f"Key {os.environ.get('POSIT_CONNECT_API_KEY', '')}"}
+    # Delete all completed sessions
     for r in (results or []):
         sid = r.get("session_id")
         if sid:
@@ -2014,7 +2105,13 @@ def batch_reset_workflow(n_clicks: int, results: list):
                 req.delete(f"{API_BASE_URL}/api/sessions/{sid}", headers=headers, verify=SSL_VERIFY, timeout=10)
             except Exception:
                 pass
-    return 1, [], [], None
+    # Delete the in-progress session if the batch was interrupted mid-run
+    if current_session:
+        try:
+            req.delete(f"{API_BASE_URL}/api/sessions/{current_session}", headers=headers, verify=SSL_VERIFY, timeout=10)
+        except Exception:
+            pass
+    return 1, [], [], 0, None, None, 0, [], True, None, None
 
 
 # ---------------------------------------------------------------------------
