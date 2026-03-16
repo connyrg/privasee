@@ -470,9 +470,16 @@ async def _process_background(
                 pass
             return
 
+        logger.info(
+            "Databricks raw response keys for session %s: %s (first-level preview: %s)",
+            session_id,
+            list(raw.keys()),
+            str(raw)[:500],
+        )
         try:
             db_response = DatabricksProcessResponse.from_mlflow_response(raw)
             entities = db_response.entities
+            logger.info("Parsed %d entities for session %s", len(entities), session_id)
         except Exception as exc:
             err = f"Could not parse entity list returned by Databricks: {exc}"
             logger.error("Parse error for session %s: %s — raw: %s", session_id, exc, raw)
