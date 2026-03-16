@@ -327,7 +327,7 @@ def _step1_layout() -> html.Div:
                             ],
                             className="g-2 mb-2 align-items-center",
                         ),
-                        # Config save / load row
+                        # Config load row
                         dbc.Row(
                             [
                                 dbc.Col(
@@ -342,14 +342,6 @@ def _step1_layout() -> html.Div:
                                 ),
                                 dbc.Col(
                                     dbc.Button("Load", id="config-load-btn", color="outline-primary", size="sm", disabled=True),
-                                    width="auto",
-                                ),
-                                dbc.Col(
-                                    dbc.Input(id="config-save-name", placeholder="Save as...", size="sm", debounce=True),
-                                    width=3,
-                                ),
-                                dbc.Col(
-                                    dbc.Button("Save", id="config-save-btn", color="outline-success", size="sm", disabled=True),
                                     width="auto",
                                 ),
                             ],
@@ -708,6 +700,28 @@ def _step3_layout() -> html.Div:
                 color="primary",
                 className="mb-4",
             ),
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.H6([html.I(className="bi bi-floppy me-2"), "Save Configuration"], className="card-title mb-3"),
+                        dbc.Row(
+                            [
+                                dbc.Col(
+                                    dbc.Input(id="step3-config-save-name", placeholder="Config name...", size="sm", debounce=True),
+                                    width=4,
+                                ),
+                                dbc.Col(
+                                    dbc.Button("Save Config", id="step3-config-save-btn", color="outline-success", size="sm", disabled=True),
+                                    width="auto",
+                                ),
+                            ],
+                            className="g-2 align-items-center",
+                        ),
+                        html.Div(id="step3-config-status", className="mt-2"),
+                    ]
+                ),
+                className="mb-4",
+            ),
             dbc.Button(
                 [html.I(className="bi bi-arrow-counterclockwise me-2"), "Process New Document"],
                 id="reset-btn",
@@ -745,6 +759,28 @@ def _batch_step3_layout() -> html.Div:
                     "organisation's cloud storage and are never sent to external services.",
                 ],
                 color="primary",
+                className="mb-4",
+            ),
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.H6([html.I(className="bi bi-floppy me-2"), "Save Configuration"], className="card-title mb-3"),
+                        dbc.Row(
+                            [
+                                dbc.Col(
+                                    dbc.Input(id="batch-config-save-name", placeholder="Config name...", size="sm", debounce=True),
+                                    width=4,
+                                ),
+                                dbc.Col(
+                                    dbc.Button("Save Config", id="batch-config-save-btn", color="outline-success", size="sm", disabled=True),
+                                    width="auto",
+                                ),
+                            ],
+                            className="g-2 align-items-center",
+                        ),
+                        html.Div(id="batch-config-status", className="mt-2"),
+                    ]
+                ),
                 className="mb-4",
             ),
             dbc.Button(
@@ -1449,36 +1485,15 @@ def load_config(n_clicks, key):
         return no_update, dbc.Alert(f"Failed to load config: {exc}", color="danger", dismissable=True)
 
 
-@callback(
-    Output("config-save-btn", "disabled"),
-    Input("config-save-name", "value"),
-)
-def toggle_save_btn(name):
-    return not bool(name and name.strip())
-
-
-@callback(
-    Output("config-status", "children", allow_duplicate=True),
-    Output("store-configs", "data", allow_duplicate=True),
-    Output("config-load-dropdown", "options", allow_duplicate=True),
-    Input("config-save-btn", "n_clicks"),
-    State("config-save-name", "value"),
-    State("store-fields", "data"),
-    State("store-configs", "data"),
-    running=[(Output("config-save-btn", "disabled"), True, False)],
-    prevent_initial_call=True,
-)
-def save_config(n_clicks, name, fields, current_configs):
-    if not n_clicks or not name:
-        raise PreventUpdate
-    # Filter out rows with empty name or description (same as process_document)
+def _do_save_config(name, fields, current_configs):
+    """Shared logic for saving a config. Returns (alert, updated_configs, dropdown_options)."""
     field_defs = [
         {"name": f["name"], "description": f["description"], "strategy": f["strategy"]}
         for f in (fields or [])
         if f.get("name") and f.get("description")
     ]
     if not field_defs:
-        return dbc.Alert("Please fill in at least one field name and description before saving.", color="warning", dismissable=True), no_update, no_update
+        return dbc.Alert("No valid fields to save.", color="warning", dismissable=True), no_update, no_update
     headers = {"Authorization": f"Key {os.environ.get('POSIT_CONNECT_API_KEY', '')}"}
     try:
         r = req.post(
@@ -1489,16 +1504,63 @@ def save_config(n_clicks, name, fields, current_configs):
             timeout=10,
         )
         r.raise_for_status()
-        saved = r.json()  # ConfigSummary: {config_name, key, saved_at}
-        # Update the in-memory list directly — avoids a second round-trip and
-        # any read-after-write delay on the Databricks volume directory listing.
+        saved = r.json()
         existing = [c for c in (current_configs or []) if c.get("key") != saved.get("key")]
         updated = existing + [saved]
         options = [{"label": c["config_name"], "value": c["key"]} for c in updated]
-        alert = dbc.Alert(f"Config \"{name}\" saved.", color="success", dismissable=True, duration=3000)
-        return alert, updated, options
+        return dbc.Alert(f"Config \"{name}\" saved.", color="success", dismissable=True, duration=3000), updated, options
     except Exception as exc:
         return dbc.Alert(f"Failed to save config: {exc}", color="danger", dismissable=True), no_update, no_update
+
+
+@callback(
+    Output("step3-config-save-btn", "disabled"),
+    Input("step3-config-save-name", "value"),
+)
+def toggle_step3_save_btn(name):
+    return not bool(name and name.strip())
+
+
+@callback(
+    Output("step3-config-status", "children"),
+    Output("store-configs", "data", allow_duplicate=True),
+    Output("config-load-dropdown", "options", allow_duplicate=True),
+    Input("step3-config-save-btn", "n_clicks"),
+    State("step3-config-save-name", "value"),
+    State("store-fields", "data"),
+    State("store-configs", "data"),
+    running=[(Output("step3-config-save-btn", "disabled"), True, False)],
+    prevent_initial_call=True,
+)
+def save_step3_config(n_clicks, name, fields, current_configs):
+    if not n_clicks or not name:
+        raise PreventUpdate
+    return _do_save_config(name, fields, current_configs)
+
+
+@callback(
+    Output("batch-config-save-btn", "disabled"),
+    Input("batch-config-save-name", "value"),
+)
+def toggle_batch_save_btn(name):
+    return not bool(name and name.strip())
+
+
+@callback(
+    Output("batch-config-status", "children"),
+    Output("store-configs", "data", allow_duplicate=True),
+    Output("config-load-dropdown", "options", allow_duplicate=True),
+    Input("batch-config-save-btn", "n_clicks"),
+    State("batch-config-save-name", "value"),
+    State("store-fields", "data"),
+    State("store-configs", "data"),
+    running=[(Output("batch-config-save-btn", "disabled"), True, False)],
+    prevent_initial_call=True,
+)
+def save_batch_config(n_clicks, name, fields, current_configs):
+    if not n_clicks or not name:
+        raise PreventUpdate
+    return _do_save_config(name, fields, current_configs)
 
 
 @callback(
