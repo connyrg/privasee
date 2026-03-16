@@ -379,13 +379,24 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
             
             logger.info(f"Page {page_idx}: {len(enriched_entities)} entities enriched")
         
-        # Prepare final result
+        # Flatten and merge entity variants before building the final result so
+        # the response carries the same merged entity list that gets written to UC.
+        flat_entities: list = []
+        for page in result_pages:
+            for entity in page.get('entities', []):
+                flat_entities.append(entity)
+        merged_entities = self._merge_entity_variants(flat_entities)
+
+        # Prepare final result — include top-level "entities" (merged flat list)
+        # so the FastAPI backend receives merged entities from the prediction
+        # response and doesn't overwrite the UC-written merged entities.json.
         result = {
             'session_id': session_id,
             'status': 'complete',
-            'pages': result_pages
+            'pages': result_pages,
+            'entities': merged_entities,
         }
-        
+
         # Step 4: Write-through to Unity Catalog volume
         write_start = time.time()
         self._write_to_uc_volume(session_id, result)
@@ -559,17 +570,19 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
         from datetime import datetime, timezone
 
         try:
-            # Flatten pages[].entities into a single list
-            flat_entities = []
-            for page in result.get("pages", []):
-                page_num = page.get("page_num", 1)
-                for entity in page.get("entities", []):
-                    entity.setdefault("page_number", page_num)
-                    flat_entities.append(entity)
-
-            # Merge name variants so partial names (e.g. "Stephen") are
-            # absorbed into the canonical full-name entity ("Stephen Parrot").
-            flat_entities = self._merge_entity_variants(flat_entities)
+            # Use pre-merged entities from result if available (set by process_document
+            # before calling this method). Fall back to flattening+merging from pages
+            # for callers that pass a bare pages-only result dict.
+            if result.get("entities") is not None:
+                flat_entities = result["entities"]
+            else:
+                flat_entities = []
+                for page in result.get("pages", []):
+                    page_num = page.get("page_num", 1)
+                    for entity in page.get("entities", []):
+                        entity.setdefault("page_number", page_num)
+                        flat_entities.append(entity)
+                flat_entities = self._merge_entity_variants(flat_entities)
 
             payload = {
                 "session_id": session_id,

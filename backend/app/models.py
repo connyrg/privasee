@@ -403,18 +403,20 @@ class DatabricksProcessResponse(BaseModel):
         else:
             record = raw  # bare dict fallback
 
-        # Flatten pages[].entities into a single list
-        pages = record.get("pages")
-        if pages and isinstance(pages, list):
-            raw_entities: list = []
-            for page in pages:
+        # Prefer top-level "entities" (merged flat list written by the model)
+        # over "pages" (per-page unmerged list). The model sets both; using
+        # "entities" avoids overwriting the UC-merged result with unmerged data.
+        if record.get("entities") is not None:
+            raw_entities: list = record["entities"]
+        elif record.get("pages") and isinstance(record["pages"], list):
+            raw_entities = []
+            for page in record["pages"]:
                 page_num = page.get("page_num", 1)
                 for entity in page.get("entities", []):
                     entity.setdefault("page_number", page_num)
                     raw_entities.append(entity)
         else:
-            # Fallback: bare {"entities": [...]} shape (mock / local testing)
-            raw_entities = record.get("entities", [])
+            raw_entities = []
 
         entities = [Entity(**e) for e in raw_entities]
         return cls(
