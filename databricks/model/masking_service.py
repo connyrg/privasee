@@ -54,23 +54,50 @@ class MaskingService:
         label_counters: Dict[str, int] = {}
         consistency_map: Dict[str, str] = {}
 
-        # Pre-build consistency map from longest entities first so that
-        # partial name variants (e.g. "John") can inherit their replacement
-        # from the full name ("John Smith" → "Jane Doe" → "John").
         approved = [e for e in entities if e.get("approved", True)]
-        self._seed_consistency_map(approved, consistency_map)
 
-        by_page: Dict[int, List[Dict[str, Any]]] = {}
+        # ------------------------------------------------------------------
+        # Build per-page work items.
+        #
+        # New format: entity has "occurrences" — iterate them directly,
+        # deriving replacement_text per occurrence via token alignment.
+        #
+        # Old format (no occurrences): fall back to bounding_box /
+        # bounding_boxes + page_number, using the consistency_map path.
+        # ------------------------------------------------------------------
+        # page_idx → list of (entity, bbox, occurrence_original_text)
+        by_page: Dict[int, List[tuple]] = {}
+
+        old_format: List[Dict[str, Any]] = []
         for entity in approved:
-            page_idx = entity.get("page_number", 1) - 1
-            by_page.setdefault(page_idx, []).append(entity)
+            if entity.get("occurrences"):
+                for occ in entity["occurrences"]:
+                    page_idx = occ.get("page_number", 1) - 1
+                    bbox = occ.get("bounding_box", [])
+                    if len(bbox) == 4:
+                        by_page.setdefault(page_idx, []).append(
+                            (entity, bbox, occ.get("original_text", entity.get("original_text", "")))
+                        )
+            else:
+                old_format.append(entity)
 
-        # Deduplicate: remove entities whose bboxes are substantially
-        # contained within a larger entity's bbox on the same page.
-        for page_idx in by_page:
-            by_page[page_idx] = self._remove_contained_entities(by_page[page_idx])
+        # Old-format entities: seed consistency map and group by page
+        if old_format:
+            self._seed_consistency_map(old_format, consistency_map)
+            old_by_page: Dict[int, List[Dict[str, Any]]] = {}
+            for entity in old_format:
+                page_idx = entity.get("page_number", 1) - 1
+                old_by_page.setdefault(page_idx, []).append(entity)
+            for page_idx in old_by_page:
+                old_by_page[page_idx] = self._remove_contained_entities(old_by_page[page_idx])
+            for page_idx, ents in old_by_page.items():
+                for entity in ents:
+                    for bbox in self._resolve_bboxes(entity):
+                        by_page.setdefault(page_idx, []).append(
+                            (entity, bbox, entity.get("original_text", ""))
+                        )
 
-        for page_idx, page_entities in sorted(by_page.items()):
+        for page_idx, page_items in sorted(by_page.items()):
             if page_idx >= len(doc):
                 continue
 
@@ -84,43 +111,39 @@ class MaskingService:
             # safely look them up without re-iterating the live generator.
             page_widgets = list(page.widgets())
 
-            for entity in page_entities:
+            for entity, bbox, occ_original_text in page_items:
                 raw_strategy = entity.get("strategy", "redact")
                 strategy = self._STRATEGY_MAP.get(raw_strategy, "redact")
-                bboxes = self._resolve_bboxes(entity)
 
-                if not bboxes:
+                if len(bbox) != 4:
                     continue
 
-                replacement = self._resolve_replacement(
-                    entity, strategy, label_counters, consistency_map
+                replacement = self._resolve_occurrence_replacement(
+                    entity, occ_original_text, strategy, label_counters, consistency_map
                 )
                 fill_color = (0.0, 0.0, 0.0) if strategy == "redact" else (1.0, 1.0, 1.0)
 
-                for bbox in bboxes:
-                    if len(bbox) != 4:
-                        continue
-                    x, y, w, h = bbox
-                    rect = fitz.Rect(x * W, y * H, (x + w) * W, (y + h) * H)
+                x, y, w, h = bbox
+                rect = fitz.Rect(x * W, y * H, (x + w) * W, (y + h) * H)
 
-                    # If this bbox covers a form widget, update the widget
-                    # value directly instead of painting a redact rect on top.
-                    # Painting over a widget annotation does not clear it —
-                    # the widget renders its value on top of whatever is in
-                    # the content stream, causing the original value to show
-                    # through.  Updating the value in place avoids that while
-                    # keeping the form field structure intact.
-                    overlapping_widget = next(
-                        (wgt for wgt in page_widgets if not (wgt.rect & rect).is_empty),
-                        None,
-                    )
-                    if overlapping_widget is not None:
-                        overlapping_widget.field_value = replacement or ""
-                        overlapping_widget.update()
-                    else:
-                        page.add_redact_annot(rect, fill=fill_color)
-                        if replacement:
-                            inserts.append((rect, replacement))
+                # If this bbox covers a form widget, update the widget
+                # value directly instead of painting a redact rect on top.
+                # Painting over a widget annotation does not clear it —
+                # the widget renders its value on top of whatever is in
+                # the content stream, causing the original value to show
+                # through.  Updating the value in place avoids that while
+                # keeping the form field structure intact.
+                overlapping_widget = next(
+                    (wgt for wgt in page_widgets if not (wgt.rect & rect).is_empty),
+                    None,
+                )
+                if overlapping_widget is not None:
+                    overlapping_widget.field_value = replacement or ""
+                    overlapping_widget.update()
+                else:
+                    page.add_redact_annot(rect, fill=fill_color)
+                    if replacement:
+                        inserts.append((rect, replacement))
 
             page.apply_redactions()
 
@@ -211,6 +234,58 @@ class MaskingService:
         if single and len(single) == 4:
             return [list(single)]
         return []
+
+    @staticmethod
+    def _resolve_occurrence_replacement(
+        entity: Dict[str, Any],
+        occ_original_text: str,
+        strategy: str,
+        label_counters: Dict[str, int],
+        consistency_map: Dict[str, str],
+    ) -> str:
+        """
+        Derive the replacement text for a single occurrence.
+
+        For occurrences from merged entities the occurrence original_text may
+        differ from the entity original_text (e.g. "Stephen" vs "Stephen Parrot").
+        The replacement is derived by token-aligning the occurrence against the
+        entity's canonical original_text and taking the corresponding slice of
+        the entity's replacement_text.
+
+        Falls back to _resolve_replacement for the entity-level text when no
+        alignment is found (covers entity_label, Black Out, and exact matches).
+        """
+        if strategy == "redact":
+            return ""
+
+        entity_orig = entity.get("original_text", "").lower().strip()
+        occ_orig = occ_original_text.lower().strip()
+
+        # Exact match or no occurrence text — use standard resolution
+        if not occ_orig or occ_orig == entity_orig:
+            return MaskingService._resolve_replacement(
+                entity, strategy, label_counters, consistency_map
+            )
+
+        if strategy == "fake_name":
+            entity_repl = entity.get("replacement_text", "")
+            if not entity_repl:
+                return ""
+            entity_tokens = entity_orig.split()
+            occ_tokens = occ_orig.split()
+            repl_tokens = entity_repl.split()
+            n = len(occ_tokens)
+            # Find contiguous window of occ_tokens within entity_tokens
+            for k in range(len(entity_tokens) - n + 1):
+                if entity_tokens[k:k + n] == occ_tokens and len(repl_tokens) >= k + n:
+                    return " ".join(repl_tokens[k:k + n])
+            # No alignment found — use full replacement
+            return entity_repl
+
+        # entity_label: use standard resolution (label is entity-scoped)
+        return MaskingService._resolve_replacement(
+            entity, strategy, label_counters, consistency_map
+        )
 
     @staticmethod
     def _resolve_replacement(

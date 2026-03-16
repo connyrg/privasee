@@ -68,6 +68,27 @@ class BoundingBox(BaseModel):
         return cls(x=bbox[0], y=bbox[1], width=bbox[2], height=bbox[3])
 
 
+class Occurrence(BaseModel):
+    """
+    A single positional occurrence of an entity in the document.
+
+    Populated after entity-variant merging so that partial name references
+    (e.g. "Stephen" merged into "Stephen Parrot") are tracked alongside the
+    canonical entity across all pages.
+    """
+
+    page_number: int = Field(default=1, ge=1)
+    bounding_box: List[float] = Field(..., description="Normalised [x, y, w, h]")
+    original_text: str = Field(default="", description="Exact text at this location")
+
+    @field_validator("bounding_box")
+    @classmethod
+    def validate_bbox(cls, v: List[float]) -> List[float]:
+        if len(v) != 4:
+            raise ValueError("bounding_box must have exactly 4 values [x, y, w, h]")
+        return v
+
+
 class Entity(BaseModel):
     """
     A single sensitive entity detected in the document.
@@ -93,6 +114,11 @@ class Entity(BaseModel):
     page_number: int = Field(default=1, ge=1)
     strategy: Optional[str] = Field(
         default=None, description="Masking strategy: 'Fake Data', 'Black Out', 'Entity Label'"
+    )
+    occurrences: Optional[List[Occurrence]] = Field(
+        default=None,
+        description="All occurrences across pages after name-variant merging. "
+                    "When present, masking iterates these instead of bounding_box/bounding_boxes.",
     )
 
     @field_validator("bounding_box")

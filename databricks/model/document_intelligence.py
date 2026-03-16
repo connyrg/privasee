@@ -447,11 +447,107 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
             logger.error(f"Error extracting entities from page {page_number}: {e}")
             return []
 
+    @staticmethod
+    def _merge_entity_variants(entities: List[Dict]) -> List[Dict]:
+        """
+        Merge partial name variant entities into their canonical (longest) entity.
+
+        Rules:
+        - Only entities with the same entity_type are candidates for merging.
+        - A child entity is merged into a parent if the child's original_text
+          tokens form a contiguous slice of the parent's tokens.
+        - The child's bbox and page_number are absorbed as an Occurrence on the
+          parent; replacement_text is derived dynamically at masking time.
+        - Already-merged entities (have occurrences) are left unchanged.
+
+        Returns a new list with child entities removed and parents updated with
+        occurrences covering all appearances (own + merged children's).
+        """
+        if not entities:
+            return entities
+
+        # Skip if already merged
+        if all(e.get("occurrences") is not None for e in entities):
+            return entities
+
+        def _normalise_bb(bb):
+            if isinstance(bb, (list, tuple)) and len(bb) == 4:
+                return list(bb)
+            if isinstance(bb, dict) and all(k in bb for k in ("x", "y", "width", "height")):
+                return [bb["x"], bb["y"], bb["width"], bb["height"]]
+            return None
+
+        def _to_occurrences(e: Dict) -> List[Dict]:
+            if e.get("occurrences") is not None:
+                return list(e["occurrences"])
+            page = e.get("page_number", 1)
+            orig = e.get("original_text", "")
+            boxes = e.get("bounding_boxes") or ([e["bounding_box"]] if e.get("bounding_box") else [])
+            result = []
+            for bb in boxes:
+                norm = _normalise_bb(bb)
+                if norm:
+                    result.append({"page_number": page, "bounding_box": norm, "original_text": orig})
+            return result
+
+        sorted_ents = sorted(entities, key=lambda e: len(e.get("original_text", "")), reverse=True)
+        merged: set = set()
+
+        for i, parent in enumerate(sorted_ents):
+            if i in merged:
+                continue
+            parent_type = parent.get("entity_type", "")
+            parent_tokens = parent.get("original_text", "").lower().strip().split()
+            if len(parent_tokens) < 2:
+                continue  # single-token entities cannot be parents
+
+            parent_occs = _to_occurrences(parent)
+
+            for j, child in enumerate(sorted_ents):
+                if j <= i or j in merged:
+                    continue
+                if child.get("entity_type", "") != parent_type:
+                    continue  # different entity types — different people
+                child_tokens = child.get("original_text", "").lower().strip().split()
+                n = len(child_tokens)
+                if n >= len(parent_tokens):
+                    continue  # child must be strictly shorter
+
+                # Check for contiguous token window match
+                for k in range(len(parent_tokens) - n + 1):
+                    if parent_tokens[k:k + n] == child_tokens:
+                        child_page = child.get("page_number", 1)
+                        child_boxes = child.get("bounding_boxes") or (
+                            [child["bounding_box"]] if child.get("bounding_box") else []
+                        )
+                        for bb in child_boxes:
+                            norm = _normalise_bb(bb)
+                            if norm:
+                                parent_occs.append({
+                                    "page_number": child_page,
+                                    "bounding_box": norm,
+                                    "original_text": child.get("original_text", ""),
+                                })
+                        merged.add(j)
+                        break
+
+            parent["occurrences"] = parent_occs
+
+        # Ensure unmerged entities also get occurrences populated
+        for i, entity in enumerate(sorted_ents):
+            if i not in merged and entity.get("occurrences") is None:
+                entity["occurrences"] = _to_occurrences(entity)
+
+        result_list = [e for i, e in enumerate(sorted_ents) if i not in merged]
+        logger.info(f"Entity variant merge: {len(entities)} → {len(result_list)} entities")
+        return result_list
+
     def _write_to_uc_volume(self, session_id: str, result: Dict):
         """
         Write processing results to Unity Catalog volume via the Files REST API.
 
-        Flattens entities from all pages into a single list and writes
+        Flattens entities from all pages into a single list, merges name
+        variants (e.g. "Stephen Parrot" absorbs "Stephen"), then writes
         entities.json in the format expected by UCSessionManager.get_entities():
             {"session_id": ..., "status": "awaiting_review", "entities": [...]}
 
@@ -470,6 +566,10 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
                 for entity in page.get("entities", []):
                     entity.setdefault("page_number", page_num)
                     flat_entities.append(entity)
+
+            # Merge name variants so partial names (e.g. "Stephen") are
+            # absorbed into the canonical full-name entity ("Stephen Parrot").
+            flat_entities = self._merge_entity_variants(flat_entities)
 
             payload = {
                 "session_id": session_id,

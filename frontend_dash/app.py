@@ -1192,11 +1192,20 @@ def populate_entity_table(entities: list | None, step: int):
     if step != 2 or not entities:
         return [], [], ""
 
+    def _page_display(e: dict) -> str:
+        """Return a sorted, deduplicated page list from occurrences or page_number."""
+        occs = e.get("occurrences")
+        if occs:
+            pages = sorted({o.get("page_number", 1) for o in occs})
+        else:
+            pages = [e.get("page_number", 1)]
+        return ", ".join(str(p) for p in pages)
+
     rows = sorted(entities, key=lambda e: (e.get("page_number", 0), e.get("entity_type", "")))
     table_data = [
         {
             "id": e.get("id", ""),
-            "page_number": e.get("page_number", ""),
+            "page_number": _page_display(e),
             "entity_type": e.get("entity_type", ""),
             "original_text": e.get("original_text", ""),
             "replacement_text": e.get("replacement_text", ""),

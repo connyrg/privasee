@@ -1026,14 +1026,19 @@ async def verify_session(session_id: str, request: VerifyRequest):
         )
 
     extracted_lower = extracted_text.lower()
-    results: List[EntityVerifyResult] = [
-        EntityVerifyResult(
+    results: List[EntityVerifyResult] = []
+    for entity in request.entities:
+        texts_to_check = {entity.original_text.lower()}
+        if entity.occurrences:
+            for occ in entity.occurrences:
+                if occ.original_text:
+                    texts_to_check.add(occ.original_text.lower())
+        masked = not any(t in extracted_lower for t in texts_to_check)
+        results.append(EntityVerifyResult(
             id=entity.id,
             original_text=entity.original_text,
-            masked=entity.original_text.lower() not in extracted_lower,
-        )
-        for entity in request.entities
-    ]
+            masked=masked,
+        ))
 
     total = len(results)
     masked_count = sum(1 for r in results if r.masked)
