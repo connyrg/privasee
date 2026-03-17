@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import time
 import uuid
@@ -21,6 +22,8 @@ from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 from dotenv import load_dotenv
 from flask import Response, request as flask_request
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
@@ -62,7 +65,8 @@ def proxy_original_pdf(session_id: str) -> Response:
         if as_download:
             headers["Content-Disposition"] = f"attachment; filename={session_id}.pdf"
         return Response(r.content, headers=headers)
-    except Exception:
+    except Exception as exc:
+        logger.error("Failed to proxy original PDF for session %s: %s", session_id, exc)
         return Response("PDF not available", status=404)
 
 
@@ -81,7 +85,8 @@ def proxy_masked_pdf(session_id: str) -> Response:
         if as_download:
             headers["Content-Disposition"] = f"attachment; filename={session_id}_masked.pdf"
         return Response(r.content, headers=headers)
-    except Exception:
+    except Exception as exc:
+        logger.error("Failed to proxy masked PDF for session %s: %s", session_id, exc)
         return Response("PDF not available", status=404)
 
 
@@ -1418,7 +1423,8 @@ def populate_compare(mask_result: dict | None, session: dict | None):
             r = req.get(url, headers=headers, timeout=30, verify=SSL_VERIFY)
             r.raise_for_status()
             return "data:application/pdf;base64," + base64.b64encode(r.content).decode()
-        except Exception:
+        except Exception as exc:
+            logger.error("Failed to fetch PDF for compare view from %s: %s", url, exc)
             return ""
 
     original_src = _fetch_b64(f"{API_BASE_URL}/api/files/uploads/{session_id}.pdf")
@@ -1476,8 +1482,8 @@ def refresh_config_list(step: int):
             configs = r.json()
             options = [{"label": c["config_name"], "value": c["key"]} for c in configs]
             return configs, options
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.error("Failed to fetch config list from API: %s", exc)
     return [], []
 
 
@@ -1603,8 +1609,8 @@ def refresh_template_list(step: int):
         r = req.get(f"{API_BASE_URL}/api/templates", headers=headers, verify=SSL_VERIFY, timeout=10)
         if r.ok:
             return [{"label": t["template_name"], "value": t["key"]} for t in r.json()]
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.error("Failed to fetch template list from API: %s", exc)
     return []
 
 
@@ -1941,8 +1947,8 @@ def batch_tick(n_intervals, cursor, phase, session_id, poll_count, current_entit
         except Exception as exc:
             try:
                 req.delete(f"{API_BASE_URL}/api/sessions/{session_id}", headers=headers, verify=SSL_VERIFY, timeout=10)
-            except Exception:
-                pass
+            except Exception as de:
+                logger.warning("Failed to clean up session %s after process error: %s", session_id, de)
             new_results = results + [{"filename": filename, "session_id": session_id, "entities_found": 0,
                                       "entities_masked": 0, "score": None, "verdict": "Processing failed", "error": str(exc)}]
             return _advance(new_results)
@@ -1955,8 +1961,8 @@ def batch_tick(n_intervals, cursor, phase, session_id, poll_count, current_entit
         if poll_count >= 200:
             try:
                 req.delete(f"{API_BASE_URL}/api/sessions/{session_id}", headers=headers, verify=SSL_VERIFY, timeout=10)
-            except Exception:
-                pass
+            except Exception as de:
+                logger.warning("Failed to clean up session %s after polling timeout: %s", session_id, de)
             new_results = results + [{"filename": filename, "session_id": session_id, "entities_found": 0,
                                       "entities_masked": 0, "score": None, "verdict": "Processing failed", "error": "Timed out after 10 minutes."}]
             return _advance(new_results)
@@ -1985,8 +1991,8 @@ def batch_tick(n_intervals, cursor, phase, session_id, poll_count, current_entit
             err = poll_data.get("error_message") or "Entity extraction failed."
             try:
                 req.delete(f"{API_BASE_URL}/api/sessions/{session_id}", headers=headers, verify=SSL_VERIFY, timeout=10)
-            except Exception:
-                pass
+            except Exception as de:
+                logger.warning("Failed to clean up session %s after extraction error: %s", session_id, de)
             new_results = results + [{"filename": filename, "session_id": session_id, "entities_found": 0,
                                       "entities_masked": 0, "score": None, "verdict": "Processing failed", "error": err}]
             return _advance(new_results)
@@ -2201,14 +2207,14 @@ def batch_reset_workflow(n_clicks: int, results: list, current_session: str | No
         if sid:
             try:
                 req.delete(f"{API_BASE_URL}/api/sessions/{sid}", headers=headers, verify=SSL_VERIFY, timeout=10)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Failed to delete session %s during batch reset: %s", sid, exc)
     # Delete the in-progress session if the batch was interrupted mid-run
     if current_session:
         try:
             req.delete(f"{API_BASE_URL}/api/sessions/{current_session}", headers=headers, verify=SSL_VERIFY, timeout=10)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to delete in-progress session %s during batch reset: %s", current_session, exc)
     return 1, [], [], 0, None, None, 0, [], True, None, None
 
 
@@ -2248,8 +2254,8 @@ def reset_workflow(n_clicks: int, session: dict | None):
                     verify=SSL_VERIFY,
                     timeout=10,
                 )
-            except Exception:
-                pass  # Non-fatal — local stores are cleared regardless
+            except Exception as exc:
+                logger.warning("Failed to delete session %s on reset: %s", session_id, exc)
     return 1, None, DEFAULT_FIELDS, None, None, None, None, None, None, True, None
 
 

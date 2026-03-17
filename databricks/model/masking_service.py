@@ -87,6 +87,10 @@ class MaskingService:
             "Entity Label" — white-filled rectangle, auto label e.g. Full_Name_1.
         """
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        logger.info(
+            "apply_pdf_masks: %d page(s), %d entities (%d approved)",
+            len(doc), len(entities), sum(1 for e in entities if e.get("approved", True)),
+        )
 
         label_counters: Dict[str, int] = {}
         consistency_map: Dict[str, str] = {}
@@ -212,7 +216,9 @@ class MaskingService:
         # original (sensitive) field values before they were overwritten.
         doc.save(buf, garbage=4, deflate=True)
         doc.close()
-        return buf.getvalue()
+        result = buf.getvalue()
+        logger.info("apply_pdf_masks complete: output %d bytes", len(result))
+        return result
 
     # ------------------------------------------------------------------
     # Image masking (PIL) — used when original file is PNG/JPG
@@ -234,6 +240,10 @@ class MaskingService:
         image = Image.open(image_path)
         draw = ImageDraw.Draw(image)
         img_width, img_height = image.size
+        logger.info(
+            "apply_masks: image %dx%d, %d entities",
+            img_width, img_height, len(entities),
+        )
 
         for entity in entities:
             raw_strategy = entity.get("strategy", "")
@@ -264,6 +274,7 @@ class MaskingService:
                     self._draw_text(draw, replacement_text, x, y, width, height, text_color)
 
         image.save(output_path, "PNG", quality=95)
+        logger.info("apply_masks complete: saved to %s", output_path)
         return output_path
 
     # ------------------------------------------------------------------

@@ -92,10 +92,12 @@ class ConfigManager:
         Returns [] if the configs directory does not yet exist.
         Raises requests.HTTPError on unexpected storage errors.
         """
+        logger.debug("Listing configs from %s", self.configs_path)
         r = requests.get(self._url(f"{self.configs_path}/"), headers=self._headers())
         if r.status_code in (400, 404):
             # 404 = directory doesn't exist yet; Databricks Files API may also
             # return 400 for a path that has never been written to.
+            logger.debug("Configs directory not yet created (status %d)", r.status_code)
             return []
         r.raise_for_status()
 
@@ -114,6 +116,7 @@ class ConfigManager:
                     "key": config["key"],
                     "saved_at": config["saved_at"],
                 })
+        logger.info("Listed %d config(s) from UC", len(summaries))
         return summaries
 
     def get_config(self, key: str) -> Optional[Dict[str, Any]]:
@@ -121,11 +124,14 @@ class ConfigManager:
 
         Returns None if not found (404). Raises requests.HTTPError on other errors.
         """
+        logger.debug("Loading config %r from UC", key)
         r = requests.get(
             self._url(f"{self.configs_path}/{key}.json"),
             headers=self._headers(),
         )
         if r.status_code == 404:
+            logger.debug("Config %r not found (404)", key)
             return None
         r.raise_for_status()
+        logger.debug("Config %r loaded successfully", key)
         return r.json()

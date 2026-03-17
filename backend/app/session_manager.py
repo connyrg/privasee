@@ -82,6 +82,7 @@ class UCSessionManager:
             A new UUID v4 string identifying the session.
         """
         session_id = str(uuid.uuid4())
+        logger.info("Creating session %s for file %r", session_id, original_filename)
         metadata: Dict[str, Any] = {
             "session_id": session_id,
             "original_filename": original_filename,
@@ -95,6 +96,7 @@ class UCSessionManager:
             data=json.dumps(metadata),
         )
         response.raise_for_status()
+        logger.info("Session %s created successfully", session_id)
         return session_id
 
     def get_session(self, session_id: str) -> Optional[SessionData]:
@@ -110,6 +112,7 @@ class UCSessionManager:
         path = self._session_path(session_id, "metadata.json")
         response = requests.get(self._url(path), headers=self._headers())
         if response.status_code == 404:
+            logger.debug("Session %s not found (404)", session_id)
             return None
         response.raise_for_status()
         try:
@@ -173,6 +176,8 @@ class UCSessionManager:
             raise ValueError(
                 f"Invalid status {kwargs['status']!r}. Must be one of {_VALID_STATUSES}"
             )
+        log_summary = ", ".join(f"{k}={v!r}" for k, v in kwargs.items())
+        logger.debug("Updating session %s: %s", session_id, log_summary)
         path = self._session_path(session_id, "metadata.json")
         url = self._url(path)
 
@@ -185,6 +190,7 @@ class UCSessionManager:
             url, headers=self._headers(), data=json.dumps(metadata)
         )
         write_response.raise_for_status()
+        logger.info("Session %s updated: %s", session_id, log_summary)
 
     # ------------------------------------------------------------------
     # Entities
@@ -205,12 +211,14 @@ class UCSessionManager:
             "entities": entities,
         }
         path = self._session_path(session_id, "entities.json")
+        logger.info("Saving %d entities for session %s", len(entities), session_id)
         response = requests.put(
             self._url(path),
             headers=self._headers(),
             data=json.dumps(payload),
         )
         response.raise_for_status()
+        logger.debug("entities.json written for session %s", session_id)
 
     def get_entities(self, session_id: str) -> List[Dict[str, Any]]:
         """
@@ -226,14 +234,18 @@ class UCSessionManager:
         path = self._session_path(session_id, "entities.json")
         response = requests.get(self._url(path), headers=self._headers())
         if response.status_code == 404:
+            logger.debug("entities.json not found for session %s (404)", session_id)
             raise FileNotFoundError(
                 f"No entities found for session {session_id}"
             )
         response.raise_for_status()
         try:
             payload = response.json()
-            return payload.get("entities", [])
+            entities = payload.get("entities", [])
+            logger.debug("Loaded %d entities for session %s", len(entities), session_id)
+            return entities
         except json.JSONDecodeError as exc:
+            logger.error("Malformed entities.json for session %s: %s", session_id, exc)
             raise ValueError(
                 f"Malformed JSON in entities for session {session_id}"
             ) from exc
@@ -266,12 +278,17 @@ class UCSessionManager:
             "entities": decisions,
         }
         path = self._session_path(session_id, "masking_decisions.json")
+        logger.info(
+            "Saving masking decisions for session %s: %d total entities, %d approved",
+            session_id, len(all_entities), len(approved_ids),
+        )
         response = requests.put(
             self._url(path),
             headers=self._headers(),
             data=json.dumps(payload),
         )
         response.raise_for_status()
+        logger.debug("masking_decisions.json written for session %s", session_id)
 
     # ------------------------------------------------------------------
     # Binary file storage
@@ -287,12 +304,14 @@ class UCSessionManager:
             data:       Raw file bytes sent as the request body.
         """
         path = self._session_path(session_id, filename)
+        logger.info("Saving file %r for session %s (%d bytes)", filename, session_id, len(data))
         response = requests.put(
             self._url(path),
             headers=self._headers(),
             data=data,
         )
         response.raise_for_status()
+        logger.debug("File %r saved to UC for session %s", filename, session_id)
 
     def get_file(self, session_id: str, filename: str) -> bytes:
         """
@@ -309,12 +328,15 @@ class UCSessionManager:
             FileNotFoundError: If the file does not exist in the volume (404).
         """
         path = self._session_path(session_id, filename)
+        logger.debug("Fetching file %r for session %s", filename, session_id)
         response = requests.get(self._url(path), headers=self._headers())
         if response.status_code == 404:
+            logger.warning("File %r not found for session %s (404)", filename, session_id)
             raise FileNotFoundError(
                 f"File '{filename}' not found for session {session_id}"
             )
         response.raise_for_status()
+        logger.debug("Fetched %r for session %s (%d bytes)", filename, session_id, len(response.content))
         return response.content
 
     def delete_session(self, session_id: str) -> None:
@@ -328,6 +350,7 @@ class UCSessionManager:
         Args:
             session_id: Session whose artefacts should be deleted.
         """
+        logger.info("Deleting session %s from UC volume", session_id)
         # Determine the original file's extension so we can delete it by name.
         original_ext = ".pdf"
         try:
@@ -340,12 +363,13 @@ class UCSessionManager:
                 ext = _Path(original_filename).suffix.lower()
                 if ext:
                     original_ext = ext
-        except Exception:
-            pass  # Best-effort — fall back to .pdf
+        except Exception as exc:
+            logger.warning("Could not read metadata.json for session %s during delete (will use .pdf fallback): %s", session_id, exc)
 
         candidates = [
             "metadata.json",
             "entities.json",
+            "masking_decisions.json",
             f"original{original_ext}",
             "masked.pdf",
         ]
@@ -353,5 +377,8 @@ class UCSessionManager:
             path = self._session_path(session_id, filename)
             response = requests.delete(self._url(path), headers=self._headers())
             if response.status_code == 404:
+                logger.debug("Delete skipped (not found): %s/%s", session_id, filename)
                 continue  # File never existed — not an error
             response.raise_for_status()
+            logger.debug("Deleted %s/%s", session_id, filename)
+        logger.info("Session %s deleted from UC volume", session_id)

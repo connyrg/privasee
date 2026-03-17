@@ -432,8 +432,8 @@ async def _process_background(
             logger.error(err)
             try:
                 await asyncio.to_thread(sm.update_session, session_id, status="error", error_message=err)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.error("Failed to mark session %s as error after missing endpoint: %s", session_id, exc)
             return
 
         db_request = DatabricksProcessRequest(
@@ -458,16 +458,16 @@ async def _process_background(
             logger.error("Databricks timed out for session %s: %s", session_id, exc)
             try:
                 await asyncio.to_thread(sm.update_session, session_id, status="error", error_message=err)
-            except Exception:
-                pass
+            except Exception as ue:
+                logger.error("Failed to mark session %s as error after timeout: %s", session_id, ue)
             return
         except (httpx.HTTPStatusError, httpx.RequestError) as exc:
             err = f"Databricks request failed: {exc}"
             logger.error("Databricks error for session %s: %s", session_id, exc)
             try:
                 await asyncio.to_thread(sm.update_session, session_id, status="error", error_message=err)
-            except Exception:
-                pass
+            except Exception as ue:
+                logger.error("Failed to mark session %s as error after HTTP error: %s", session_id, ue)
             return
 
         logger.info(
@@ -485,8 +485,8 @@ async def _process_background(
             logger.error("Parse error for session %s: %s — raw: %s", session_id, exc, raw)
             try:
                 await asyncio.to_thread(sm.update_session, session_id, status="error", error_message=err)
-            except Exception:
-                pass
+            except Exception as ue:
+                logger.error("Failed to mark session %s as error after parse failure: %s", session_id, ue)
             return
 
     # --- Persist entities (mock only) and mark session ready for review ---
@@ -502,14 +502,19 @@ async def _process_background(
                     sm.update_session, session_id, status="error",
                     error_message=f"Failed to save extraction results: {exc}",
                 )
-            except Exception:
-                pass
+            except Exception as ue:
+                logger.error("Failed to mark session %s as error after entity save failure: %s", session_id, ue)
             return
 
     try:
         await asyncio.to_thread(sm.update_session, session_id, status="awaiting_review")
     except Exception as exc:
-        logger.error("Could not update session status for %s: %s", session_id, exc)
+        logger.error(
+            "CRITICAL: Could not update session %s to 'awaiting_review' — "
+            "entities were extracted but the session will appear stuck in 'processing'. "
+            "Error: %s",
+            session_id, exc, exc_info=True,
+        )
 
     suffix = " (mock)" if MOCK_DATABRICKS else ""
     logger.info("Background processing done for session %s — %d entities%s", session_id, len(entities), suffix)
@@ -772,8 +777,11 @@ async def approve_and_mask(request: ApprovalRequest):
     try:
         sm.update_session(request.session_id, status="completed")
     except Exception as exc:
-        logger.warning(
-            "Could not update session status for %s: %s", request.session_id, exc
+        logger.error(
+            "CRITICAL: Could not update session %s to 'completed' — "
+            "masking succeeded but the session will not show as done. "
+            "Error: %s",
+            request.session_id, exc, exc_info=True,
         )
 
     elapsed = round(time.monotonic() - t0, 2)
@@ -946,7 +954,7 @@ async def get_session_info(session_id: str):
             raw_entities = sm.get_entities(session_id)
             entities = [Entity(**e) for e in raw_entities]
         except FileNotFoundError:
-            pass  # entities.json not yet written — return empty list
+            logger.debug("entities.json not yet present for session %s — returning empty list", session_id)
         except Exception as exc:
             logger.warning("Could not load entities for session %s: %s", session_id, exc)
 
