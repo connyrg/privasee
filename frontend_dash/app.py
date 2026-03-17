@@ -832,7 +832,7 @@ app.layout = dbc.Container(
         # Polling interval — disabled until process endpoint returns 202
         dcc.Interval(id="poll-interval", interval=5000, n_intervals=0, disabled=True),
         # Batch processing interval — drives the per-file state machine
-        dcc.Interval(id="batch-interval", interval=3000, n_intervals=0, disabled=True),
+        dcc.Interval(id="batch-interval", interval=2000, n_intervals=0, disabled=True),
         # --- UI ---
         _navbar(),
         # Step indicator
@@ -1914,6 +1914,8 @@ def batch_tick(n_intervals, cursor, phase, session_id, poll_count, current_entit
     # Upload
     # ------------------------------------------------------------------
     if phase == "upload":
+        # Upload and immediately fire extraction in the same tick — no interval
+        # wait needed between these two steps since process returns 202 instantly.
         try:
             file_bytes = base64.b64decode(file_info["content"])
             resp = req.post(
@@ -1929,30 +1931,24 @@ def batch_tick(n_intervals, cursor, phase, session_id, poll_count, current_entit
             new_results = results + [{"filename": filename, "session_id": None, "entities_found": 0,
                                       "entities_masked": 0, "score": None, "verdict": "Upload failed", "error": str(exc)}]
             return _advance(new_results)
-        return cursor, "process", new_session_id, 0, [], no_update, no_update, no_update, _progress("Starting extraction...")
-
-    # ------------------------------------------------------------------
-    # Fire extraction job (returns 202 immediately)
-    # ------------------------------------------------------------------
-    if phase == "process":
         try:
             resp = req.post(
                 f"{API_BASE_URL}/api/process",
                 headers=headers,
-                json={"session_id": session_id, "field_definitions": field_defs},
+                json={"session_id": new_session_id, "field_definitions": field_defs},
                 timeout=30,
                 verify=SSL_VERIFY,
             )
             resp.raise_for_status()
         except Exception as exc:
             try:
-                req.delete(f"{API_BASE_URL}/api/sessions/{session_id}", headers=headers, verify=SSL_VERIFY, timeout=10)
+                req.delete(f"{API_BASE_URL}/api/sessions/{new_session_id}", headers=headers, verify=SSL_VERIFY, timeout=10)
             except Exception as de:
-                logger.warning("Failed to clean up session %s after process error: %s", session_id, de)
-            new_results = results + [{"filename": filename, "session_id": session_id, "entities_found": 0,
+                logger.warning("Failed to clean up session %s after process error: %s", new_session_id, de)
+            new_results = results + [{"filename": filename, "session_id": new_session_id, "entities_found": 0,
                                       "entities_masked": 0, "score": None, "verdict": "Processing failed", "error": str(exc)}]
             return _advance(new_results)
-        return cursor, "polling", session_id, 0, [], no_update, no_update, no_update, _progress("Extracting entities...")
+        return cursor, "polling", new_session_id, 0, [], no_update, no_update, no_update, _progress("Extracting entities...")
 
     # ------------------------------------------------------------------
     # Poll extraction status
@@ -2003,6 +1999,8 @@ def batch_tick(n_intervals, cursor, phase, session_id, poll_count, current_entit
     # Mask all entities
     # ------------------------------------------------------------------
     if phase == "masking":
+        # Mask and immediately verify in the same tick — no interval wait needed
+        # since verify is a fast text-extraction check on the already-written file.
         entities = current_entities or []
         try:
             approved_ids = [e["id"] for e in entities]
@@ -2018,13 +2016,6 @@ def batch_tick(n_intervals, cursor, phase, session_id, poll_count, current_entit
             new_results = results + [{"filename": filename, "session_id": session_id, "entities_found": len(entities),
                                       "entities_masked": 0, "score": None, "verdict": "Masking failed", "error": str(exc)}]
             return _advance(new_results)
-        return cursor, "verifying", session_id, 0, entities, no_update, no_update, no_update, _progress("Verifying...")
-
-    # ------------------------------------------------------------------
-    # Verify masking quality
-    # ------------------------------------------------------------------
-    if phase == "verifying":
-        entities = current_entities or []
         score = None
         verdict = "Verify failed"
         error = None
