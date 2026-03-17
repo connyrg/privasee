@@ -36,6 +36,7 @@ Masking strategies
 import io
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import fitz  # PyMuPDF
@@ -174,7 +175,21 @@ class MaskingService:
                     None,
                 )
                 if overlapping_widget is not None:
-                    overlapping_widget.field_value = replacement or ""
+                    # Form widgets render on top of the page content stream, so
+                    # a redact annotation underneath is invisible.  Substitute
+                    # only the sensitive substring within the field value to
+                    # preserve surrounding context (e.g. labels, other fields).
+                    current_val = overlapping_widget.field_value or ""
+                    target = occ_original_text.strip()
+                    sub = "[MASKED]" if strategy == "redact" else (replacement or "[MASKED]")
+                    if target:
+                        new_val = current_val.replace(target, sub)
+                        if new_val == current_val and target.lower() in current_val.lower():
+                            # Case-insensitive fallback
+                            new_val = re.sub(re.escape(target), sub, current_val, flags=re.IGNORECASE)
+                    else:
+                        new_val = sub
+                    overlapping_widget.field_value = new_val
                     overlapping_widget.update()
                 else:
                     page.add_redact_annot(rect, fill=fill_color)
