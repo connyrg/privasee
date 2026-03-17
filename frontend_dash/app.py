@@ -300,25 +300,22 @@ def _step1_layout() -> html.Div:
                 id="batch-upload-card",
                 style={"display": "none"},
             ),
-            # Field definitions card
+            # Load configuration card
             dbc.Card(
                 dbc.CardBody(
                     [
-                        html.H5("De-identification Rules", className="card-title mb-1"),
-                        html.Small(STRATEGY_GUIDE, className="text-muted d-block mb-3"),
-                        # System template row
+                        html.H6([html.I(className="bi bi-folder2-open me-2"), "Load Configuration"], className="card-title mb-3"),
                         dbc.Row(
                             [
-                                dbc.Col(html.Small("Templates:", className="text-muted fw-semibold"), width="auto", className="d-flex align-items-center"),
+                                dbc.Col(html.Small("Template", className="text-muted fw-semibold"), width=2, className="d-flex align-items-center"),
                                 dbc.Col(
                                     dcc.Dropdown(
                                         id="template-dropdown",
-                                        placeholder="Load a system template...",
+                                        placeholder="Select a system template...",
                                         options=[],
                                         clearable=True,
                                         style={"fontSize": "0.875rem"},
                                     ),
-                                    width=5,
                                 ),
                                 dbc.Col(
                                     dbc.Button("Load", id="template-load-btn", color="outline-secondary", size="sm", disabled=True),
@@ -327,18 +324,17 @@ def _step1_layout() -> html.Div:
                             ],
                             className="g-2 mb-2 align-items-center",
                         ),
-                        # Config load row
                         dbc.Row(
                             [
+                                dbc.Col(html.Small("Saved Config", className="text-muted fw-semibold"), width=2, className="d-flex align-items-center"),
                                 dbc.Col(
                                     dcc.Dropdown(
                                         id="config-load-dropdown",
-                                        placeholder="Load saved config...",
+                                        placeholder="Select a saved config...",
                                         options=[],
                                         clearable=True,
                                         style={"fontSize": "0.875rem"},
                                     ),
-                                    width=5,
                                 ),
                                 dbc.Col(
                                     dbc.Button("Load", id="config-load-btn", color="outline-primary", size="sm", disabled=True),
@@ -347,10 +343,9 @@ def _step1_layout() -> html.Div:
                             ],
                             className="g-2 mb-2 align-items-center",
                         ),
-                        # JSON import row
                         dbc.Row(
                             [
-                                dbc.Col(html.Small("Import JSON:", className="text-muted fw-semibold"), width="auto", className="d-flex align-items-center"),
+                                dbc.Col(html.Small("Import JSON", className="text-muted fw-semibold"), width=2, className="d-flex align-items-center"),
                                 dbc.Col(
                                     dcc.Upload(
                                         id="config-json-upload",
@@ -361,13 +356,23 @@ def _step1_layout() -> html.Div:
                                     width="auto",
                                 ),
                                 dbc.Col(
-                                    html.Small("Upload a saved config .json file to load its fields.", className="text-muted"),
+                                    html.Small("Upload a saved config .json file to restore its fields.", className="text-muted"),
                                     className="d-flex align-items-center",
                                 ),
                             ],
-                            className="g-2 mb-2 align-items-center",
+                            className="g-2 align-items-center",
                         ),
-                        html.Div(id="config-status", className="mb-2"),
+                        html.Div(id="config-status", className="mt-2"),
+                    ]
+                ),
+                className="mb-4",
+            ),
+            # Field definitions card
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.H5("De-identification Rules", className="card-title mb-1"),
+                        html.Small(STRATEGY_GUIDE, className="text-muted d-block mb-3"),
                         # Column headers
                         dbc.Row(
                             [
