@@ -100,7 +100,7 @@ class ConfigManager:
         r.raise_for_status()
 
         summaries = []
-        for entry in r.json().get("files", []):
+        for entry in r.json().get("contents", []):
             # The Files API returns the full path; derive the filename from it.
             # e.g. "/Volumes/catalog/schema/configs/patient_record.json" → "patient_record.json"
             full_path = entry.get("path", "") or entry.get("name", "")
