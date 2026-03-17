@@ -326,7 +326,7 @@ def _step1_layout() -> html.Div:
                         ),
                         dbc.Row(
                             [
-                                dbc.Col(html.Small("Saved Config", className="text-muted fw-semibold"), width=2, className="d-flex align-items-center"),
+                                dbc.Col(html.Small("Load Config", className="text-muted fw-semibold"), width=2, className="d-flex align-items-center"),
                                 dbc.Col(
                                     dcc.Dropdown(
                                         id="config-load-dropdown",
