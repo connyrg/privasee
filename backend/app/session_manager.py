@@ -6,10 +6,11 @@ Files REST API (``/api/2.0/fs/files``).
 
 Session artefacts are stored under:
     {UC_VOLUME_PATH}/{session_id}/
-        metadata.json   — session state (status, filename, field_definitions, …)
-        entities.json   — extracted entity list
-        original.{ext}  — the uploaded document
-        masked.pdf      — the de-identified output (after approve-and-mask)
+        metadata.json          — session state (status, filename, field_definitions, …)
+        entities.json          — extracted entity list (written by Databricks model)
+        masking_decisions.json — audit record of what was approved and masked
+        original.{ext}         — the uploaded document
+        masked.pdf             — the de-identified output (after approve-and-mask)
 """
 
 from __future__ import annotations
@@ -236,6 +237,41 @@ class UCSessionManager:
             raise ValueError(
                 f"Malformed JSON in entities for session {session_id}"
             ) from exc
+
+    def save_masking_decisions(
+        self,
+        session_id: str,
+        all_entities: List[Dict[str, Any]],
+        approved_ids: set,
+    ) -> None:
+        """
+        Write masking_decisions.json as an audit record before approve-and-mask.
+
+        Records every entity with an ``approved`` flag and the final
+        ``replacement_text`` that was used, plus a timestamp. Written before
+        the masking call so the record is captured even if masking fails.
+
+        Args:
+            session_id:   Session to update.
+            all_entities: Full entity list with any user edits already applied.
+            approved_ids: Set of entity IDs approved for masking.
+        """
+        decisions = [
+            {**e, "approved": e.get("id") in approved_ids}
+            for e in all_entities
+        ]
+        payload: Dict[str, Any] = {
+            "session_id": session_id,
+            "decided_at": datetime.now(timezone.utc).isoformat(),
+            "entities": decisions,
+        }
+        path = self._session_path(session_id, "masking_decisions.json")
+        response = requests.put(
+            self._url(path),
+            headers=self._headers(),
+            data=json.dumps(payload),
+        )
+        response.raise_for_status()
 
     # ------------------------------------------------------------------
     # Binary file storage

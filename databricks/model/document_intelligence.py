@@ -501,6 +501,16 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
                     result.append({"page_number": page, "bounding_box": norm, "original_text": orig})
             return result
 
+        def _is_contained(child_bb: list, parent_bb: list, threshold: float = 0.8) -> bool:
+            """Return True if child_bb is >= threshold covered by parent_bb."""
+            cx, cy, cw, ch = child_bb
+            px, py, pw, ph = parent_bb
+            if cw * ch == 0:
+                return True
+            ix = max(0, min(cx + cw, px + pw) - max(cx, px))
+            iy = max(0, min(cy + ch, py + ph) - max(cy, py))
+            return (ix * iy) / (cw * ch) >= threshold
+
         sorted_ents = sorted(entities, key=lambda e: len(e.get("original_text", "")), reverse=True)
         merged: set = set()
 
@@ -533,7 +543,17 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
                         )
                         for bb in child_boxes:
                             norm = _normalise_bb(bb)
-                            if norm:
+                            if not norm:
+                                continue
+                            # Skip if already covered by an existing occurrence on
+                            # the same page (e.g. "Stephen" sub-bbox inside "Stephen Parrot").
+                            already_covered = any(
+                                occ.get("page_number") == child_page
+                                and _is_contained(norm, occ["bounding_box"])
+                                for occ in parent_occs
+                                if occ.get("bounding_box")
+                            )
+                            if not already_covered:
                                 parent_occs.append({
                                     "page_number": child_page,
                                     "bounding_box": norm,

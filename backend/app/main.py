@@ -489,20 +489,27 @@ async def _process_background(
                 pass
             return
 
-    # --- Persist entities and mark session ready for review ---
+    # --- Persist entities (mock only) and mark session ready for review ---
+    # Real path: the Databricks model already wrote merged entities.json to UC
+    # via _write_to_uc_volume — saving again would overwrite with unmerged data.
+    if MOCK_DATABRICKS:
+        try:
+            await asyncio.to_thread(sm.save_entities, session_id, [e.model_dump() for e in entities])
+        except Exception as exc:
+            logger.error("Could not persist mock entities for session %s: %s", session_id, exc)
+            try:
+                await asyncio.to_thread(
+                    sm.update_session, session_id, status="error",
+                    error_message=f"Failed to save extraction results: {exc}",
+                )
+            except Exception:
+                pass
+            return
+
     try:
-        await asyncio.to_thread(sm.save_entities, session_id, [e.model_dump() for e in entities])
         await asyncio.to_thread(sm.update_session, session_id, status="awaiting_review")
     except Exception as exc:
-        logger.error("Could not persist entities for session %s: %s", session_id, exc)
-        try:
-            await asyncio.to_thread(
-                sm.update_session, session_id, status="error",
-                error_message=f"Failed to save extraction results: {exc}",
-            )
-        except Exception:
-            pass
-        return
+        logger.error("Could not update session status for %s: %s", session_id, exc)
 
     suffix = " (mock)" if MOCK_DATABRICKS else ""
     logger.info("Background processing done for session %s — %d entities%s", session_id, len(entities), suffix)
@@ -683,9 +690,18 @@ async def approve_and_mask(request: ApprovalRequest):
         updates: Dict[str, str] = {
             e.id: e.replacement_text for e in request.updated_entities
         }
-        for entity in entities_to_mask:
+        for entity in stored_entities:
             if entity.get("id") in updates:
                 entity["replacement_text"] = updates[entity["id"]]
+        entities_to_mask = [e for e in stored_entities if e.get("id") in approved_ids]
+
+    # --- Persist audit record before masking (captured even if masking fails) ---
+    try:
+        sm.save_masking_decisions(request.session_id, stored_entities, approved_ids)
+    except Exception as exc:
+        logger.warning(
+            "Could not save masking decisions for %s: %s", request.session_id, exc
+        )
 
     # --- Delegate masking to Databricks ---
     logger.info(
