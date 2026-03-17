@@ -98,8 +98,12 @@ Required environment variables on the endpoint:
 | `DATABRICKS_HOST` | Workspace URL (same as backend) |
 | `DATABRICKS_TOKEN` | Service principal token with Files API read/write access to the UC volume |
 | `UC_VOLUME_PATH` | Same value as backend |
-| `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT` | Azure DI endpoint URL |
-| `AZURE_DOCUMENT_INTELLIGENCE_KEY` | Azure DI API key |
+| `ADI_TENANT_ID` | Azure tenant ID for ADI OAuth |
+| `ADI_CLIENT_ID` | OAuth client ID for Azure Document Intelligence |
+| `ADI_CLIENT_SECRET` | OAuth client secret for Azure Document Intelligence |
+| `ADI_ENDPOINT` | APIM endpoint URL for Azure Document Intelligence |
+| `ADI_APPSPACE_ID` | Suncorp AppSpace ID |
+| `ADI_MODEL_ID` | Document Intelligence model ID (default: `prebuilt-layout`) |
 | `VISION_SERVICE_PROVIDER` | `openai` (default) or `claude` |
 | `AZURE_OPENAI_API_KEY` | Required when `VISION_SERVICE_PROVIDER=openai` |
 | `AZURE_OPENAI_ENDPOINT` | Required when `VISION_SERVICE_PROVIDER=openai` |

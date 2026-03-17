@@ -2,13 +2,22 @@
 
 ## Overview
 
-Each component is deployed independently via GitHub Actions:
+Each component is deployed independently via manual `rsconnect` or Databricks notebook commands.
+GitHub Actions workflows run CI checks (tests, lint, build) on pull requests but do not deploy automatically.
 
-| Component | Workflow | Target |
+| Component | Deployed to | How |
 |---|---|---|
-| Dash frontend | `.github/workflows/deploy-frontend.yml` | Posit Connect |
-| Backend | `.github/workflows/deploy-backend.yml` | Posit Connect (FastAPI) |
-| Databricks model | `.github/workflows/deploy-databricks.yml` | Databricks Model Serving |
+| Dash frontend | Posit Connect | `rsconnect deploy dash` (manual) |
+| FastAPI backend | Posit Connect | `rsconnect deploy fastapi` (manual) |
+| Databricks models | Databricks Model Serving | Run notebooks manually (see below) |
+
+CI workflows (`.github/workflows/`) run on PRs to catch failures early:
+
+| Workflow | Trigger | What it does |
+|---|---|---|
+| `deploy-backend.yml` | PRs touching `backend/` | Runs the full backend test suite |
+| `deploy-frontend.yml` | PRs/pushes touching `frontend/` | Lints and builds the frontend |
+| `deploy-databricks.yml` | PRs/pushes touching `databricks/` | Placeholder — Databricks CI not yet configured |
 
 ---
 
@@ -123,19 +132,14 @@ will perform a rolling update with zero downtime.
 
 ## GitHub Secrets
 
-The following secrets must be configured in the repository
-(Settings → Secrets and variables → Actions):
+The following secrets are used by CI workflows
+(Settings → Secrets and variables → Actions).
+Deployment credentials are set directly on the Posit Connect content item or Databricks endpoint — not stored as GitHub secrets.
 
 | Secret | Used by |
 |---|---|
-| `POSIT_CONNECT_URL` | deploy-frontend, deploy-backend |
-| `POSIT_CONNECT_TOKEN` | deploy-frontend, deploy-backend |
-| `DATABRICKS_HOST` | deploy-databricks, deploy-backend |
-| `DATABRICKS_TOKEN` | deploy-databricks, deploy-backend |
-| `DATABRICKS_MODEL_ENDPOINT` | deploy-backend |
-| `DATABRICKS_MASKING_ENDPOINT` | deploy-backend |
-| `UC_VOLUME_PATH` | deploy-backend |
-| `ALLOWED_ORIGINS` | deploy-backend |
+| `DATABRICKS_HOST` | `deploy-databricks` (when Databricks CI is configured) |
+| `DATABRICKS_TOKEN` | `deploy-databricks` (when Databricks CI is configured) |
 
 ---
 

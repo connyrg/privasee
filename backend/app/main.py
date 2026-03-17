@@ -1177,15 +1177,16 @@ async def get_config(key: str):
 # ---------------------------------------------------------------------------
 # Static frontend (Posit Connect / production)
 # ---------------------------------------------------------------------------
-# Mount the pre-built React bundle so FastAPI serves the SPA from the same
-# origin as the API.  This lets the frontend use relative /api/ paths without
-# any CORS configuration.
+# Mount a pre-built static frontend bundle if one is present.
+# This is only used for the legacy React frontend (frontend/).  The primary
+# Dash frontend (frontend_dash/) is deployed separately to Posit Connect and
+# does not use this mount.
 #
-# The directory is populated by CI before deployment:
+# The directory would be populated by:
 #   cp -r frontend/dist backend/static
 #
-# The mount is conditional so local backend-only development is unaffected
-# (the static/ directory simply won't exist in a plain checkout).
+# The mount is conditional so it has no effect when the static/ directory is
+# absent (the default for a plain checkout or Dash-only deployment).
 #
 # MUST be registered last — FastAPI resolves routes in registration order, so
 # all /api/* routes above take precedence over this catch-all mount.

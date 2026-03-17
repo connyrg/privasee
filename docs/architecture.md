@@ -92,10 +92,11 @@ Two MLflow PyFunc models, each deployed to its own Model Serving endpoint:
 - Per-session directory layout:
   ```
   {UC_VOLUME_PATH}/{session_id}/
-      metadata.json     — session status and original filename (backend)
-      original{ext}     — uploaded document, e.g. original.pdf (backend)
-      entities.json     — extracted entities (document intelligence model → backend)
-      masked.pdf        — de-identified output (masking model)
+      metadata.json          — session status and original filename (backend)
+      original{ext}          — uploaded document, e.g. original.pdf (backend)
+      entities.json          — extracted entities (document intelligence model → backend)
+      masking_decisions.json — audit record: every entity with approved flag and replacement_text (backend, written before masking call)
+      masked.pdf             — de-identified output (masking model)
   ```
 - Accessed by the backend and both model serving endpoints via the
   Databricks Files REST API (`/api/2.0/fs/files`)

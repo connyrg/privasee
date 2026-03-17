@@ -145,15 +145,89 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
     def predict(self, context, model_input: pd.DataFrame) -> pd.DataFrame:
         """
         Process document de-identification requests.
-        
+
+        Input (MLflow dataframe_records format):
+        ::
+
+            {
+              "dataframe_records": [
+                {
+                  "session_id": "uuid-string",
+                  "field_definitions": [
+                    {
+                      "name": "Full Name",
+                      "description": "Person's full name",
+                      "strategy": "Fake Data"
+                    }
+                  ]
+                }
+              ]
+            }
+
+        The model reads ``original{ext}`` from the UC volume using ``session_id``
+        — the document bytes are **not** passed in the request payload.
+
+        Output (one prediction per input record):
+        ::
+
+            {
+              "predictions": [
+                {
+                  "session_id": "uuid-string",
+                  "status": "complete",
+                  "entities": [
+                    {
+                      "id": "uuid-string",
+                      "entity_type": "Full Name",
+                      "original_text": "Stephen Parrot",
+                      "replacement_text": "Jane Doe",
+                      "bounding_box": [0.1, 0.2, 0.3, 0.05],
+                      "bounding_boxes": [[0.1, 0.2, 0.3, 0.05]],
+                      "confidence": 0.95,
+                      "approved": true,
+                      "page_number": 1,
+                      "strategy": "Fake Data",
+                      "occurrences": [
+                        {
+                          "page_number": 1,
+                          "bounding_box": [0.1, 0.2, 0.3, 0.05],
+                          "original_text": "Stephen Parrot"
+                        },
+                        {
+                          "page_number": 2,
+                          "bounding_box": [0.05, 0.1, 0.2, 0.04],
+                          "original_text": "Stephen"
+                        }
+                      ]
+                    }
+                  ],
+                  "pages": [
+                    {
+                      "page_num": 1,
+                      "entities": [ ... ]
+                    }
+                  ]
+                }
+              ]
+            }
+
+        Notes:
+          - ``entities`` is the merged flat list (name-variant merging applied).
+            The backend prefers this over ``pages`` to avoid overwriting the
+            merged result with unmerged per-page data.
+          - ``occurrences`` lists every positional appearance after merging,
+            including partial name variants (e.g. "Stephen" merged into
+            "Stephen Parrot").  Bounding box values are normalised [0, 1].
+          - The model also writes ``entities.json`` to the UC volume directly.
+          - On error: ``{"session_id": ..., "status": "error", "error_message": ...}``
+
         Args:
             context: MLflow model context (unused)
-            model_input: DataFrame with columns:
-                - session_id: string
-                - field_definitions: list of field definition dicts
-        
+            model_input: DataFrame with columns ``session_id`` and
+                ``field_definitions`` (list of field definition dicts).
+
         Returns:
-            DataFrame with processing results for each row
+            DataFrame with one result row per input row.
         """
         results = []
         

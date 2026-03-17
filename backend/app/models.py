@@ -1,9 +1,8 @@
 """
 Pydantic data models for PrivaSee.
 
-All request/response shapes are kept wire-compatible with the PoC so the
-React frontend requires no changes.  New fields added for the target
-architecture are either optional or only appear in server-to-server calls.
+Covers all FastAPI request/response shapes and the server-to-server contract
+with the Databricks Model Serving endpoints.
 """
 
 from __future__ import annotations
@@ -90,12 +89,7 @@ class Occurrence(BaseModel):
 
 
 class Entity(BaseModel):
-    """
-    A single sensitive entity detected in the document.
-
-    Field names match the PoC exactly so the React ReviewTable and
-    approveAndMask() call work without modification.
-    """
+    """A single sensitive entity detected in the document."""
 
     id: str = Field(..., description="Unique identifier for this entity")
     entity_type: str = Field(..., description="Type of entity (field name)")
@@ -389,13 +383,14 @@ class DatabricksProcessResponse(BaseModel):
         """
         Parse the MLflow Model Serving JSON envelope.
 
-        Handles both the standard {"predictions": [...]} shape and a bare
-        {"entities": [...]} shape for easier local mocking.
+        Handles the standard ``{"predictions": [...]}`` shape and a bare
+        ``{"entities": [...]}`` shape for easier local mocking.
 
-        The model returns entities nested under a "pages" list:
-            {"pages": [{"page_num": 1, "entities": [...]}, ...]}
-        This method flattens them into a single entity list, using each
-        page's "page_num" as the entity's page_number.
+        The model response includes both a top-level ``entities`` key (merged
+        flat list) and a ``pages`` key (per-page unmerged list).  This method
+        prefers ``entities`` — using the merged list avoids overwriting the
+        UC-persisted merged result with unmerged per-page data.  The ``pages``
+        key is only used as a fallback when ``entities`` is absent.
         """
         predictions = raw.get("predictions") or raw.get("dataframe_records")
         if predictions and isinstance(predictions, list):

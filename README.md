@@ -86,3 +86,4 @@ privasee/
 │   └── deployment.md
 └── start.sh                 Legacy local dev launcher (React frontend)
 ```
+
