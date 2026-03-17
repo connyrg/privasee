@@ -9,7 +9,11 @@ the backend.
 Design notes
 ------------
 - Stateless: callers own the consistency map (same original → same fake value).
-- Dates: preserve the original year, randomise month/day, mirror the input format.
+- Names: structure-aware — mirrors token count, hyphenation, prefix/suffix, gender,
+  and case style.  E.g. "Anne-Marie Doe" (female) → "Jane-Martha Smith".
+- Dates: preserve the original year and exact format — separator, component order
+  (D/M/Y vs M/D/Y), month representation (numeric / abbreviated / full),
+  zero-padding.  E.g. "21/03/2004" → "22/01/2004",  "5 Jan 2025" → "19 Sep 2025".
 - Gender-aware names when gender_guesser is installed (optional, graceful fallback).
 """
 
@@ -30,6 +34,10 @@ try:
 except Exception:
     _gender_detector = None
     _HAS_GENDER = False
+
+# Tokens that should be kept verbatim and not treated as name components
+_PREFIXES = {"mr", "mrs", "ms", "miss", "dr", "prof", "rev", "sir", "lord", "lady", "mx", "master"}
+_SUFFIXES = {"jr", "sr", "i", "ii", "iii", "iv", "v", "esq", "phd", "md", "dds", "dvm", "jd"}
 
 
 class FakeDataService:
@@ -63,19 +71,13 @@ class FakeDataService:
         if "name" in t:
             gender = self._detect_gender(original_text)
             if "first" in t or "given" in t:
-                return (self.faker.first_name_female() if gender == "female"
-                        else self.faker.first_name_male() if gender == "male"
-                        else self.faker.first_name())
+                return self._fake_name_token(original_text.strip(), gender, "first")
             if "last" in t or "surname" in t or "family" in t:
-                return self.faker.last_name()
+                return self._fake_name_token(original_text.strip(), gender, "last")
             if "middle" in t:
-                return (self.faker.first_name_female() if gender == "female"
-                        else self.faker.first_name_male() if gender == "male"
-                        else self.faker.first_name())
-            # Full name
-            return (self.faker.name_female() if gender == "female"
-                    else self.faker.name_male() if gender == "male"
-                    else self.faker.name())
+                return self._fake_name_token(original_text.strip(), gender, "first")
+            # Full name — mirror original structure
+            return self._generate_structured_name(original_text, gender)
 
         # ---- Contact -----------------------------------------------------
         if "email" in t or "e-mail" in t:
@@ -139,8 +141,15 @@ class FakeDataService:
         if not _HAS_GENDER:
             return "unknown"
         try:
-            first = name.strip().split()[0].capitalize()
-            result = _gender_detector.get_gender(first)
+            tokens = name.strip().split()
+            # Skip leading prefix tokens (Dr., Mr., …) to reach the actual first name
+            first = next(
+                (t for t in tokens if t.strip(".,").lower() not in _PREFIXES),
+                tokens[0] if tokens else "",
+            )
+            # Use first part of a hyphenated name (e.g. "Anne" from "Anne-Marie")
+            first_part = first.split("-")[0].capitalize()
+            result = _gender_detector.get_gender(first_part)
             if result in ("female", "mostly_female"):
                 return "female"
             if result in ("male", "mostly_male"):
@@ -151,31 +160,15 @@ class FakeDataService:
 
     def _same_year_date(self, date_str: str) -> str:
         """Generate a fake date in the same year as *date_str*, same format."""
-        format_patterns = [
-            (r"\d{4}-\d{2}-\d{2}",         "%Y-%m-%d"),
-            (r"\d{2}/\d{2}/\d{4}",         "%m/%d/%Y"),
-            (r"\d{2}-\d{2}-\d{4}",         "%m-%d-%Y"),
-            (r"\d{4}/\d{2}/\d{2}",         "%Y/%m/%d"),
-            (r"\d{1,2}/\d{1,2}/\d{4}",     "%m/%d/%Y"),
-            (r"\d{1,2}-\d{1,2}-\d{4}",     "%m-%d-%Y"),
-            (r"[A-Za-z]+ \d{1,2},? \d{4}", "%B %d, %Y"),
-            (r"\d{1,2} [A-Za-z]+ \d{4}",   "%d %B %Y"),
-            (r"\d{2}/\d{2}/\d{2}",         "%m/%d/%y"),
-        ]
-
-        detected_fmt = None
-        for pattern, fmt in format_patterns:
-            if re.fullmatch(pattern, date_str.strip()):
-                detected_fmt = fmt
-                break
+        s = date_str.strip()
 
         year = None
         try:
-            year = dateutil_parser.parse(date_str, fuzzy=True).year
+            year = dateutil_parser.parse(s, dayfirst=True, fuzzy=True).year
         except Exception:
             pass
         if year is None:
-            m = re.search(r"\b(19|20)\d{2}\b", date_str)
+            m = re.search(r"\b(19|20)\d{2}\b", s)
             if m:
                 year = int(m.group())
 
@@ -185,8 +178,166 @@ class FakeDataService:
                     start_date=date(year, 1, 1),
                     end_date=date(year, 12, 31),
                 )
-                return fake_date.strftime(detected_fmt or "%m/%d/%Y")
+                return self._reconstruct_date(fake_date, s)
             except Exception:
                 pass
 
-        return self.faker.date_of_birth().strftime("%m/%d/%Y")
+        return self._reconstruct_date(self.faker.date_of_birth(), s)
+
+    def _reconstruct_date(self, fake: date, original: str) -> str:
+        """
+        Format *fake* date to mirror the structure of *original*.
+
+        Preserves separator, component order (D/M/Y vs M/D/Y), month
+        representation (numeric / abbreviated / full), zero-padding, and
+        2- vs 4-digit year.
+
+        D/M/Y vs M/D/Y detection: if the first numeric component is > 12
+        it must be a day.  If the second is > 12, the first must be a month.
+        Otherwise defaults to D/M/Y (AU/EU convention).
+        """
+        # ISO YYYY-MM-DD
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", original):
+            return fake.strftime("%Y-%m-%d")
+
+        # YYYY/MM/DD
+        if re.fullmatch(r"\d{4}/\d{2}/\d{2}", original):
+            return fake.strftime("%Y/%m/%d")
+
+        # "D Mon YYYY" / "DD Mon YYYY" / "D Month YYYY"
+        # e.g. "5 Jan 2025", "05 January 2025"
+        m = re.fullmatch(r"(\d{1,2})\s+([A-Za-z]+)\s+(\d{2,4})", original)
+        if m:
+            day_orig, month_orig, year_orig = m.group(1), m.group(2), m.group(3)
+            day = str(fake.day).zfill(len(day_orig)) if day_orig.startswith("0") else str(fake.day)
+            month_name = fake.strftime("%b") if len(month_orig) <= 3 else fake.strftime("%B")
+            year = str(fake.year) if len(year_orig) == 4 else str(fake.year)[-2:]
+            return f"{day} {month_name} {year}"
+
+        # "Mon D, YYYY" / "Month D YYYY" / "Month D, YYYY"
+        # e.g. "Jan 5, 2025", "January 5 2025"
+        m = re.fullmatch(r"([A-Za-z]+)\s+(\d{1,2})(,?)\s*(\d{2,4})", original)
+        if m:
+            month_orig, day_orig, comma, year_orig = m.group(1), m.group(2), m.group(3), m.group(4)
+            month_name = fake.strftime("%b") if len(month_orig) <= 3 else fake.strftime("%B")
+            day = str(fake.day).zfill(len(day_orig)) if day_orig.startswith("0") else str(fake.day)
+            year = str(fake.year) if len(year_orig) == 4 else str(fake.year)[-2:]
+            sep = ", " if comma else " "
+            return f"{month_name} {day}{sep}{year}"
+
+        # Numeric ?sep?sep? where sep is / or -
+        for sep in ("/", "-"):
+            m = re.fullmatch(
+                r"(\d{1,2})" + re.escape(sep) + r"(\d{1,2})" + re.escape(sep) + r"(\d{2,4})",
+                original,
+            )
+            if m:
+                p0, p1, p2 = m.group(1), m.group(2), m.group(3)
+                year_str = str(fake.year) if len(p2) == 4 else str(fake.year)[-2:]
+                p0_val, p1_val = int(p0), int(p1)
+                if p0_val > 12:
+                    # First component can only be a day → D/M/Y
+                    day = str(fake.day).zfill(len(p0))
+                    mon = str(fake.month).zfill(len(p1))
+                    return sep.join([day, mon, year_str])
+                elif p1_val > 12:
+                    # Second component can only be a day → M/D/Y
+                    mon = str(fake.month).zfill(len(p0))
+                    day = str(fake.day).zfill(len(p1))
+                    return sep.join([mon, day, year_str])
+                else:
+                    # Ambiguous — default to D/M/Y
+                    day = str(fake.day).zfill(len(p0))
+                    mon = str(fake.month).zfill(len(p1))
+                    return sep.join([day, mon, year_str])
+
+        # Fallback — no recognised format
+        return fake.strftime("%d/%m/%Y")
+
+    # ------------------------------------------------------------------
+    # Name structure helpers
+    # ------------------------------------------------------------------
+
+    def _generate_structured_name(self, original_text: str, gender: str) -> str:
+        """
+        Generate a fake full name that mirrors the token structure of *original_text*.
+
+        Preserves: number of tokens (first / middle(s) / last), hyphenation,
+        prefix (Dr., Mr., …) and suffix (Jr., III, …) kept verbatim, case
+        style, and gender of first/middle name tokens.
+        """
+        tokens = original_text.strip().split()
+        if not tokens:
+            return self._simple_name(gender)
+
+        prefix_tokens: list = []
+        suffix_tokens: list = []
+        name_tokens: list = []
+
+        for i, tok in enumerate(tokens):
+            clean = tok.strip(".,").lower()
+            if i == 0 and clean in _PREFIXES:
+                prefix_tokens.append(tok)
+            elif i == len(tokens) - 1 and clean in _SUFFIXES:
+                suffix_tokens.append(tok)
+            else:
+                name_tokens.append(tok)
+
+        if not name_tokens:
+            return self._simple_name(gender)
+
+        fake_parts: list = []
+        if len(name_tokens) == 1:
+            fake_parts.append(self._fake_name_token(name_tokens[0], gender, "first"))
+        elif len(name_tokens) == 2:
+            fake_parts.append(self._fake_name_token(name_tokens[0], gender, "first"))
+            fake_parts.append(self._fake_name_token(name_tokens[1], gender, "last"))
+        else:
+            # first + one or more middles + last
+            fake_parts.append(self._fake_name_token(name_tokens[0], gender, "first"))
+            for mid in name_tokens[1:-1]:
+                fake_parts.append(self._fake_name_token(mid, gender, "first"))
+            fake_parts.append(self._fake_name_token(name_tokens[-1], gender, "last"))
+
+        return " ".join(prefix_tokens + fake_parts + suffix_tokens)
+
+    def _fake_name_token(self, token: str, gender: str, role: str) -> str:
+        """
+        Generate a fake replacement for a single name token.
+
+        Hyphenated tokens (e.g. "Anne-Marie") produce a hyphenated result
+        ("Jane-Martha") with the same number of parts and same case style.
+        """
+        if "-" in token:
+            parts = token.split("-")
+            fake_parts = []
+            for part in parts:
+                raw = self.faker.last_name() if role == "last" else self._first_name_for_gender(gender)
+                fake_parts.append(self._match_case(part, raw))
+            return "-".join(fake_parts)
+
+        raw = self.faker.last_name() if role == "last" else self._first_name_for_gender(gender)
+        return self._match_case(token, raw)
+
+    def _first_name_for_gender(self, gender: str) -> str:
+        if gender == "female":
+            return self.faker.first_name_female()
+        if gender == "male":
+            return self.faker.first_name_male()
+        return self.faker.first_name()
+
+    def _match_case(self, original: str, generated: str) -> str:
+        """Mirror the case style of *original* onto *generated*."""
+        if original.isupper():
+            return generated.upper()
+        if original.islower():
+            return generated.lower()
+        return generated.capitalize()
+
+    def _simple_name(self, gender: str) -> str:
+        """Fallback when no tokens can be parsed."""
+        if gender == "female":
+            return self.faker.name_female()
+        if gender == "male":
+            return self.faker.name_male()
+        return self.faker.name()
