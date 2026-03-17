@@ -1007,15 +1007,37 @@ def handle_upload(contents: str | None, filename: str | None):
 
 app.clientside_callback(
     """
-    function(err) {
-        if (!err) return window.dash_clientside.no_update;
-        var input = document.querySelector('#pdf-upload input[type="file"]');
-        if (input) input.value = '';
-        return null;
+    function(err, resetClicks, batchResetClicks) {
+        var ctx = (window.dash_clientside && window.dash_clientside.callback_context) || {};
+        var triggered = ctx.triggered || [];
+        var triggerId = triggered.length ? triggered[0].prop_id : '';
+
+        // Clear the DOM file input for whichever upload component needs resetting.
+        // The dcc.Upload React component enters a dirty state when contents is
+        // non-null; setting input.value='' is the only reliable way to reset it
+        // so the file picker works correctly on the next upload attempt.
+        if (triggerId.includes('batch-reset-btn')) {
+            var batch = document.querySelector('#batch-upload input[type="file"]');
+            if (batch) batch.value = '';
+            return [window.dash_clientside.no_update, null];
+        }
+        if (triggerId.includes('reset-btn')) {
+            var single = document.querySelector('#pdf-upload input[type="file"]');
+            if (single) single.value = '';
+            return [window.dash_clientside.no_update, window.dash_clientside.no_update];
+        }
+        // Upload error path: reset only the single-mode upload
+        if (!err) return [window.dash_clientside.no_update, window.dash_clientside.no_update];
+        var inp = document.querySelector('#pdf-upload input[type="file"]');
+        if (inp) inp.value = '';
+        return [null, window.dash_clientside.no_update];
     }
     """,
     Output("pdf-upload", "contents", allow_duplicate=True),
+    Output("batch-upload", "contents", allow_duplicate=True),
     Input("store-upload-error", "data"),
+    Input("reset-btn", "n_clicks"),
+    Input("batch-reset-btn", "n_clicks"),
     prevent_initial_call=True,
 )
 
