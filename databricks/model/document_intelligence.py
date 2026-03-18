@@ -640,8 +640,6 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
                 continue
             parent_type = parent.get("entity_type", "")
             parent_tokens = parent.get("original_text", "").lower().strip().split()
-            if len(parent_tokens) < 2:
-                continue  # single-token entities cannot be parents
 
             parent_occs = _to_occurrences(parent)
 
@@ -649,7 +647,7 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
                 if j <= i or j in merged:
                     continue
                 if child.get("entity_type", "") != parent_type:
-                    continue  # different entity types — different people
+                    continue  # different entity types — skip
                 child_tokens = child.get("original_text", "").lower().strip().split()
                 n = len(child_tokens)
                 if n > len(parent_tokens):
@@ -657,15 +655,19 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
 
                 merge_match = False
 
-                if n < len(parent_tokens):
-                    # Check for contiguous token window match (e.g. "Doe" in "John Doe")
+                if child_tokens == parent_tokens:
+                    # Exact same text on a different page — always merge as another occurrence
+                    merge_match = True
+                elif n < len(parent_tokens):
+                    # Partial match: child tokens form a contiguous slice of parent tokens
+                    # e.g. "Doe" or "John" inside "John Doe"
                     for k in range(len(parent_tokens) - n + 1):
                         if parent_tokens[k:k + n] == child_tokens:
                             merge_match = True
                             break
                 else:
-                    # Same token count: merge if child has a known title prefix
-                    # and the remaining (suffix) tokens all match
+                    # Same token count but not identical: merge if child has a known
+                    # title prefix and the remaining suffix tokens all match
                     # e.g. "Mr Doe" → parent "John Doe" because "mr" is a title and "doe" matches
                     shared_k = 0
                     for k in range(1, n + 1):
