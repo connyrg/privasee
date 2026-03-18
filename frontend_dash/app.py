@@ -2126,8 +2126,12 @@ def render_batch_results(results: list, step: int, mode: str):
         score = r.get("score")
         score_str = f"{score:.0f}%" if score is not None else "—"
         badge_color = VERDICT_COLORS.get(verdict, "secondary")
-        if r.get("error") and verdict not in ("No entities found",):
-            verdict_badge = dbc.Badge(verdict, color="danger", className="ms-1")
+        error_msg = r.get("error")
+        if error_msg and verdict not in ("No entities found",):
+            verdict_badge = html.Span([
+                dbc.Badge(verdict, color="danger", className="ms-1", id={"type": "verdict-badge", "index": r["filename"]}),
+                dbc.Tooltip(error_msg, target={"type": "verdict-badge", "index": r["filename"]}, placement="top"),
+            ])
         else:
             verdict_badge = dbc.Badge(verdict, color=badge_color, className="ms-1")
         session_id = r.get("session_id")
