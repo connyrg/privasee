@@ -335,6 +335,8 @@ class MaskingService:
                 return ""
             entity_tokens = entity_orig.split()
             occ_tokens = occ_orig.split()
+            # Preserve original casing for the prefix portion of the output
+            occ_tokens_cased = occ_original_text.strip().split()
             repl_tokens = entity_repl.split()
             n = len(occ_tokens)
             # Find contiguous window of occ_tokens within entity_tokens
@@ -344,10 +346,10 @@ class MaskingService:
             # No contiguous window found — try shared-suffix alignment.
             # e.g. occ="Mr Doe", entity="John Doe" → repl="Jane Smith" → "Mr Smith"
             # Finds the longest matching suffix between occ and entity tokens,
-            # then keeps the occ prefix as-is and takes the aligned replacement suffix.
+            # then keeps the occ prefix (original casing) and takes the aligned replacement suffix.
             for k in range(min(n, len(entity_tokens)), 0, -1):
                 if entity_tokens[-k:] == occ_tokens[-k:] and len(repl_tokens) >= k:
-                    prefix_tokens = occ_tokens[:-k]
+                    prefix_tokens = occ_tokens_cased[:-k]
                     suffix_repl = repl_tokens[-k:]
                     return " ".join(prefix_tokens + suffix_repl)
             # No alignment found — use full replacement
