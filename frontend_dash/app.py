@@ -271,11 +271,11 @@ def _step1_layout() -> html.Div:
                             children=html.Div(
                                 [
                                     html.I(className="bi bi-cloud-upload fs-2 text-muted"),
-                                    html.P("Drag & drop a PDF, or click to browse", className="mt-2 mb-1 text-muted"),
-                                    html.Small("PDF only · max 10 MB", className="text-muted"),
+                                    html.P("Drag & drop a PDF or image, or click to browse", className="mt-2 mb-1 text-muted"),
+                                    html.Small("PDF, PNG, JPG · max 10 MB", className="text-muted"),
                                 ]
                             ),
-                            accept=".pdf",
+                            accept=".pdf,.png,.jpg,.jpeg",
                             className="upload-zone",
                         ),
                         # File card / error shown here after upload attempt
@@ -946,8 +946,10 @@ def handle_upload(contents: str | None, filename: str | None):
     if not contents or not filename:
         raise PreventUpdate
 
-    if not filename.lower().endswith(".pdf"):
-        err = dbc.Alert("Only PDF files are accepted.", color="danger", dismissable=True)
+    ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
+    file_ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if file_ext not in ALLOWED_EXTENSIONS:
+        err = dbc.Alert("Only PDF, PNG, and JPG files are accepted.", color="danger", dismissable=True)
         return no_update, err, no_update, str(time.time()), None
 
     _, content_string = contents.split(",", 1)
@@ -1420,6 +1422,7 @@ def approve_and_mask(n_clicks: int, session: dict | None, table_data: list | Non
     Output("masked-iframe", "src"),
     Output("original-download-link", "href"),
     Output("masked-download-link", "href"),
+    Output("original-download-link", "download"),
     Output("entities-masked-count", "children"),
     Output("entities-masked-count-card", "children"),
     Input("store-mask-result", "data"),
@@ -1427,7 +1430,7 @@ def approve_and_mask(n_clicks: int, session: dict | None, table_data: list | Non
 )
 def populate_compare(mask_result: dict | None, session: dict | None):
     if not mask_result or not session:
-        return "", "", "", "", "", ""
+        return "", "", "", "", "original.pdf", "", ""
 
     session_id = session["session_id"]
     count = mask_result.get("entities_masked", 0)
@@ -1435,16 +1438,21 @@ def populate_compare(mask_result: dict | None, session: dict | None):
 
     headers = {"Authorization": f"Key {os.environ.get('POSIT_CONNECT_API_KEY', '')}"}
 
-    def _fetch_b64(url: str) -> str:
+    # Determine original file's MIME type from the stored filename
+    original_filename = session.get("filename", "original.pdf")
+    orig_ext = ("." + original_filename.rsplit(".", 1)[-1].lower()) if "." in original_filename else ".pdf"
+    orig_mime = {"pdf": "application/pdf", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg"}.get(orig_ext.lstrip("."), "application/pdf")
+
+    def _fetch_b64(url: str, mime: str = "application/pdf") -> str:
         try:
             r = req.get(url, headers=headers, timeout=30, verify=SSL_VERIFY)
             r.raise_for_status()
-            return "data:application/pdf;base64," + base64.b64encode(r.content).decode()
+            return f"data:{mime};base64," + base64.b64encode(r.content).decode()
         except Exception as exc:
-            logger.error("Failed to fetch PDF for compare view from %s: %s", url, exc)
+            logger.error("Failed to fetch file for compare view from %s: %s", url, exc)
             return ""
 
-    original_src = _fetch_b64(f"{API_BASE_URL}/api/files/uploads/{session_id}.pdf")
+    original_src = _fetch_b64(f"{API_BASE_URL}/api/files/uploads/{session_id}{orig_ext}", orig_mime)
     masked_src = _fetch_b64(f"{API_BASE_URL}/api/files/output/{session_id}_masked.pdf")
 
     return (
@@ -1452,6 +1460,7 @@ def populate_compare(mask_result: dict | None, session: dict | None):
         masked_src,
         original_src,
         masked_src,
+        f"original{orig_ext}",
         label,
         label,
     )
