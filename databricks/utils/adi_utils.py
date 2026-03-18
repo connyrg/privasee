@@ -68,7 +68,7 @@ def encode_file_to_base64(file_path: str) -> str:
 
 
 def analyze_document(
-    file_path: str,
+    image_b64: str,
     token: str,
     endpoint_url: str,
     appspace_id: str,
@@ -80,9 +80,9 @@ def analyze_document(
     proxies: Optional[Dict[str, str]] = None
 ) -> str:
     """Submit document analysis request to ADI API.
-    
+
     Args:
-        file_path: Path to the document file to analyze
+        image_b64: Base64-encoded document bytes
         token: OAuth bearer token
         endpoint_url: ADI API endpoint (e.g., 'https://apim-nonprod-idp.azure-api.net/documentintelligence/documentModels/{model}:analyze')
         appspace_id: AppspaceId header value for APIM
@@ -92,17 +92,14 @@ def analyze_document(
         output_content_format: Output format (default: "markdown")
         api_version: API version (default: "2024-11-30")
         proxies: Proxy configuration dict with 'http' and 'https' keys
-        
+
     Returns:
         Operation-Location URL for polling results
-        
+
     Raises:
         requests.HTTPError: If API request fails
         ValueError: If Operation-Location header is missing
     """
-    # Encode document to base64
-    base64_string = encode_file_to_base64(file_path)
-    
     # Submit analysis request
     url = endpoint_url.format(model=model_id)
     headers = {
@@ -119,7 +116,7 @@ def analyze_document(
         "features": None
     }
     body = {
-        "base64Source": base64_string
+        "base64Source": image_b64
     }
 
     response = requests.post(
@@ -170,27 +167,28 @@ def get_analysis_result(
     }
     
     for attempt in range(max_retries):
-        time.sleep(poll_interval)
-        
+        # Check first, then sleep — avoids wasting poll_interval seconds when ADI
+        # completes quickly (e.g. simple single-page documents finish in <2s).
         response = requests.get(
-            url=result_location, 
+            url=result_location,
             headers=headers
         )
         response.raise_for_status()
         result_json = response.json()
-        
+
         status = result_json.get('status')
         if status == 'succeeded':
             return result_json
         elif status == 'failed':
             raise RuntimeError(f"Document analysis failed: {result_json}")
-        # else: status is 'running' or 'notStarted', continue polling
-    
+        # else: status is 'running' or 'notStarted' — wait before next attempt
+        time.sleep(poll_interval)
+
     raise TimeoutError(f"Document analysis timed out after {max_retries * poll_interval} seconds")
 
 
 def analyze_document_complete(
-    file_path: str,
+    image_b64: str,
     token: str,
     endpoint_url: str,
     appspace_id: str,
@@ -204,9 +202,9 @@ def analyze_document_complete(
     proxies: Optional[Dict[str, str]] = None
 ) -> Dict[str, Any]:
     """Analyze a document and wait for results (combines analyze + polling).
-    
+
     Args:
-        file_path: Path to the document file to analyze
+        image_b64: Base64-encoded document bytes
         token: OAuth bearer token
         endpoint_url: ADI API endpoint
         appspace_id: AppspaceId header value for APIM
@@ -229,7 +227,7 @@ def analyze_document_complete(
     """
     # Submit analysis request
     result_location = analyze_document(
-        file_path=file_path,
+        image_b64=image_b64,
         token=token,
         endpoint_url=endpoint_url,
         appspace_id=appspace_id,

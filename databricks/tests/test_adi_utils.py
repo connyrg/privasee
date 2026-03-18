@@ -120,13 +120,9 @@ class TestEncodeFileToBase64(unittest.TestCase):
 class TestAnalyzeDocument(unittest.TestCase):
     """Test cases for analyze_document function"""
     
-    @patch('adi_utils.encode_file_to_base64')
     @patch('adi_utils.requests.post')
-    def test_analyze_document_success(self, mock_post, mock_encode):
+    def test_analyze_document_success(self, mock_post):
         """Test successful document analysis submission"""
-        # Mock encode function
-        mock_encode.return_value = "base64_encoded_content"
-        
         # Mock response
         mock_response = MagicMock()
         mock_response.headers = {
@@ -134,60 +130,53 @@ class TestAnalyzeDocument(unittest.TestCase):
         }
         mock_response.raise_for_status = MagicMock()
         mock_post.return_value = mock_response
-        
-        # Call function
+
+        # Call function with pre-encoded base64 content
         result = analyze_document(
-            file_path="/path/to/doc.pdf",
+            image_b64="base64_encoded_content",
             token="test_token",
             endpoint_url="https://api.test.com/documentModels/{model}:analyze",
             appspace_id="A-007100"
         )
-        
+
         # Assertions
         self.assertEqual(result, 'https://api.test.com/results/12345')
-        mock_encode.assert_called_once_with("/path/to/doc.pdf")
-        
+
         # Verify request parameters
         call_kwargs = mock_post.call_args[1]
         self.assertEqual(call_kwargs['url'], "https://api.test.com/documentModels/prebuilt-layout:analyze")
         self.assertEqual(call_kwargs['headers']['Authorization'], "Bearer test_token")
         self.assertEqual(call_kwargs['headers']['AppspaceId'], "A-007100")
         self.assertEqual(call_kwargs['json']['base64Source'], "base64_encoded_content")
-    
-    @patch('adi_utils.encode_file_to_base64')
+
     @patch('adi_utils.requests.post')
-    def test_analyze_document_missing_operation_location(self, mock_post, mock_encode):
+    def test_analyze_document_missing_operation_location(self, mock_post):
         """Test error when Operation-Location header is missing"""
-        mock_encode.return_value = "base64_content"
-        
         mock_response = MagicMock()
         mock_response.headers = {}  # No Operation-Location
         mock_response.raise_for_status = MagicMock()
         mock_post.return_value = mock_response
-        
+
         with self.assertRaises(ValueError) as context:
             analyze_document(
-                file_path="/path/to/doc.pdf",
+                image_b64="base64_content",
                 token="test_token",
                 endpoint_url="https://api.test.com/documentModels/{model}:analyze",
                 appspace_id="A-007100"
             )
-        
+
         self.assertIn("Operation-Location", str(context.exception))
-    
-    @patch('adi_utils.encode_file_to_base64')
+
     @patch('adi_utils.requests.post')
-    def test_analyze_document_custom_parameters(self, mock_post, mock_encode):
+    def test_analyze_document_custom_parameters(self, mock_post):
         """Test analysis with custom parameters"""
-        mock_encode.return_value = "base64_content"
-        
         mock_response = MagicMock()
         mock_response.headers = {'Operation-Location': 'https://api.test.com/results/123'}
         mock_response.raise_for_status = MagicMock()
         mock_post.return_value = mock_response
-        
+
         result = analyze_document(
-            file_path="/path/to/doc.pdf",
+            image_b64="base64_content",
             token="test_token",
             endpoint_url="https://api.test.com/documentModels/{model}:analyze",
             appspace_id="A-007100",
@@ -196,7 +185,7 @@ class TestAnalyzeDocument(unittest.TestCase):
             locale="fr-FR",
             output_content_format="text"
         )
-        
+
         # Verify custom parameters in request
         call_kwargs = mock_post.call_args[1]
         self.assertEqual(call_kwargs['url'], "https://api.test.com/documentModels/custom-model:analyze")
@@ -257,7 +246,9 @@ class TestGetAnalysisResult(unittest.TestCase):
         
         self.assertEqual(result['status'], 'succeeded')
         self.assertEqual(mock_get.call_count, 3)
-        self.assertEqual(mock_sleep.call_count, 3)
+        # Sleep is called after each non-terminal poll, but NOT after the final
+        # successful one — so 2 sleeps for 3 GETs (running, running, succeeded).
+        self.assertEqual(mock_sleep.call_count, 2)
     
     @patch('adi_utils.time.sleep')
     @patch('adi_utils.requests.get')
@@ -319,12 +310,12 @@ class TestAnalyzeDocumentComplete(unittest.TestCase):
         }
         
         result = analyze_document_complete(
-            file_path="/path/to/doc.pdf",
+            image_b64="base64_encoded_content",
             token="test_token",
             endpoint_url="https://api.test.com/documentModels/{model}:analyze",
             appspace_id="A-007100"
         )
-        
+
         # Assertions
         self.assertEqual(result['status'], 'succeeded')
         self.assertEqual(result['analyzeResult']['content'], 'Complete result')
@@ -348,7 +339,7 @@ class TestAnalyzeDocumentComplete(unittest.TestCase):
         mock_get_result.return_value = {'status': 'succeeded', 'analyzeResult': {}}
         
         result = analyze_document_complete(
-            file_path="/path/to/doc.pdf",
+            image_b64="base64_encoded_content",
             token="test_token",
             endpoint_url="https://api.test.com/documentModels/{model}:analyze",
             appspace_id="A-007100",
@@ -370,7 +361,7 @@ class TestAnalyzeDocumentComplete(unittest.TestCase):
         
         with self.assertRaises(ValueError):
             analyze_document_complete(
-                file_path="/path/to/doc.pdf",
+                image_b64="base64_encoded_content",
                 token="test_token",
                 endpoint_url="https://api.test.com/documentModels/{model}:analyze",
                 appspace_id="A-007100"

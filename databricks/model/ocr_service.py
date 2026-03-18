@@ -18,7 +18,6 @@ Dependencies: PyMuPDF (fitz), python-docx, requests
 import os
 import io
 import base64
-import tempfile
 from typing import List, Dict, Any
 from enum import Enum
 import logging
@@ -352,54 +351,45 @@ class OCRService:
                 "words": [...]  # Word-level bounding boxes
             }
         """
-        # Write image bytes to temporary file (required by adi_utils)
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
-            tmp_file.write(image_bytes)
-            tmp_file_path = tmp_file.name
-        
-        try:
-            # Generate OAuth token (proxies automatically used from env vars)
-            token = generate_adi_token(
-                tenant_id=self.adi_tenant_id,
-                client_id=self.adi_client_id,
-                client_secret=self.adi_client_secret,
-                api_app_id_uri=self.adi_api_app_id_uri
-            )
-            
-            # Call ADI via adi_utils (proxies automatically used from env vars)
-            result = analyze_document_complete(
-                file_path=tmp_file_path,
-                token=token,
-                endpoint_url=self.adi_endpoint,
-                appspace_id=self.adi_appspace_id,
-                model_id=self.adi_model_id
-            )
-            
-            # Extract text and words from analyzeResult
-            analyze_result = result.get("analyzeResult", {})
-            full_text = analyze_result.get("content", "")
-            words = []
-            
-            for page in analyze_result.get("pages", []):
-                for word in page.get("words", []):
-                    # Convert ADI polygon to bounding box
-                    bbox = self._polygon_to_bbox(word.get("polygon", []))
-                    words.append({
-                        "text": word.get("content", ""),
-                        "confidence": word.get("confidence", 0.0),
-                        "bounding_box": bbox
-                    })
-            
-            return {
-                "text": full_text,
-                "words": words
-            }
-        
-        finally:
-            # Clean up temporary file
-            if os.path.exists(tmp_file_path):
-                os.unlink(tmp_file_path)
-    
+        # Generate OAuth token (proxies automatically used from env vars)
+        token = generate_adi_token(
+            tenant_id=self.adi_tenant_id,
+            client_id=self.adi_client_id,
+            client_secret=self.adi_client_secret,
+            api_app_id_uri=self.adi_api_app_id_uri
+        )
+
+        # Base64-encode image bytes directly — no temp file needed
+        base64_image = base64.b64encode(image_bytes).decode('utf-8')
+
+        # Call ADI via adi_utils (proxies automatically used from env vars)
+        result = analyze_document_complete(
+            image_b64=base64_image,
+            token=token,
+            endpoint_url=self.adi_endpoint,
+            appspace_id=self.adi_appspace_id,
+            model_id=self.adi_model_id
+        )
+
+        # Extract text and words from analyzeResult
+        analyze_result = result.get("analyzeResult", {})
+        full_text = analyze_result.get("content", "")
+        words = []
+
+        for page in analyze_result.get("pages", []):
+            for word in page.get("words", []):
+                bbox = self._polygon_to_bbox(word.get("polygon", []))
+                words.append({
+                    "text": word.get("content", ""),
+                    "confidence": word.get("confidence", 0.0),
+                    "bounding_box": bbox
+                })
+
+        return {
+            "text": full_text,
+            "words": words
+        }
+
     def _polygon_to_bbox(self, polygon: List[float]) -> Dict[str, float]:
         """
         Convert ADI polygon (8 points: x1,y1,x2,y2,x3,y3,x4,y4) to bounding box.
