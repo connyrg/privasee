@@ -123,6 +123,13 @@ def _navbar() -> dbc.Navbar:
                     className="navbar-brand mb-0",
                 ),
                 html.Small("Document De-identification", className="text-muted"),
+                dbc.Button(
+                    [html.I(className="bi bi-arrow-counterclockwise me-1"), "Start Over"],
+                    id="navbar-reset-btn",
+                    color="outline-secondary",
+                    size="sm",
+                    className="ms-auto",
+                ),
             ],
             fluid=True,
         ),
@@ -930,6 +937,7 @@ def toggle_steps(step: int, mode: str):
     Output("upload-status", "children"),
     Output("session-banner", "children"),
     Output("store-upload-error", "data"),
+    Output("pdf-upload", "contents", allow_duplicate=True),
     Input("pdf-upload", "contents"),
     State("pdf-upload", "filename"),
     prevent_initial_call=True,
@@ -940,14 +948,14 @@ def handle_upload(contents: str | None, filename: str | None):
 
     if not filename.lower().endswith(".pdf"):
         err = dbc.Alert("Only PDF files are accepted.", color="danger", dismissable=True)
-        return no_update, err, no_update, str(time.time())
+        return no_update, err, no_update, str(time.time()), None
 
     _, content_string = contents.split(",", 1)
     file_bytes = base64.b64decode(content_string)
 
     if len(file_bytes) > 10 * 1024 * 1024:
         err = dbc.Alert("File must be under 10 MB.", color="danger", dismissable=True)
-        return no_update, err, no_update, str(time.time())
+        return no_update, err, no_update, str(time.time()), None
 
     headers = {
         "accept": "application/json",
@@ -966,7 +974,7 @@ def handle_upload(contents: str | None, filename: str | None):
         data = resp.json()
     except Exception as exc:
         err = dbc.Alert(f"Upload failed: {exc}", color="danger", dismissable=True)
-        return no_update, err, no_update, str(time.time())
+        return no_update, err, no_update, str(time.time()), None
 
     session = {
         "session_id": data["session_id"],
@@ -1007,12 +1015,12 @@ def handle_upload(contents: str | None, filename: str | None):
             className="mb-0 py-2",
         )
 
-    return session, file_card, banner, None
+    return session, file_card, banner, None, None
 
 
 app.clientside_callback(
     """
-    function(err, resetClicks, batchResetClicks) {
+    function(err, resetClicks, batchResetClicks, navbarResetClicks, session) {
         var ctx = (window.dash_clientside && window.dash_clientside.callback_context) || {};
         var triggered = ctx.triggered || [];
         var triggerId = triggered.length ? triggered[0].prop_id : '';
@@ -1026,9 +1034,15 @@ app.clientside_callback(
             if (batch) batch.value = '';
             return [window.dash_clientside.no_update, null];
         }
-        if (triggerId.includes('reset-btn')) {
+        if (triggerId.includes('reset-btn') || triggerId.includes('navbar-reset-btn')) {
             var single = document.querySelector('#pdf-upload input[type="file"]');
             if (single) single.value = '';
+            return [window.dash_clientside.no_update, window.dash_clientside.no_update];
+        }
+        // Successful upload: clear the DOM input so the same file can be picked again
+        if (triggerId.includes('store-session') && session) {
+            var inp2 = document.querySelector('#pdf-upload input[type="file"]');
+            if (inp2) inp2.value = '';
             return [window.dash_clientside.no_update, window.dash_clientside.no_update];
         }
         // Upload error path: reset only the single-mode upload
@@ -1043,6 +1057,8 @@ app.clientside_callback(
     Input("store-upload-error", "data"),
     Input("reset-btn", "n_clicks"),
     Input("batch-reset-btn", "n_clicks"),
+    Input("navbar-reset-btn", "n_clicks"),
+    Input("store-session", "data"),
     prevent_initial_call=True,
 )
 
@@ -2228,12 +2244,16 @@ def batch_reset_workflow(n_clicks: int, results: list, current_session: str | No
     Output("poll-interval", "disabled", allow_duplicate=True),
     Output("process-loading", "children", allow_duplicate=True),
     Input("reset-btn", "n_clicks"),
+    Input("navbar-reset-btn", "n_clicks"),
     State("store-session", "data"),
-    running=[(Output("reset-btn", "disabled"), True, False)],
+    running=[
+        (Output("reset-btn", "disabled"), True, False),
+        (Output("navbar-reset-btn", "disabled"), True, False),
+    ],
     prevent_initial_call=True,
 )
-def reset_workflow(n_clicks: int, session: dict | None):
-    if not n_clicks:
+def reset_workflow(n_clicks: int, navbar_n_clicks: int, session: dict | None):
+    if not n_clicks and not navbar_n_clicks:
         raise PreventUpdate
     if session:
         session_id = session.get("session_id")
