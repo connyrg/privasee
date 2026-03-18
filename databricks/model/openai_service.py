@@ -3,7 +3,7 @@ Azure OpenAI Vision Service
 Uses Azure OpenAI GPT-4o with vision capabilities to extract entities from documents.
 """
 
-from openai import AzureOpenAI
+from openai import AzureOpenAI, AsyncAzureOpenAI
 import base64
 import json
 import logging
@@ -64,6 +64,12 @@ class OpenAIVisionService:
             base_url=base_url,
             api_version=api_version,
             http_client=http_client,
+        )
+        self.async_client = AsyncAzureOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            api_version=api_version,
+            http_client=http_async_client,
         )
         logger.info(f"Azure OpenAI Vision Service initialized (deployment: {deployment_name})")
 
@@ -222,6 +228,52 @@ class OpenAIVisionService:
 
         except Exception as e:
             logger.error(f"Error extracting entities with Azure OpenAI: {str(e)}")
+            return []
+
+    async def extract_entities_from_base64_async(
+        self,
+        image_b64: str,
+        mimetype: str,
+        ocr_data: Dict,
+        field_definitions: List[Dict],
+        page_number: int = 1
+    ) -> List[Dict]:
+        """Async version of extract_entities_from_base64 for concurrent page processing."""
+        try:
+            logger.info(f"Extracting entities using Azure OpenAI Vision (async) for {len(field_definitions)} field types (page {page_number})")
+
+            prompt = self._build_extraction_prompt(field_definitions, ocr_data)
+
+            response = await self.async_client.chat.completions.create(
+                model=self.deployment_name,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/{mimetype};base64,{image_b64}"
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": prompt
+                            }
+                        ]
+                    }
+                ],
+                max_completion_tokens=4096
+            )
+
+            response_text = response.choices[0].message.content
+            entities = self._parse_openai_response(response_text, ocr_data, page_number)
+
+            logger.info(f"Successfully extracted {len(entities)} entities (async, page {page_number})")
+            return entities
+
+        except Exception as e:
+            logger.error(f"Error extracting entities with Azure OpenAI (async, page {page_number}): {str(e)}")
             return []
 
     def _build_extraction_prompt(

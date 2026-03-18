@@ -22,6 +22,9 @@ azure-core>=1.29.0
 anthropic>=0.25.0  # Claude vision service
 openai>=1.12.0     # Azure OpenAI vision service
 
+# Async support (allows asyncio.run() inside Databricks Serverless which uses its own event loop)
+nest-asyncio>=1.6.0
+
 # Image processing (used by MaskingService for PNG/JPG inputs)
 Pillow>=9.0.0
 

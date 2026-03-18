@@ -26,6 +26,7 @@ class ClaudeVisionService:
             raise ValueError("Anthropic API key must be provided")
 
         self.client = anthropic.Anthropic(api_key=api_key)
+        self.async_client = anthropic.AsyncAnthropic(api_key=api_key)
         logger.info("Claude Vision Service initialized")
 
     async def extract_entities(
@@ -187,6 +188,54 @@ class ClaudeVisionService:
 
         except Exception as e:
             logger.error(f"Error extracting entities with Claude: {str(e)}")
+            return []
+
+    async def extract_entities_from_base64_async(
+        self,
+        image_b64: str,
+        mimetype: str,
+        ocr_data: Dict,
+        field_definitions: List[Dict],
+        page_number: int = 1
+    ) -> List[Dict]:
+        """Async version of extract_entities_from_base64 for concurrent page processing."""
+        try:
+            logger.info(f"Extracting entities using Claude Vision (async) for {len(field_definitions)} field types (page {page_number})")
+
+            prompt = self._build_extraction_prompt(field_definitions, ocr_data)
+
+            message = await self.async_client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=4096,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": f"image/{mimetype}",
+                                    "data": image_b64,
+                                },
+                            },
+                            {
+                                "type": "text",
+                                "text": prompt
+                            }
+                        ],
+                    }
+                ],
+            )
+
+            response_text = message.content[0].text
+            entities = self._parse_claude_response(response_text, ocr_data, page_number)
+
+            logger.info(f"Successfully extracted {len(entities)} entities (async, page {page_number})")
+            return entities
+
+        except Exception as e:
+            logger.error(f"Error extracting entities with Claude (async, page {page_number}): {str(e)}")
             return []
 
     def _build_extraction_prompt(

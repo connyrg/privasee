@@ -13,8 +13,9 @@ This test suite verifies:
 All external services are mocked.
 """
 
+import asyncio
 import unittest
-from unittest.mock import Mock, patch, MagicMock, mock_open
+from unittest.mock import AsyncMock, Mock, patch, MagicMock, mock_open
 import pandas as pd
 import json
 import base64
@@ -276,8 +277,8 @@ class TestPredictPipelineOpenAI(unittest.TestCase):
             }
         ]
 
-        # Mock vision service extract_entities_from_base64 method
-        self.model.vision_service.extract_entities_from_base64.return_value = [
+        # Mock the async vision method (called by _extract_all_pages_async)
+        self.model.vision_service.extract_entities_from_base64_async = AsyncMock(return_value=[
             {
                 'entity_type': 'Full Name',
                 'original_text': 'John Doe',
@@ -285,7 +286,7 @@ class TestPredictPipelineOpenAI(unittest.TestCase):
                 'confidence': 0.95,
                 'page_number': 1
             }
-        ]
+        ])
 
         # Mock bbox matcher
         self.model.bbox_matcher.match_entities_to_words.return_value = [
@@ -307,19 +308,22 @@ class TestPredictPipelineOpenAI(unittest.TestCase):
         # Verify results
         self.assertEqual(len(result_df), 1)
         result = result_df.iloc[0]
-        
+
         self.assertEqual(result['session_id'], 'test-session-123')
         self.assertEqual(result['status'], 'complete')
         self.assertEqual(len(result['pages']), 1)
         self.assertEqual(result['pages'][0]['page_num'], 1)
         self.assertEqual(len(result['pages'][0]['entities']), 1)
-        
+
         entity = result['pages'][0]['entities'][0]
         self.assertEqual(entity['entity_type'], 'Full Name')
         self.assertEqual(entity['original_text'], 'John Doe')
         self.assertEqual(entity['strategy'], 'Fake Data')
         self.assertTrue(entity['approved'])
         self.assertIn('id', entity)
+
+        # Verify async vision method was called (not sync)
+        self.model.vision_service.extract_entities_from_base64_async.assert_called_once()
 
         # Verify UC volume write was attempted via REST API
         self.model._write_to_uc_volume.assert_called_once()
@@ -382,8 +386,8 @@ class TestPredictPipelineClaude(unittest.TestCase):
             }
         ]
 
-        # Mock vision service extract_entities_from_base64 method
-        self.model.vision_service.extract_entities_from_base64.return_value = [
+        # Mock the async vision method (called by _extract_all_pages_async)
+        self.model.vision_service.extract_entities_from_base64_async = AsyncMock(return_value=[
             {
                 'entity_type': 'Full Name',
                 'original_text': 'Jane Smith',
@@ -391,7 +395,7 @@ class TestPredictPipelineClaude(unittest.TestCase):
                 'confidence': 0.97,
                 'page_number': 1
             }
-        ]
+        ])
 
         # Mock bbox matcher
         self.model.bbox_matcher.match_entities_to_words.return_value = [
@@ -413,12 +417,15 @@ class TestPredictPipelineClaude(unittest.TestCase):
         # Verify results
         self.assertEqual(len(result_df), 1)
         result = result_df.iloc[0]
-        
+
         self.assertEqual(result['session_id'], 'test-session-456')
         self.assertEqual(result['status'], 'complete')
         entity = result['pages'][0]['entities'][0]
         self.assertEqual(entity['entity_type'], 'Full Name')
         self.assertEqual(entity['original_text'], 'Jane Smith')
+
+        # Verify async vision method was called (not sync)
+        self.model.vision_service.extract_entities_from_base64_async.assert_called_once()
 
 
 class TestPredictEdgeCases(unittest.TestCase):
@@ -478,14 +485,14 @@ class TestPredictEdgeCases(unittest.TestCase):
             }
         ]
 
-        # Mock vision service responses for each page
-        def extract_entities_side_effect(image_b64, mimetype, ocr_data, field_definitions, page_number):
+        # Mock async vision responses per page (called by _extract_all_pages_async)
+        async def extract_entities_side_effect(image_b64, mimetype, ocr_data, field_definitions, page_number):
             if page_number == 1:
                 return [{'entity_type': 'Name', 'original_text': 'Alice', 'confidence': 0.9, 'page_number': 1, 'bounding_box': [0.1, 0.1, 0.05, 0.02]}]
             else:
                 return [{'entity_type': 'Name', 'original_text': 'Bob', 'confidence': 0.85, 'page_number': 2, 'bounding_box': [0.2, 0.2, 0.03, 0.02]}]
 
-        self.model.vision_service.extract_entities_from_base64.side_effect = extract_entities_side_effect
+        self.model.vision_service.extract_entities_from_base64_async = AsyncMock(side_effect=extract_entities_side_effect)
 
         # Mock bbox matcher
         self.model.bbox_matcher.match_entities_to_words.side_effect = lambda entities, ocr_words: [
@@ -500,6 +507,11 @@ class TestPredictEdgeCases(unittest.TestCase):
         self.assertEqual(len(result['pages']), 2)
         self.assertEqual(result['pages'][0]['page_num'], 1)
         self.assertEqual(result['pages'][1]['page_num'], 2)
+        # Entities on both pages were detected
+        self.assertEqual(result['pages'][0]['entities'][0]['original_text'], 'Alice')
+        self.assertEqual(result['pages'][1]['entities'][0]['original_text'], 'Bob')
+        # Async vision method called once per page
+        self.assertEqual(self.model.vision_service.extract_entities_from_base64_async.call_count, 2)
 
     def test_predict_error_handling(self):
         """Test error handling when processing fails"""
@@ -552,6 +564,96 @@ class TestPredictEdgeCases(unittest.TestCase):
         result = result_df.iloc[0]
         self.assertEqual(result['status'], 'complete')
         self.assertEqual(len(result['pages'][0]['entities']), 0)
+
+
+class TestExtractAllPagesAsync(unittest.TestCase):
+    """Test the _extract_all_pages_async concurrency helper."""
+
+    def setUp(self):
+        self.model = DocumentIntelligenceModel()
+        self.model.vision_service = Mock()
+
+    def _make_page_inputs(self, count, has_image=True):
+        return [
+            {
+                "page_number": i + 1,
+                "page_image_b64": f"img_b64_page{i+1}" if has_image else "",
+                "ocr_data": {"text": f"page {i+1}", "words": []},
+                "mimetype": "png",
+            }
+            for i in range(count)
+        ]
+
+    def test_all_pages_return_results_in_order(self):
+        """Results are in the same order as page_inputs regardless of completion order."""
+        field_defs = [{"name": "Name", "description": "A name"}]
+
+        async def _fake_extract(image_b64, mimetype, ocr_data, field_definitions, page_number):
+            return [{"entity_type": "Name", "original_text": f"Person{page_number}", "page_number": page_number, "bounding_box": [0, 0, 0.1, 0.02], "confidence": 0.9}]
+
+        self.model.vision_service.extract_entities_from_base64_async = AsyncMock(side_effect=_fake_extract)
+
+        page_inputs = self._make_page_inputs(3)
+        results = asyncio.run(self.model._extract_all_pages_async(page_inputs, field_defs))
+
+        self.assertEqual(len(results), 3)
+        for idx, page_entities in enumerate(results):
+            self.assertEqual(len(page_entities), 1)
+            self.assertEqual(page_entities[0]["original_text"], f"Person{idx + 1}")
+
+    def test_pages_without_image_return_empty_list(self):
+        """Pages with no image_base64 return [] without calling the vision service."""
+        field_defs = [{"name": "Name", "description": "A name"}]
+        self.model.vision_service.extract_entities_from_base64_async = AsyncMock(return_value=[{"entity_type": "Name", "original_text": "X", "bounding_box": [0, 0, 0.1, 0.02], "confidence": 0.9}])
+
+        page_inputs = self._make_page_inputs(2, has_image=False)
+        results = asyncio.run(self.model._extract_all_pages_async(page_inputs, field_defs))
+
+        self.assertEqual(results, [[], []])
+        self.model.vision_service.extract_entities_from_base64_async.assert_not_called()
+
+    def test_mixed_pages_image_and_no_image(self):
+        """Pages with images are processed; pages without are returned as []."""
+        field_defs = [{"name": "Name", "description": "A name"}]
+
+        async def _fake_extract(image_b64, mimetype, ocr_data, field_definitions, page_number):
+            return [{"entity_type": "Name", "original_text": f"P{page_number}", "page_number": page_number, "bounding_box": [0, 0, 0.1, 0.02], "confidence": 0.9}]
+
+        self.model.vision_service.extract_entities_from_base64_async = AsyncMock(side_effect=_fake_extract)
+
+        page_inputs = [
+            {"page_number": 1, "page_image_b64": "img_data", "ocr_data": {}, "mimetype": "png"},
+            {"page_number": 2, "page_image_b64": "",          "ocr_data": {}, "mimetype": "png"},
+            {"page_number": 3, "page_image_b64": "img_data",  "ocr_data": {}, "mimetype": "png"},
+        ]
+        results = asyncio.run(self.model._extract_all_pages_async(page_inputs, field_defs))
+
+        self.assertEqual(len(results[0]), 1)   # page 1 has entity
+        self.assertEqual(results[1], [])        # page 2 skipped (no image)
+        self.assertEqual(len(results[2]), 1)    # page 3 has entity
+        self.assertEqual(self.model.vision_service.extract_entities_from_base64_async.call_count, 2)
+
+    def test_vision_api_error_returns_empty_for_that_page(self):
+        """If vision service raises for a page, that page returns [] (error absorbed)."""
+        field_defs = [{"name": "Name", "description": "A name"}]
+        self.model.vision_service.extract_entities_from_base64_async = AsyncMock(side_effect=Exception("API failure"))
+
+        page_inputs = self._make_page_inputs(1)
+        results = asyncio.run(self.model._extract_all_pages_async(page_inputs, field_defs))
+
+        self.assertEqual(results, [[]])
+
+    def test_single_page_document(self):
+        """Single-page documents are handled correctly."""
+        field_defs = [{"name": "SSN", "description": "Social Security Number"}]
+        entity = {"entity_type": "SSN", "original_text": "123-45-6789", "bounding_box": [0.1, 0.1, 0.2, 0.02], "confidence": 0.98, "page_number": 1}
+        self.model.vision_service.extract_entities_from_base64_async = AsyncMock(return_value=[entity])
+
+        page_inputs = self._make_page_inputs(1)
+        results = asyncio.run(self.model._extract_all_pages_async(page_inputs, field_defs))
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0][0]["original_text"], "123-45-6789")
 
 
 if __name__ == '__main__':

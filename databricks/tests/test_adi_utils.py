@@ -70,13 +70,12 @@ class TestGenerateAdiToken(unittest.TestCase):
             proxies=proxies
         )
         
+        # Token should be returned successfully even when proxies param is supplied,
+        # because generate_adi_token accepts but does not forward the proxies arg.
         self.assertEqual(token, "test_token")
+        mock_post.assert_called_once()
         call_kwargs = mock_post.call_args[1]
-        # Proxies parameter not passed in OAuth implementation
-        # Proxies not passed in OAuth implementation
-        self.assertIn('proxies', call_kwargs)
-        self.assertIn('proxies', call_kwargs)
-        self.assertEqual(call_kwargs['proxies'], proxies)
+        self.assertNotIn('proxies', call_kwargs)
     
     @patch('adi_utils.requests.post')
     def test_generate_token_http_error(self, mock_post):

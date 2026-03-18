@@ -23,7 +23,10 @@ Environment Variables:
 - ADI_MODEL_ID: Document Intelligence model ID (defaults to "prebuilt-layout")
 """
 
+import asyncio
+
 import mlflow.pyfunc
+import nest_asyncio
 import pandas as pd
 import json
 import base64
@@ -45,16 +48,21 @@ from .fake_data_service import FakeDataService
 logger = logging.getLogger(__name__)
 
 
+# Maximum number of pages whose Vision API calls run concurrently.
+# Tune via env var to stay within Azure OpenAI / Anthropic rate limits.
+_MAX_CONCURRENT_PAGES: int = int(os.environ.get("VISION_MAX_CONCURRENT_PAGES", "5"))
+
+
 class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
     """
     MLflow model for document de-identification using vision AI and Azure DI.
-    
+
     Implements the complete pipeline:
     - Document OCR (text + word-level bounding boxes) via ADI OAuth
     - Entity detection with vision AI (Claude or Azure OpenAI)
     - Bounding box matching for precise redaction
     - Write-through storage to Unity Catalog volumes
-    
+
     The vision provider can be toggled via VISION_SERVICE_PROVIDER env var.
     """
 
@@ -69,7 +77,10 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
             context: MLflow model context (unused but required by interface)
         """
         logger.info("Initializing Document Intelligence Model")
-        
+
+        # Allow asyncio.run() to nest inside Databricks Serverless's own event loop.
+        nest_asyncio.apply()
+
         # Initialize OCR service (handles ADI OAuth internally)
         self.ocr_service = OCRService()
         logger.info("OCR service initialized (ADI OAuth)")
@@ -327,55 +338,48 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
         entity_label_consistency: Dict[str, str] = {}
         entity_label_counters: Dict[str, int] = {}
 
-        # Process each page
         result_pages = []
-        total_vision_time = 0.0
         total_bbox_time = 0.0
 
-        for page_idx, page_data in enumerate(pages, start=1):
-            logger.info(f"Processing page {page_idx}/{len(pages)}")
-            
-            # Prepare OCR data for vision service
-            ocr_data = {
-                'text': page_data.get('text', ''),
-                'words': page_data.get('words', [])
-            }
-            
-            # Step 2: Vision AI - Detect entities
-            page_image_b64 = page_data.get('image_base64', '')
-            
-            if page_image_b64:
-                # Call vision service with base64 image
-                if file_extension == 'pdf':
-                    mimetype = 'png'
-                else:
-                    # guess_type returns tuple ('image/png', None), extract format
-                    mimetype_full = guess_type(document_filename)[0]
-                    if mimetype_full and '/' in mimetype_full:
-                        mimetype = mimetype_full.split('/')[-1]  # 'image/png' -> 'png'
-                    else:
-                        mimetype = 'png'  # default fallback
-                
-                vision_start = time.time()
-                entities = self._extract_entities_from_page(
-                    mimetype=mimetype,
-                    page_image_b64=page_image_b64,
-                    ocr_data=ocr_data,
-                    field_definitions=field_definitions,
-                    page_number=page_idx
-                )
-                vision_time = time.time() - vision_start
-                total_vision_time += vision_time
-                logger.info(f"⏱️  Vision API (page {page_idx}): {vision_time:.2f}s - detected {len(entities)} entities")
+        # Step 2: Vision AI — prepare page inputs then run all pages concurrently.
+        # Determine mimetype once (same for every page in a document).
+        if file_extension == 'pdf':
+            mimetype = 'png'
+        else:
+            mimetype_full = guess_type(document_filename)[0]
+            if mimetype_full and '/' in mimetype_full:
+                mimetype = mimetype_full.split('/')[-1]  # 'image/png' -> 'png'
             else:
-                # No image available (e.g., digital PDF page with direct text extraction)
-                # Skip entity detection for this page or use text-only mode
-                logger.warning(f"No image available for page {page_idx}, skipping entity detection")
-                entities = []
-            
-            # Step 3: BBox Matcher - Enrich entities with bounding boxes
+                mimetype = 'png'
+
+        page_inputs = []
+        for page_idx, page_data in enumerate(pages, start=1):
+            page_inputs.append({
+                "page_number": page_idx,
+                "page_image_b64": page_data.get('image_base64', ''),
+                "ocr_data": {
+                    'text': page_data.get('text', ''),
+                    'words': page_data.get('words', []),
+                },
+                "mimetype": mimetype,
+            })
+
+        logger.info(f"Step 2: Running Vision API concurrently for {len(page_inputs)} page(s)")
+        vision_start = time.time()
+        all_page_entities: List[List[Dict]] = asyncio.run(
+            self._extract_all_pages_async(page_inputs, field_definitions)
+        )
+        total_vision_time = time.time() - vision_start
+        logger.info(f"⏱️  Vision API (all {len(page_inputs)} pages, async): {total_vision_time:.2f}s")
+
+        # Step 3: BBox Matcher + post-processing (sequential — CPU-bound, fast)
+        for page_input, entities in zip(page_inputs, all_page_entities):
+            page_idx = page_input["page_number"]
+            ocr_data = page_input["ocr_data"]
+            logger.info(f"Post-processing page {page_idx}/{len(pages)}: {len(entities)} entities detected")
+
+            # BBox Matcher - Enrich entities with precise word-level bounding boxes
             if entities:
-                logger.info(f"Matching {len(entities)} entities to OCR words")
                 bbox_start = time.time()
                 enriched_entities = self.bbox_matcher.match_entities_to_words(
                     entities=entities,
@@ -386,7 +390,7 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
                 logger.info(f"⏱️  BBox matching (page {page_idx}): {bbox_time:.2f}s")
             else:
                 enriched_entities = []
-            
+
             # Generate entity IDs and set defaults
             for entity in enriched_entities:
                 entity['id'] = str(uuid.uuid4())
@@ -416,7 +420,6 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
 
                 # Pre-generate replacement_text so users can review/edit it in
                 # Step 2 before masking is applied.
-
                 if entity.get('strategy') == 'Fake Data' and not entity.get('replacement_text'):
                     # Realistic fake value — same original always maps to same
                     # replacement (e.g. "John Smith" -> "Jane Doe" everywhere).
@@ -429,8 +432,7 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
                     entity['replacement_text'] = fake_data_consistency[key]
 
                 elif entity.get('strategy') == 'Entity Label' and not entity.get('replacement_text'):
-                    # Sequential letter label per entity type: Full_Name_A,
-                    # Full_Name_B, … Full_Name_Z, Full_Name_27, …
+                    # Sequential label per entity type: Full_Name_A, Full_Name_B, …
                     # Same original_text always gets the same label.
                     original = entity.get('original_text', '')
                     key = original.lower().strip()
@@ -450,7 +452,7 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
                 'page_num': page_idx,
                 'entities': enriched_entities
             })
-            
+
             logger.info(f"Page {page_idx}: {len(enriched_entities)} entities enriched")
         
         # Flatten and merge entity variants before building the final result so
@@ -531,6 +533,44 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
         except Exception as e:
             logger.error(f"Error extracting entities from page {page_number}: {e}")
             return []
+
+    async def _extract_all_pages_async(
+        self,
+        page_inputs: List[Dict],
+        field_definitions: List[Dict],
+    ) -> List[List[Dict]]:
+        """
+        Run Vision API calls for all pages concurrently, bounded by a semaphore.
+
+        Args:
+            page_inputs: List of dicts with keys: page_number, page_image_b64, ocr_data, mimetype
+            field_definitions: Field definitions shared across all pages
+
+        Returns:
+            List of entity lists, one per page, in the same order as page_inputs.
+        """
+        sem = asyncio.Semaphore(_MAX_CONCURRENT_PAGES)
+
+        async def _bounded(page_input: Dict) -> List[Dict]:
+            async with sem:
+                page_number = page_input["page_number"]
+                page_image_b64 = page_input["page_image_b64"]
+                if not page_image_b64:
+                    logger.warning(f"No image available for page {page_number}, skipping entity detection")
+                    return []
+                logger.info(f"Vision API starting (async) for page {page_number}")
+                t0 = time.time()
+                entities = await self.vision_service.extract_entities_from_base64_async(
+                    image_b64=page_image_b64,
+                    mimetype=page_input["mimetype"],
+                    ocr_data=page_input["ocr_data"],
+                    field_definitions=field_definitions,
+                    page_number=page_number,
+                )
+                logger.info(f"⏱️  Vision API (async, page {page_number}): {time.time() - t0:.2f}s — {len(entities)} entities")
+                return entities
+
+        return list(await asyncio.gather(*[_bounded(p) for p in page_inputs]))
 
     @staticmethod
     def _merge_entity_variants(entities: List[Dict]) -> List[Dict]:

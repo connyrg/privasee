@@ -12,8 +12,9 @@ This test suite verifies:
 All Azure OpenAI API calls are mocked.
 """
 
+import asyncio
 import unittest
-from unittest.mock import Mock, patch, MagicMock, mock_open
+from unittest.mock import AsyncMock, Mock, patch, MagicMock, mock_open
 import json
 import base64
 import os
@@ -581,6 +582,97 @@ class TestExtractEntities(unittest.TestCase):
         self.assertIn("Entity extraction failed", str(context.exception))
 
 
+class TestExtractEntitiesFromBase64Async(unittest.TestCase):
+    """Test async entity extraction via extract_entities_from_base64_async."""
+
+    @patch('databricks.model.openai_service.http_client_factory')
+    @patch('databricks.model.openai_service.AzureOpenAI')
+    def setUp(self, mock_azure_openai, mock_http_client_factory):
+        mock_http_client_factory.return_value = (Mock(), Mock())
+        with patch.dict(os.environ, {'PROXY_CLUSTER_ID': 'test-cluster'}):
+            self.service = OpenAIVisionService(
+                api_key="test-key",
+                azure_endpoint="https://test.openai.azure.com/",
+                deployment_name="test-deployment"
+            )
+        self.mock_async_client = AsyncMock()
+        self.service.async_client = self.mock_async_client
+
+    def _make_api_response(self, entities):
+        mock_choice = Mock()
+        mock_message = Mock()
+        mock_message.content = json.dumps(entities)
+        mock_choice.message = mock_message
+        mock_response = Mock()
+        mock_response.choices = [mock_choice]
+        return mock_response
+
+    def test_returns_entities_on_success(self):
+        """Successful async call returns parsed entities with page_number set."""
+        entity_payload = [
+            {"entity_type": "Full Name", "original_text": "Bob Jones", "bounding_box": [0.1, 0.2, 0.15, 0.03], "confidence": 0.94}
+        ]
+        self.mock_async_client.chat.completions.create = AsyncMock(return_value=self._make_api_response(entity_payload))
+
+        ocr_data = {"text": "Bob Jones", "words": []}
+        field_defs = [{"name": "Full Name", "description": "Person's full name"}]
+
+        entities = asyncio.run(
+            self.service.extract_entities_from_base64_async("img_b64", "png", ocr_data, field_defs, page_number=3)
+        )
+
+        self.assertEqual(len(entities), 1)
+        self.assertEqual(entities[0]["entity_type"], "Full Name")
+        self.assertEqual(entities[0]["original_text"], "Bob Jones")
+        self.assertEqual(entities[0]["page_number"], 3)
+        self.assertAlmostEqual(entities[0]["confidence"], 0.94)
+
+    def test_passes_correct_model_and_image(self):
+        """Async call uses configured deployment name and passes image + text content."""
+        self.mock_async_client.chat.completions.create = AsyncMock(
+            return_value=self._make_api_response([])
+        )
+        ocr_data = {"text": "test", "words": []}
+        field_defs = [{"name": "Name", "description": "A name"}]
+
+        asyncio.run(
+            self.service.extract_entities_from_base64_async("encoded_img", "jpeg", ocr_data, field_defs, page_number=1)
+        )
+
+        call_kwargs = self.mock_async_client.chat.completions.create.call_args.kwargs
+        self.assertEqual(call_kwargs["model"], "test-deployment")
+        content = call_kwargs["messages"][0]["content"]
+        # First block is image_url, second is text prompt
+        self.assertEqual(content[0]["type"], "image_url")
+        self.assertIn("image/jpeg", content[0]["image_url"]["url"])
+        self.assertIn("encoded_img", content[0]["image_url"]["url"])
+        self.assertEqual(content[1]["type"], "text")
+
+    def test_returns_empty_list_on_api_error(self):
+        """API exception is caught and returns [] rather than propagating."""
+        self.mock_async_client.chat.completions.create = AsyncMock(side_effect=Exception("Quota exceeded"))
+
+        entities = asyncio.run(
+            self.service.extract_entities_from_base64_async("img_b64", "png", {}, [], page_number=1)
+        )
+
+        self.assertEqual(entities, [])
+
+    def test_returns_empty_list_on_invalid_json_response(self):
+        """Malformed JSON response returns [] rather than raising."""
+        mock_choice = Mock()
+        mock_choice.message.content = "not valid json"
+        mock_response = Mock()
+        mock_response.choices = [mock_choice]
+        self.mock_async_client.chat.completions.create = AsyncMock(return_value=mock_response)
+
+        entities = asyncio.run(
+            self.service.extract_entities_from_base64_async("img_b64", "png", {}, [], page_number=1)
+        )
+
+        self.assertEqual(entities, [])
+
+
 class TestConnectionTest(unittest.TestCase):
     """Test Azure OpenAI API connection testing"""
 
@@ -589,7 +681,7 @@ class TestConnectionTest(unittest.TestCase):
     def setUp(self, mock_azure_openai, mock_http_client_factory):
         """Set up test service"""
         mock_http_client_factory.return_value = (Mock(), Mock())
-        
+
         with patch.dict(os.environ, {'PROXY_CLUSTER_ID': 'test-cluster'}):
             self.service = OpenAIVisionService(
                 api_key="test-key",

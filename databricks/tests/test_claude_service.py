@@ -12,8 +12,9 @@ This test suite verifies:
 All Anthropic API calls are mocked.
 """
 
+import asyncio
 import unittest
-from unittest.mock import Mock, patch, MagicMock, mock_open
+from unittest.mock import AsyncMock, Mock, patch, MagicMock, mock_open
 import json
 import base64
 
@@ -471,6 +472,88 @@ class TestExtractEntities(unittest.TestCase):
             )
 
         self.assertIn("Entity extraction failed", str(context.exception))
+
+
+class TestExtractEntitiesFromBase64Async(unittest.TestCase):
+    """Test async entity extraction via extract_entities_from_base64_async."""
+
+    @patch('databricks.model.claude_service.anthropic.Anthropic')
+    def setUp(self, mock_anthropic):
+        self.service = ClaudeVisionService(api_key="test-key")
+        self.mock_async_client = AsyncMock()
+        self.service.async_client = self.mock_async_client
+
+    def _make_api_response(self, entities):
+        mock_message = Mock()
+        mock_content = Mock()
+        mock_content.text = json.dumps(entities)
+        mock_message.content = [mock_content]
+        return mock_message
+
+    def test_returns_entities_on_success(self):
+        """Successful async call returns parsed entities with page_number set."""
+        entity_payload = [
+            {"entity_type": "Full Name", "original_text": "Alice Brown", "bounding_box": [0.1, 0.2, 0.15, 0.03], "confidence": 0.96}
+        ]
+        self.mock_async_client.messages.create = AsyncMock(return_value=self._make_api_response(entity_payload))
+
+        ocr_data = {"text": "Alice Brown", "words": []}
+        field_defs = [{"name": "Full Name", "description": "Person's full name"}]
+
+        entities = asyncio.run(
+            self.service.extract_entities_from_base64_async("img_b64", "png", ocr_data, field_defs, page_number=2)
+        )
+
+        self.assertEqual(len(entities), 1)
+        self.assertEqual(entities[0]["entity_type"], "Full Name")
+        self.assertEqual(entities[0]["original_text"], "Alice Brown")
+        self.assertEqual(entities[0]["page_number"], 2)
+        self.assertAlmostEqual(entities[0]["confidence"], 0.96)
+
+    def test_passes_correct_model_and_image(self):
+        """Async call uses correct model, passes image and prompt text."""
+        self.mock_async_client.messages.create = AsyncMock(
+            return_value=self._make_api_response([])
+        )
+        ocr_data = {"text": "test", "words": []}
+        field_defs = [{"name": "Name", "description": "A name"}]
+
+        asyncio.run(
+            self.service.extract_entities_from_base64_async("encoded_img", "jpeg", ocr_data, field_defs, page_number=1)
+        )
+
+        call_kwargs = self.mock_async_client.messages.create.call_args.kwargs
+        self.assertEqual(call_kwargs["model"], "claude-sonnet-4-6")
+        content = call_kwargs["messages"][0]["content"]
+        # First block is image, second is text prompt
+        self.assertEqual(content[0]["type"], "image")
+        self.assertEqual(content[0]["source"]["media_type"], "image/jpeg")
+        self.assertEqual(content[0]["source"]["data"], "encoded_img")
+        self.assertEqual(content[1]["type"], "text")
+
+    def test_returns_empty_list_on_api_error(self):
+        """API exception is caught and returns [] rather than propagating."""
+        self.mock_async_client.messages.create = AsyncMock(side_effect=Exception("Rate limit"))
+
+        entities = asyncio.run(
+            self.service.extract_entities_from_base64_async("img_b64", "png", {}, [], page_number=1)
+        )
+
+        self.assertEqual(entities, [])
+
+    def test_returns_empty_list_on_invalid_json_response(self):
+        """Malformed JSON response returns [] rather than raising."""
+        mock_message = Mock()
+        mock_content = Mock()
+        mock_content.text = "this is not json"
+        mock_message.content = [mock_content]
+        self.mock_async_client.messages.create = AsyncMock(return_value=mock_message)
+
+        entities = asyncio.run(
+            self.service.extract_entities_from_base64_async("img_b64", "png", {}, [], page_number=1)
+        )
+
+        self.assertEqual(entities, [])
 
 
 class TestConnectionTest(unittest.TestCase):
