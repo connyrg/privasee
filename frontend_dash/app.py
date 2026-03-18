@@ -297,11 +297,11 @@ def _step1_layout() -> html.Div:
                             children=html.Div(
                                 [
                                     html.I(className="bi bi-cloud-upload fs-2 text-muted"),
-                                    html.P("Drag & drop PDFs, or click to browse", className="mt-2 mb-1 text-muted"),
-                                    html.Small("PDF only · max 10 MB each · up to 20 files", className="text-muted"),
+                                    html.P("Drag & drop files, or click to browse", className="mt-2 mb-1 text-muted"),
+                                    html.Small("PDF, PNG, JPG · max 10 MB each · up to 20 files", className="text-muted"),
                                 ]
                             ),
-                            accept=".pdf",
+                            accept=".pdf,.png,.jpg,.jpeg",
                             multiple=True,
                             className="upload-zone",
                         ),
@@ -1764,8 +1764,8 @@ def handle_batch_upload(contents_list, filenames, existing_files):
     files = list(existing_files or [])
     errors = []
     for contents, filename in zip(contents_list, filenames):
-        if not filename.lower().endswith(".pdf"):
-            errors.append(f"{filename}: only PDF files are accepted.")
+        if not filename.lower().endswith((".pdf", ".png", ".jpg", ".jpeg")):
+            errors.append(f"{filename}: only PDF, PNG, and JPG files are accepted.")
             continue
         _, content_string = contents.split(",", 1)
         file_bytes = base64.b64decode(content_string)
@@ -1792,7 +1792,7 @@ def render_batch_file_list(files: list):
         rows.append(
             dbc.Row(
                 [
-                    dbc.Col(html.I(className="bi bi-file-earmark-pdf text-danger"), width="auto", className="d-flex align-items-center"),
+                    dbc.Col(html.I(className=("bi bi-file-earmark-pdf text-danger" if f["filename"].lower().endswith(".pdf") else "bi bi-file-earmark-image text-primary")), width="auto", className="d-flex align-items-center"),
                     dbc.Col(html.Small(f["filename"], className="fw-semibold"), className="d-flex align-items-center"),
                     dbc.Col(html.Small(f"{size_kb} KB", className="text-muted"), width="auto", className="d-flex align-items-center"),
                     dbc.Col(
@@ -1944,10 +1944,12 @@ def batch_tick(n_intervals, cursor, phase, session_id, poll_count, current_entit
         # wait needed between these two steps since process returns 202 instantly.
         try:
             file_bytes = base64.b64decode(file_info["content"])
+            _ext = filename.rsplit(".", 1)[-1].lower()
+            _mime = {"pdf": "application/pdf", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg"}.get(_ext, "application/pdf")
             resp = req.post(
                 f"{API_BASE_URL}/api/upload",
                 headers=headers,
-                files={"file": (filename, file_bytes, "application/pdf")},
+                files={"file": (filename, file_bytes, _mime)},
                 timeout=120,
                 verify=SSL_VERIFY,
             )
