@@ -585,6 +585,13 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
             iy = max(0, min(cy + ch, py + ph) - max(cy, py))
             return (ix * iy) / (cw * ch) >= threshold
 
+        # Known honorific/title prefixes used to identify same-person variants
+        # e.g. "Mr Doe" and "John Doe" share "Doe" with "Mr" being a title prefix
+        _TITLES = frozenset({
+            "mr", "mrs", "ms", "miss", "dr", "prof", "professor",
+            "sir", "rev", "det", "sgt", "capt", "lt", "col", "cpl",
+        })
+
         sorted_ents = sorted(entities, key=lambda e: len(e.get("original_text", "")), reverse=True)
         merged: set = set()
 
@@ -605,36 +612,56 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
                     continue  # different entity types — different people
                 child_tokens = child.get("original_text", "").lower().strip().split()
                 n = len(child_tokens)
-                if n >= len(parent_tokens):
-                    continue  # child must be strictly shorter
+                if n > len(parent_tokens):
+                    continue  # child longer than parent — not a variant
 
-                # Check for contiguous token window match
-                for k in range(len(parent_tokens) - n + 1):
-                    if parent_tokens[k:k + n] == child_tokens:
-                        child_page = child.get("page_number", 1)
-                        child_boxes = child.get("bounding_boxes") or (
-                            [child["bounding_box"]] if child.get("bounding_box") else []
+                merge_match = False
+
+                if n < len(parent_tokens):
+                    # Check for contiguous token window match (e.g. "Doe" in "John Doe")
+                    for k in range(len(parent_tokens) - n + 1):
+                        if parent_tokens[k:k + n] == child_tokens:
+                            merge_match = True
+                            break
+                else:
+                    # Same token count: merge if child has a known title prefix
+                    # and the remaining (suffix) tokens all match
+                    # e.g. "Mr Doe" → parent "John Doe" because "mr" is a title and "doe" matches
+                    shared_k = 0
+                    for k in range(1, n + 1):
+                        if parent_tokens[-k:] == child_tokens[-k:]:
+                            shared_k = k
+                        else:
+                            break
+                    if 0 < shared_k < n:
+                        child_diff = child_tokens[:-shared_k]
+                        if all(t in _TITLES for t in child_diff):
+                            merge_match = True
+
+                if merge_match:
+                    child_page = child.get("page_number", 1)
+                    child_boxes = child.get("bounding_boxes") or (
+                        [child["bounding_box"]] if child.get("bounding_box") else []
+                    )
+                    for bb in child_boxes:
+                        norm = _normalise_bb(bb)
+                        if not norm:
+                            continue
+                        # Skip if already covered by an existing occurrence on
+                        # the same page (e.g. "Stephen" sub-bbox inside "Stephen Parrot").
+                        already_covered = any(
+                            occ.get("page_number") == child_page
+                            and _is_contained(norm, occ["bounding_box"])
+                            for occ in parent_occs
+                            if occ.get("bounding_box")
                         )
-                        for bb in child_boxes:
-                            norm = _normalise_bb(bb)
-                            if not norm:
-                                continue
-                            # Skip if already covered by an existing occurrence on
-                            # the same page (e.g. "Stephen" sub-bbox inside "Stephen Parrot").
-                            already_covered = any(
-                                occ.get("page_number") == child_page
-                                and _is_contained(norm, occ["bounding_box"])
-                                for occ in parent_occs
-                                if occ.get("bounding_box")
-                            )
-                            if not already_covered:
-                                parent_occs.append({
-                                    "page_number": child_page,
-                                    "bounding_box": norm,
-                                    "original_text": child.get("original_text", ""),
-                                })
-                        merged.add(j)
-                        break
+                        if not already_covered:
+                            parent_occs.append({
+                                "page_number": child_page,
+                                "bounding_box": norm,
+                                "original_text": child.get("original_text", ""),
+                            })
+                    merged.add(j)
 
             parent["occurrences"] = parent_occs
 
