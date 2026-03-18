@@ -24,6 +24,7 @@ Environment Variables:
 """
 
 import asyncio
+import copy
 
 import mlflow.pyfunc
 import nest_asyncio
@@ -461,21 +462,34 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
         for page in result_pages:
             for entity in page.get('entities', []):
                 flat_entities.append(entity)
+
+        # Snapshot pre_merge before _merge_entity_variants mutates dicts in-place
+        # (it adds 'occurrences' to parent entities, which would corrupt the snapshot).
+        pre_merge_snapshot = copy.deepcopy(flat_entities)
+
         merged_entities = self._merge_entity_variants(flat_entities)
 
         # Prepare final result — include top-level "entities" (merged flat list)
         # so the FastAPI backend receives merged entities from the prediction
         # response and doesn't overwrite the UC-written merged entities.json.
+        vision_raw = [
+            {"page_number": pi["page_number"], "entities": raw_ents}
+            for pi, raw_ents in zip(page_inputs, all_page_entities)
+        ]
         result = {
             'session_id': session_id,
             'status': 'complete',
             'pages': result_pages,
             'entities': merged_entities,
+            'intermediate_results': {
+                'vision_raw': vision_raw,
+                'pre_merge': pre_merge_snapshot,
+            },
         }
 
         # Step 4: Write-through to Unity Catalog volume
         write_start = time.time()
-        self._write_to_uc_volume(session_id, result)
+        self._write_to_uc_volume(session_id, result, ocr_pages=ocr_result)
         write_time = time.time() - write_start
         logger.info(f"⏱️  UC volume write: {write_time:.2f}s")
         
@@ -716,7 +730,7 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
         logger.info(f"Entity variant merge: {len(entities)} → {len(result_list)} entities")
         return result_list
 
-    def _write_to_uc_volume(self, session_id: str, result: Dict):
+    def _write_to_uc_volume(self, session_id: str, result: Dict, ocr_pages: List[Dict] = None):
         """
         Write processing results to Unity Catalog volume via the Files REST API.
 
@@ -727,7 +741,11 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
 
         Args:
             session_id: Session ID for the document
-            result: Processing result dictionary with a "pages" list
+            result: Processing result dictionary with "pages", "entities", and
+                "intermediate_results" (vision_raw, pre_merge) keys
+            ocr_pages: Raw OCR pages from OCRService. When provided and
+                PRIVASEE_DEBUG_INTERMEDIATE=true, written to ocr.json
+                (image_base64 stripped to keep file size manageable).
         """
         import requests as _requests
         from datetime import datetime, timezone
@@ -752,17 +770,32 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
                 "saved_at": datetime.now(timezone.utc).isoformat(),
                 "status": "awaiting_review",
                 "entities": flat_entities,
+                "intermediate_results": result.get("intermediate_results", {}),
             }
 
             _FILES_API = "/api/2.0/fs/files"
             headers = {"Authorization": f"Bearer {self.databricks_token}"}
-            entities_path = f"{self.uc_volume_path}/{session_id}/entities.json"
-            url = f"{self.databricks_host}{_FILES_API}{entities_path}"
+            base_path = f"{self.uc_volume_path}/{session_id}"
 
-            resp = _requests.put(url, headers=headers, data=json.dumps(payload))
+            entities_url = f"{self.databricks_host}{_FILES_API}{base_path}/entities.json"
+            resp = _requests.put(entities_url, headers=headers, data=json.dumps(payload))
             resp.raise_for_status()
-
             logger.info(f"Wrote {len(flat_entities)} entities to UC volume for session {session_id}")
+
+            # Write ocr.json when debug mode is enabled (image_base64 stripped to keep size manageable)
+            if ocr_pages and os.environ.get("PRIVASEE_DEBUG_INTERMEDIATE", "false").lower() == "true":
+                ocr_payload = {
+                    "session_id": session_id,
+                    "saved_at": datetime.now(timezone.utc).isoformat(),
+                    "pages": [
+                        {k: v for k, v in page.items() if k != "image_base64"}
+                        for page in ocr_pages
+                    ],
+                }
+                ocr_url = f"{self.databricks_host}{_FILES_API}{base_path}/ocr.json"
+                resp = _requests.put(ocr_url, headers=headers, data=json.dumps(ocr_payload))
+                resp.raise_for_status()
+                logger.info(f"Wrote OCR debug data to UC volume for session {session_id}")
 
         except Exception as e:
             logger.error(f"Error writing entities to UC volume: {e}")
