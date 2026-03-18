@@ -93,7 +93,8 @@ class ConfigManager:
         Raises requests.HTTPError on unexpected storage errors.
         """
         logger.debug("Listing configs from %s", self.configs_path)
-        r = requests.get(self._url(f"{self.configs_path}/"), headers=self._headers())
+        dirs_url = f"{self.host}/api/2.0/fs/directories{self.configs_path}"
+        r = requests.get(dirs_url, headers=self._headers())
         if r.status_code in (400, 404):
             # 404 = directory doesn't exist yet; Databricks Files API may also
             # return 400 for a path that has never been written to.

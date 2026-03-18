@@ -805,7 +805,9 @@ async def approve_and_mask(request: ApprovalRequest):
                 detail="Failed to apply redactions via Databricks.",
             )
 
-    # Update session status (masked.pdf is already in UC via the Databricks model).
+    # Update session status — non-fatal: masking succeeded and masked.pdf is
+    # already in UC. Status being stuck at 'awaiting_review' has no visible
+    # impact on the user (frontend uses the API response, not stored status).
     try:
         sm.update_session(request.session_id, status="completed")
     except Exception as exc:
@@ -813,14 +815,7 @@ async def approve_and_mask(request: ApprovalRequest):
             "Could not update session %s to 'completed' after successful masking: %s",
             request.session_id, exc, exc_info=True,
         )
-        # Masking itself succeeded, but without the status update the session
-        # will appear stuck at 'awaiting_review'. Raise so the client knows
-        # it should retry — the masking call is idempotent.
         audit_logger.error("MASK_FAILURE session=%s reason=status_update_failed", request.session_id)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Masking succeeded but could not update session status. Please try again.",
-        )
 
     elapsed = round(time.monotonic() - t0, 2)
     logger.info(
