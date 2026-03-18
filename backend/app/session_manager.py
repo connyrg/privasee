@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -26,6 +28,15 @@ import requests
 from app.models import SessionData
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Retry configuration for transient Databricks Files API failures
+# ---------------------------------------------------------------------------
+
+_TRANSIENT_STATUS_CODES: frozenset = frozenset({429, 500, 502, 503, 504})
+_MAX_RETRIES: int = 3
+_RETRY_DELAYS: tuple = (1.0, 2.0, 4.0)  # seconds between successive attempts
+_DEFAULT_TIMEOUT: int = 30  # seconds; binary uploads override this per-call
 
 _VALID_STATUSES = ["uploaded", "processing", "awaiting_review", "completed", "error"]
 
@@ -67,6 +78,54 @@ class UCSessionManager:
     def _session_path(self, session_id: str, filename: str) -> str:
         return f"{self.volume_path}/{session_id}/{filename}"
 
+    def _request(self, method: str, url: str, timeout: int = _DEFAULT_TIMEOUT, **kwargs) -> requests.Response:
+        """
+        Make an HTTP request against the Databricks Files API with automatic
+        exponential-backoff retry on transient failures.
+
+        Retries on:
+          - Network errors (ConnectionError, Timeout)
+          - HTTP 429, 500, 502, 503, 504 responses
+
+        Non-transient responses (e.g. 404, 400, 2xx) are returned immediately
+        without retrying; callers are responsible for checking the status code
+        and calling ``raise_for_status()`` as needed.
+        """
+        last_exc: Exception = RuntimeError("No attempts made")
+        for attempt in range(_MAX_RETRIES + 1):
+            if attempt:
+                delay = _RETRY_DELAYS[attempt - 1]
+                logger.warning(
+                    "Databricks API retry %d/%d for %s %s (%.1fs backoff)",
+                    attempt, _MAX_RETRIES, method.upper(), url, delay,
+                )
+                time.sleep(delay)
+            try:
+                resp = requests.request(
+                    method, url, headers=self._headers(), timeout=timeout, **kwargs
+                )
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+                last_exc = exc
+                logger.warning(
+                    "Network error on attempt %d/%d for %s %s: %s",
+                    attempt + 1, _MAX_RETRIES + 1, method.upper(), url, exc,
+                )
+                continue
+
+            if resp.status_code in _TRANSIENT_STATUS_CODES and attempt < _MAX_RETRIES:
+                last_exc = requests.exceptions.HTTPError(
+                    f"HTTP {resp.status_code} (transient)", response=resp
+                )
+                logger.warning(
+                    "Transient HTTP %d on attempt %d/%d for %s %s",
+                    resp.status_code, attempt + 1, _MAX_RETRIES + 1, method.upper(), url,
+                )
+                continue
+
+            return resp
+
+        raise last_exc
+
     # ------------------------------------------------------------------
     # Session metadata
     # ------------------------------------------------------------------
@@ -90,11 +149,7 @@ class UCSessionManager:
             "status": "uploaded",
         }
         path = self._session_path(session_id, "metadata.json")
-        response = requests.put(
-            self._url(path),
-            headers=self._headers(),
-            data=json.dumps(metadata),
-        )
+        response = self._request("put", self._url(path), data=json.dumps(metadata))
         response.raise_for_status()
         logger.info("Session %s created successfully", session_id)
         return session_id
@@ -110,7 +165,7 @@ class UCSessionManager:
             ValueError: If metadata.json contains malformed JSON.
         """
         path = self._session_path(session_id, "metadata.json")
-        response = requests.get(self._url(path), headers=self._headers())
+        response = self._request("get", self._url(path))
         if response.status_code == 404:
             logger.debug("Session %s not found (404)", session_id)
             return None
@@ -147,14 +202,12 @@ class UCSessionManager:
         path = self._session_path(session_id, "metadata.json")
         url = self._url(path)
 
-        read_response = requests.get(url, headers=self._headers())
+        read_response = self._request("get", url)
         read_response.raise_for_status()
         metadata = read_response.json()
 
         metadata["status"] = status
-        write_response = requests.put(
-            url, headers=self._headers(), data=json.dumps(metadata)
-        )
+        write_response = self._request("put", url, data=json.dumps(metadata))
         write_response.raise_for_status()
 
     def update_session(self, session_id: str, **kwargs: Any) -> None:
@@ -181,14 +234,12 @@ class UCSessionManager:
         path = self._session_path(session_id, "metadata.json")
         url = self._url(path)
 
-        read_response = requests.get(url, headers=self._headers())
+        read_response = self._request("get", url)
         read_response.raise_for_status()
         metadata = read_response.json()
 
         metadata.update(kwargs)
-        write_response = requests.put(
-            url, headers=self._headers(), data=json.dumps(metadata)
-        )
+        write_response = self._request("put", url, data=json.dumps(metadata))
         write_response.raise_for_status()
         logger.info("Session %s updated: %s", session_id, log_summary)
 
@@ -212,11 +263,7 @@ class UCSessionManager:
         }
         path = self._session_path(session_id, "entities.json")
         logger.info("Saving %d entities for session %s", len(entities), session_id)
-        response = requests.put(
-            self._url(path),
-            headers=self._headers(),
-            data=json.dumps(payload),
-        )
+        response = self._request("put", self._url(path), data=json.dumps(payload))
         response.raise_for_status()
         logger.debug("entities.json written for session %s", session_id)
 
@@ -232,7 +279,7 @@ class UCSessionManager:
             ValueError:        If the stored file contains malformed JSON.
         """
         path = self._session_path(session_id, "entities.json")
-        response = requests.get(self._url(path), headers=self._headers())
+        response = self._request("get", self._url(path))
         if response.status_code == 404:
             logger.debug("entities.json not found for session %s (404)", session_id)
             raise FileNotFoundError(
@@ -282,11 +329,7 @@ class UCSessionManager:
             "Saving masking decisions for session %s: %d total entities, %d approved",
             session_id, len(all_entities), len(approved_ids),
         )
-        response = requests.put(
-            self._url(path),
-            headers=self._headers(),
-            data=json.dumps(payload),
-        )
+        response = self._request("put", self._url(path), data=json.dumps(payload))
         response.raise_for_status()
         logger.debug("masking_decisions.json written for session %s", session_id)
 
@@ -305,11 +348,7 @@ class UCSessionManager:
         """
         path = self._session_path(session_id, filename)
         logger.info("Saving file %r for session %s (%d bytes)", filename, session_id, len(data))
-        response = requests.put(
-            self._url(path),
-            headers=self._headers(),
-            data=data,
-        )
+        response = self._request("put", self._url(path), timeout=120, data=data)
         response.raise_for_status()
         logger.debug("File %r saved to UC for session %s", filename, session_id)
 
@@ -329,7 +368,7 @@ class UCSessionManager:
         """
         path = self._session_path(session_id, filename)
         logger.debug("Fetching file %r for session %s", filename, session_id)
-        response = requests.get(self._url(path), headers=self._headers())
+        response = self._request("get", self._url(path), timeout=120)
         if response.status_code == 404:
             logger.warning("File %r not found for session %s (404)", filename, session_id)
             raise FileNotFoundError(
@@ -355,12 +394,11 @@ class UCSessionManager:
         original_ext = ".pdf"
         try:
             meta_path = self._session_path(session_id, "metadata.json")
-            meta_response = requests.get(self._url(meta_path), headers=self._headers())
+            meta_response = self._request("get", self._url(meta_path))
             if meta_response.ok:
                 meta = meta_response.json()
                 original_filename = meta.get("original_filename", "")
-                from pathlib import Path as _Path
-                ext = _Path(original_filename).suffix.lower()
+                ext = Path(original_filename).suffix.lower()
                 if ext:
                     original_ext = ext
         except Exception as exc:
@@ -375,7 +413,7 @@ class UCSessionManager:
         ]
         for filename in candidates:
             path = self._session_path(session_id, filename)
-            response = requests.delete(self._url(path), headers=self._headers())
+            response = self._request("delete", self._url(path))
             if response.status_code == 404:
                 logger.debug("Delete skipped (not found): %s/%s", session_id, filename)
                 continue  # File never existed — not an error

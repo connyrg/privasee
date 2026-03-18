@@ -1131,6 +1131,7 @@ def sync_fields(names: list, descs: list, strategies: list, fields: list) -> lis
                 "name": names[i] if i < len(names) else f["name"],
                 "description": descs[i] if i < len(descs) else f["description"],
                 "strategy": strategies[i] if i < len(strategies) else f["strategy"],
+                "source": f.get("source", "custom"),  # preserve System/Custom badge
             }
         )
     return updated
@@ -1749,7 +1750,7 @@ def handle_batch_upload(contents_list, filenames, existing_files):
         # Avoid duplicates by filename
         if any(f["filename"] == filename for f in files):
             continue
-        files.append({"filename": filename, "content": content_string})
+        files.append({"filename": filename, "content": content_string, "size_kb": len(file_bytes) // 1024})
     return files
 
 
@@ -1762,7 +1763,7 @@ def render_batch_file_list(files: list):
         return html.Small("No files selected.", className="text-muted")
     rows = []
     for i, f in enumerate(files):
-        size_kb = len(base64.b64decode(f["content"])) // 1024
+        size_kb = f.get("size_kb", 0)
         rows.append(
             dbc.Row(
                 [

@@ -22,9 +22,11 @@ export http_proxy="" && export https_proxy="" && rsconnect deploy fastapi  --ser
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -71,6 +73,9 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+# Dedicated audit logger — records key workflow transitions and all failures.
+# Can be routed to a separate handler via logging config (e.g. grep "privasee.audit").
+audit_logger = logging.getLogger("privasee.audit")
 
 # ---------------------------------------------------------------------------
 # Settings (all sourced from environment)
@@ -385,6 +390,7 @@ async def upload_document(file: UploadFile = File(...)):
         )
 
     logger.info("Uploaded %s → session %s (%d bytes)", filename, session_id, len(contents))
+    audit_logger.info("UPLOAD session=%s file=%r bytes=%d", session_id, filename, len(contents))
 
     # Count pages for PDFs using PyMuPDF (already a dependency).
     page_count = 1
@@ -423,6 +429,8 @@ async def _process_background(
     UCSessionManager calls are wrapped in asyncio.to_thread so they don't
     stall the event loop.
     """
+    audit_logger.info("PROCESS_START session=%s fields=%d", session_id, len(field_definitions))
+
     if MOCK_DATABRICKS:
         logger.info("MOCK_DATABRICKS=true — using mock entities for session %s", session_id)
         entities = _mock_entities(session_id, field_definitions)
@@ -430,6 +438,7 @@ async def _process_background(
         if not DATABRICKS_MODEL_ENDPOINT:
             err = "DATABRICKS_MODEL_ENDPOINT is not configured."
             logger.error(err)
+            audit_logger.error("PROCESS_FAILURE session=%s reason=%r", session_id, err)
             try:
                 await asyncio.to_thread(sm.update_session, session_id, status="error", error_message=err)
             except Exception as exc:
@@ -456,6 +465,7 @@ async def _process_background(
         except httpx.TimeoutException as exc:
             err = "Entity extraction timed out. The document may be complex or the endpoint is under load."
             logger.error("Databricks timed out for session %s: %s", session_id, exc)
+            audit_logger.error("PROCESS_FAILURE session=%s reason=timeout", session_id)
             try:
                 await asyncio.to_thread(sm.update_session, session_id, status="error", error_message=err)
             except Exception as ue:
@@ -464,6 +474,7 @@ async def _process_background(
         except (httpx.HTTPStatusError, httpx.RequestError) as exc:
             err = f"Databricks request failed: {exc}"
             logger.error("Databricks error for session %s: %s", session_id, exc)
+            audit_logger.error("PROCESS_FAILURE session=%s reason=%r", session_id, str(exc))
             try:
                 await asyncio.to_thread(sm.update_session, session_id, status="error", error_message=err)
             except Exception as ue:
@@ -483,6 +494,7 @@ async def _process_background(
         except Exception as exc:
             err = f"Could not parse entity list returned by Databricks: {exc}"
             logger.error("Parse error for session %s: %s — raw: %s", session_id, exc, raw)
+            audit_logger.error("PROCESS_FAILURE session=%s reason=parse_error err=%r", session_id, str(exc))
             try:
                 await asyncio.to_thread(sm.update_session, session_id, status="error", error_message=err)
             except Exception as ue:
@@ -510,14 +522,27 @@ async def _process_background(
         await asyncio.to_thread(sm.update_session, session_id, status="awaiting_review")
     except Exception as exc:
         logger.error(
-            "CRITICAL: Could not update session %s to 'awaiting_review' — "
-            "entities were extracted but the session will appear stuck in 'processing'. "
-            "Error: %s",
+            "Could not update session %s to 'awaiting_review': %s — "
+            "attempting to mark as error so the user is not left waiting.",
             session_id, exc, exc_info=True,
         )
+        audit_logger.error("PROCESS_FAILURE session=%s reason=status_update_failed", session_id)
+        try:
+            await asyncio.to_thread(
+                sm.update_session, session_id,
+                status="error",
+                error_message="Extraction completed but session update failed. Please reset and try again.",
+            )
+        except Exception as ue:
+            logger.error(
+                "Also failed to mark session %s as error after awaiting_review update failure: %s",
+                session_id, ue,
+            )
+        return
 
     suffix = " (mock)" if MOCK_DATABRICKS else ""
     logger.info("Background processing done for session %s — %d entities%s", session_id, len(entities), suffix)
+    audit_logger.info("PROCESS_COMPLETE session=%s entities=%d mock=%s", session_id, len(entities), MOCK_DATABRICKS)
 
 
 @app.post("/api/process", response_model=ProcessAcceptedResponse, status_code=202)
@@ -712,8 +737,10 @@ async def approve_and_mask(request: ApprovalRequest):
     logger.info(
         "Masking %d entities for session %s", len(entities_to_mask), request.session_id
     )
+    audit_logger.info("MASK_START session=%s entities=%d", request.session_id, len(entities_to_mask))
 
     if not MOCK_DATABRICKS and not DATABRICKS_MASKING_ENDPOINT:
+        audit_logger.error("MASK_FAILURE session=%s reason=endpoint_not_configured", request.session_id)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=(
@@ -729,12 +756,11 @@ async def approve_and_mask(request: ApprovalRequest):
         # Production: POST to the Databricks MaskingModel endpoint.
         # The model reads the original file from UC, applies redactions,
         # and writes masked.pdf back to UC — no local save_file needed.
-        import json as _json
         payload = {
             "dataframe_records": [
                 {
                     "session_id": request.session_id,
-                    "entities_to_mask": _json.dumps(entities_to_mask),
+                    "entities_to_mask": json.dumps(entities_to_mask),
                 }
             ]
         }
@@ -750,6 +776,7 @@ async def approve_and_mask(request: ApprovalRequest):
                 )
                 resp.raise_for_status()
         except httpx.TimeoutException:
+            audit_logger.error("MASK_FAILURE session=%s reason=timeout", request.session_id)
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="Masking request to Databricks timed out.",
@@ -758,6 +785,10 @@ async def approve_and_mask(request: ApprovalRequest):
             logger.error(
                 "Databricks masking endpoint returned %s for session %s",
                 exc.response.status_code, request.session_id,
+            )
+            audit_logger.error(
+                "MASK_FAILURE session=%s reason=http_error status=%d",
+                request.session_id, exc.response.status_code,
             )
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
@@ -768,6 +799,7 @@ async def approve_and_mask(request: ApprovalRequest):
                 "Masking via Databricks failed for session %s: %s",
                 request.session_id, exc, exc_info=True,
             )
+            audit_logger.error("MASK_FAILURE session=%s reason=%r", request.session_id, str(exc))
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to apply redactions via Databricks.",
@@ -778,10 +810,16 @@ async def approve_and_mask(request: ApprovalRequest):
         sm.update_session(request.session_id, status="completed")
     except Exception as exc:
         logger.error(
-            "CRITICAL: Could not update session %s to 'completed' — "
-            "masking succeeded but the session will not show as done. "
-            "Error: %s",
+            "Could not update session %s to 'completed' after successful masking: %s",
             request.session_id, exc, exc_info=True,
+        )
+        # Masking itself succeeded, but without the status update the session
+        # will appear stuck at 'awaiting_review'. Raise so the client knows
+        # it should retry — the masking call is idempotent.
+        audit_logger.error("MASK_FAILURE session=%s reason=status_update_failed", request.session_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Masking succeeded but could not update session status. Please try again.",
         )
 
     elapsed = round(time.monotonic() - t0, 2)
@@ -790,6 +828,10 @@ async def approve_and_mask(request: ApprovalRequest):
         request.session_id,
         len(entities_to_mask),
         elapsed,
+    )
+    audit_logger.info(
+        "MASK_COMPLETE session=%s entities_masked=%d elapsed_s=%.2f",
+        request.session_id, len(entities_to_mask), elapsed,
     )
 
     return ApprovalResponse(
@@ -847,8 +889,10 @@ async def serve_file(folder: str, filename: str):
             session_id = stem
         stored_filename_prefix = "masked"
 
-    # --- Validate session_id looks like a UUID (basic sanity check) ---
-    if not session_id or len(session_id) < 8:
+    # --- Validate session_id is a well-formed UUID ---
+    try:
+        uuid.UUID(session_id)
+    except (ValueError, AttributeError):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Could not parse a valid session ID from filename '{filename}'.",
@@ -1010,6 +1054,7 @@ async def delete_session(session_id: str):
         )
 
     logger.info("Deleted session %s", session_id)
+    audit_logger.info("DELETE session=%s", session_id)
 
 
 # ---------------------------------------------------------------------------
