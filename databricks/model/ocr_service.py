@@ -15,10 +15,12 @@ Features:
 Dependencies: PyMuPDF (fitz), python-docx, requests
 """
 
+import asyncio
 import os
 import io
 import base64
-from typing import List, Dict, Any
+import time
+from typing import List, Dict, Any, Optional
 from enum import Enum
 import logging
 
@@ -93,11 +95,23 @@ class OCRService:
             self.adi_client_secret,
             self.adi_endpoint
         ]) and self.adi_client_id != "dummy_client_id" and self.adi_client_secret != "dummy_secret"
-        
+
         if self.adi_available:
             logger.info("Azure Document Intelligence OAuth credentials configured")
         else:
             logger.info("No ADI OAuth credentials provided. Service will work with digital PDFs and DOCX only.")
+
+        # Token cache — reused across pages and across requests while the
+        # model endpoint is warm.  Tokens are valid for 3600 s; we refresh
+        # 60 s before expiry to avoid using a token that expires mid-request.
+        self._cached_token: Optional[str] = None
+        self._token_expiry: float = 0.0
+
+        # Maximum number of scanned pages whose ADI calls run concurrently.
+        # Mirrors the Vision API semaphore pattern in DocumentIntelligenceModel.
+        self._adi_max_concurrent: int = int(
+            os.environ.get("ADI_MAX_CONCURRENT_PAGES", "5")
+        )
     
     def process_document(
         self, 
@@ -128,9 +142,9 @@ class OCRService:
             }
         """
         ext = file_extension.lower().lstrip('.')
-        
+
         if ext == 'pdf':
-            return self._process_pdf(document_bytes)
+            return asyncio.run(self._process_pdf_async(document_bytes))
         elif ext == 'docx':
             return self._process_docx(document_bytes)
         elif ext in ['png', 'jpg', 'jpeg']:
@@ -138,33 +152,104 @@ class OCRService:
         else:
             raise ValueError(f"Unsupported file extension: {file_extension}")
     
-    def _process_pdf(self, pdf_bytes: bytes) -> List[Dict[str, Any]]:
+    def _get_adi_token(self) -> str:
+        """Return a cached OAuth token, refreshing when within 60 s of expiry."""
+        if self._cached_token and time.time() < self._token_expiry - 60:
+            logger.debug("Reusing cached ADI OAuth token")
+            return self._cached_token
+        logger.info("Fetching new ADI OAuth token")
+        token = generate_adi_token(
+            tenant_id=self.adi_tenant_id,
+            client_id=self.adi_client_id,
+            client_secret=self.adi_client_secret,
+            api_app_id_uri=self.adi_api_app_id_uri,
+        )
+        self._cached_token = token
+        self._token_expiry = time.time() + 3500  # tokens are valid for 3600 s
+        return token
+
+    async def _process_pdf_async(self, pdf_bytes: bytes) -> List[Dict[str, Any]]:
         """
-        Process PDF with intelligent page detection.
-        
-        Digital pages (with text layer) are extracted directly.
-        Scanned pages (image-only) are rendered and sent to OCR.
+        Process PDF with intelligent page detection, running ADI calls concurrently.
+
+        Pass 1 (sync): classify every page via get_text().  Digital pages are
+        processed immediately (PyMuPDF only, no network).  Scanned pages are
+        rendered to PNG and queued — the fitz document must stay open for this.
+
+        Pass 2 (async): all scanned pages are OCR'd via ADI concurrently, bounded
+        by an asyncio.Semaphore.  asyncio.to_thread wraps the blocking requests
+        call so it doesn't block the event loop.  A single OAuth token is fetched
+        once and shared across all ADI calls in this document.
         """
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        results = []
-        
+        results: List[Optional[Dict[str, Any]]] = [None] * len(doc)
+        # (page_idx, page_num, png_bytes, png_w, png_h, page_image_b64)
+        scanned_tasks = []
+
+        # Pass 1: classify and render while the doc object is open
         for page_num in range(len(doc)):
             page = doc[page_num]
-            
-            # Try to extract text directly
             text = page.get_text()
-            
-            # Determine if page is digital or scanned based on text content
             if len(text.strip()) >= self.MIN_TEXT_LENGTH_FOR_DIGITAL:
-                # Digital page - extract text and synthesize bounding boxes
-                page_result = self._process_digital_pdf_page(page, page_num + 1, text)
+                results[page_num] = self._process_digital_pdf_page(page, page_num + 1, text)
             else:
-                # Scanned page - render to PNG and OCR
-                page_result = self._process_scanned_pdf_page(page, page_num + 1)
-            
-            results.append(page_result)
-        
+                mat = fitz.Matrix(self.RENDER_ZOOM_FACTOR, self.RENDER_ZOOM_FACTOR)
+                pix = page.get_pixmap(matrix=mat)
+                png_bytes = pix.tobytes("png")
+                png_w = page.rect.width * self.RENDER_ZOOM_FACTOR
+                png_h = page.rect.height * self.RENDER_ZOOM_FACTOR
+                page_image_b64 = base64.b64encode(png_bytes).decode("utf-8")
+                scanned_tasks.append(
+                    (page_num, page_num + 1, png_bytes, png_w, png_h, page_image_b64)
+                )
+
         doc.close()
+
+        # Pass 2: OCR all scanned pages concurrently
+        if scanned_tasks:
+            if not self.adi_available:
+                raise ValueError(
+                    "Scanned PDF page detected but no Azure Document Intelligence "
+                    "credentials provided. Please set ADI_TENANT_ID, ADI_CLIENT_ID, "
+                    "and ADI_CLIENT_SECRET environment variables with valid credentials."
+                )
+            token = self._get_adi_token()  # one OAuth call for the whole document
+            sem = asyncio.Semaphore(self._adi_max_concurrent)
+
+            async def _bounded_ocr(task):
+                page_idx, page_num, png_bytes, png_w, png_h, page_image_b64 = task
+                async with sem:
+                    logger.info(f"ADI OCR starting (async) for page {page_num}")
+                    t0 = time.time()
+                    ocr_result = await asyncio.to_thread(
+                        self._ocr_with_adi, png_bytes, token
+                    )
+                    logger.info(
+                        f"⏱️  ADI OCR (async, page {page_num}): {time.time() - t0:.2f}s"
+                    )
+                # Normalise ADI pixel coords (rendered PNG space) to [0, 1]
+                for word in ocr_result["words"]:
+                    bb = word["bounding_box"]
+                    word["bounding_box"] = {
+                        "x": bb["x"] / png_w,
+                        "y": bb["y"] / png_h,
+                        "width": bb["width"] / png_w,
+                        "height": bb["height"] / png_h,
+                    }
+                return page_idx, {
+                    "page_num": page_num,
+                    "source": PageSource.SCANNED_PDF,
+                    "text": ocr_result["text"],
+                    "words": ocr_result["words"],
+                    "image_base64": page_image_b64,
+                }
+
+            ocr_outputs = await asyncio.gather(
+                *[_bounded_ocr(t) for t in scanned_tasks]
+            )
+            for page_idx, page_result in ocr_outputs:
+                results[page_idx] = page_result
+
         return results
     
     def _process_digital_pdf_page(
@@ -215,56 +300,6 @@ class OCRService:
             "source": PageSource.DIGITAL_PDF,
             "text": text,
             "words": words,
-            "image_base64": page_image_b64
-        }
-    
-    def _process_scanned_pdf_page(
-        self, 
-        page: fitz.Page, 
-        page_num: int
-    ) -> Dict[str, Any]:
-        """
-        Render scanned PDF page to PNG and OCR with Azure Document Intelligence.
-        Also includes the PNG as base64 for vision API processing.
-        
-        Requires Azure Document Intelligence OAuth credentials.
-        """
-        if not self.adi_available:
-            raise ValueError(
-                "Scanned PDF page detected but no Azure Document Intelligence credentials provided. "
-                "Please set ADI_TENANT_ID, ADI_CLIENT_ID, and ADI_CLIENT_SECRET "
-                "environment variables with valid credentials."
-            )
-        
-        # Render page to PNG at 2x zoom (~=144 DPI)
-        mat = fitz.Matrix(self.RENDER_ZOOM_FACTOR, self.RENDER_ZOOM_FACTOR)
-        pix = page.get_pixmap(matrix=mat)
-        png_bytes = pix.tobytes("png")
-        
-        # Encode to base64 for vision API
-        page_image_b64 = base64.b64encode(png_bytes).decode('utf-8')
-        
-        # OCR the rendered image
-        ocr_result = self._ocr_with_adi(png_bytes)
-
-        # Normalise ADI pixel coords (in the rendered PNG space) to [0, 1]
-        # relative to the original PDF page dimensions.
-        png_w = page.rect.width * self.RENDER_ZOOM_FACTOR
-        png_h = page.rect.height * self.RENDER_ZOOM_FACTOR
-        for word in ocr_result["words"]:
-            bb = word["bounding_box"]
-            word["bounding_box"] = {
-                "x": bb["x"] / png_w,
-                "y": bb["y"] / png_h,
-                "width": bb["width"] / png_w,
-                "height": bb["height"] / png_h,
-            }
-
-        return {
-            "page_num": page_num,
-            "source": PageSource.SCANNED_PDF,
-            "text": ocr_result["text"],
-            "words": ocr_result["words"],
             "image_base64": page_image_b64
         }
     
@@ -337,27 +372,25 @@ class OCRService:
             "image_base64": image_b64
         }]
     
-    def _ocr_with_adi(self, image_bytes: bytes) -> Dict[str, Any]:
+    def _ocr_with_adi(self, image_bytes: bytes, token: Optional[str] = None) -> Dict[str, Any]:
         """
         Perform OCR using Azure Document Intelligence via Suncorp APIM gateway.
-        
-        Uses OAuth authentication and direct REST API calls through adi_utils.
-        Proxies are configured via HTTP_PROXY and HTTPS_PROXY environment variables,
-        which are automatically used by the requests library.
-        
+
+        Args:
+            image_bytes: Raw image bytes (PNG or JPEG).
+            token: Pre-fetched OAuth token.  When None, _get_adi_token() is called
+                   (fetches a fresh token or returns the cached one).  Pass a token
+                   explicitly when processing multiple pages to avoid redundant
+                   OAuth round trips.
+
         Returns:
             {
                 "text": str,  # Full page text
                 "words": [...]  # Word-level bounding boxes
             }
         """
-        # Generate OAuth token (proxies automatically used from env vars)
-        token = generate_adi_token(
-            tenant_id=self.adi_tenant_id,
-            client_id=self.adi_client_id,
-            client_secret=self.adi_client_secret,
-            api_app_id_uri=self.adi_api_app_id_uri
-        )
+        if token is None:
+            token = self._get_adi_token()
 
         # Base64-encode image bytes directly — no temp file needed
         base64_image = base64.b64encode(image_bytes).decode('utf-8')

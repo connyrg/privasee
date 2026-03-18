@@ -11,8 +11,9 @@ This test suite verifies:
 All Azure Document Intelligence API calls are mocked via adi_utils.
 """
 
+import asyncio
 import unittest
-from unittest.mock import Mock, patch, MagicMock, mock_open
+from unittest.mock import AsyncMock, Mock, patch, MagicMock, mock_open
 import io
 import os
 import tempfile
@@ -154,8 +155,8 @@ class TestDigitalPDFProcessing(unittest.TestCase):
         
         # Process PDF
         pdf_bytes = b"fake pdf bytes"
-        results = self.service._process_pdf(pdf_bytes)
-        
+        results = asyncio.run(self.service._process_pdf_async(pdf_bytes))
+
         # Verify digital page was detected
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]['source'], PageSource.DIGITAL_PDF)
@@ -232,8 +233,8 @@ class TestScannedPDFProcessing(unittest.TestCase):
         
         # Process PDF
         pdf_bytes = b"fake pdf bytes"
-        results = self.service._process_pdf(pdf_bytes)
-        
+        results = asyncio.run(self.service._process_pdf_async(pdf_bytes))
+
         # Verify scanned page was detected and OCR'd
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]['source'], PageSource.SCANNED_PDF)
@@ -383,13 +384,13 @@ class TestProcessDocument(unittest.TestCase):
         
         self.assertIn("Unsupported", str(context.exception))
     
-    @patch.object(OCRService, '_process_pdf')
-    def test_pdf_routing(self, mock_process_pdf):
-        """Test that PDF files are routed to PDF processor"""
-        mock_process_pdf.return_value = []
-        
+    @patch.object(OCRService, '_process_pdf_async', new_callable=AsyncMock)
+    def test_pdf_routing(self, mock_process_pdf_async):
+        """Test that PDF files are routed to the async PDF processor"""
+        mock_process_pdf_async.return_value = []
+
         self.service.process_document(b"fake bytes", "pdf")
-        mock_process_pdf.assert_called_once()
+        mock_process_pdf_async.assert_called_once()
     
     @patch.object(OCRService, '_process_docx')
     def test_docx_routing(self, mock_process_docx):
@@ -417,20 +418,25 @@ class TestErrorHandling(unittest.TestCase):
         """Test that scanned PDF processing fails without ADI credentials"""
         with patch.dict(os.environ, {}, clear=True):
             service = OCRService()
-            
+
             # Create mock scanned page
             with patch('fitz.open') as mock_fitz_open:
                 mock_doc = MagicMock()
                 mock_page = MagicMock()
                 mock_page.get_text.return_value = ""  # Scanned (no text)
+                mock_page.rect.width = 595.0
+                mock_page.rect.height = 842.0
+                mock_pixmap = Mock()
+                mock_pixmap.tobytes.return_value = b"fake png bytes"
+                mock_page.get_pixmap.return_value = mock_pixmap
                 mock_doc.__len__.return_value = 1
                 mock_doc.__iter__.return_value = [mock_page]
                 mock_doc.__getitem__.return_value = mock_page
                 mock_fitz_open.return_value = mock_doc
-                
+
                 with self.assertRaises(ValueError) as context:
-                    service._process_pdf(b"fake pdf")
-                
+                    asyncio.run(service._process_pdf_async(b"fake pdf"))
+
                 self.assertIn("credentials", str(context.exception).lower())
     
     def test_image_without_credentials(self):
