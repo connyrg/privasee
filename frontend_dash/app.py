@@ -2386,12 +2386,13 @@ def reset_workflow(n_clicks: int, navbar_n_clicks: int, session: dict | None):
         if session_id:
             headers = {"Authorization": f"Key {os.environ.get('POSIT_CONNECT_API_KEY', '')}"}
             try:
-                req.delete(
+                _del_resp = req.delete(
                     f"{API_BASE_URL}/api/sessions/{session_id}",
                     headers=headers,
                     verify=SSL_VERIFY,
                     timeout=10,
                 )
+                logger.warning("Delete session %s response: %s", session_id, _del_resp.status_code)
             except Exception as exc:
                 logger.warning("Failed to delete session %s on reset: %s", session_id, exc)
     return 1, None, DEFAULT_FIELDS, None, None, None, None, None, None, True, None
