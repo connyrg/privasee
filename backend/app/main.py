@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import time
 import uuid
 from datetime import datetime, timezone
@@ -71,6 +72,8 @@ load_dotenv()
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    stream=sys.stdout,  # Posit Connect captures stdout, not stderr
+    force=True,  # override any handlers Uvicorn already installed
 )
 logger = logging.getLogger(__name__)
 # Dedicated audit logger — records key workflow transitions and all failures.
