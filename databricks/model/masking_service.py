@@ -143,10 +143,17 @@ class MaskingService:
                 continue
 
             page = doc[page_idx]
+            rotation = page.rotation
+            # page.rect gives display (visual) dimensions, accounting for rotation.
+            # Drawing ops (add_redact_annot, insert_text) use raw PDF (mediabox)
+            # coordinates.  derotation_matrix converts display → raw PDF so that
+            # bounding boxes from the vision model (which are in display space)
+            # land in the correct position regardless of page rotation.
             W = page.rect.width
             H = page.rect.height
+            derot = page.derotation_matrix
 
-            inserts: List[Tuple[fitz.Rect, str]] = []
+            inserts: List[Tuple[fitz.Rect, fitz.Rect, str]] = []  # (raw_rect, display_rect, text)
 
             # Collect widgets once per page into a plain list so we can
             # safely look them up without re-iterating the live generator.
@@ -165,7 +172,9 @@ class MaskingService:
                 fill_color = (0.0, 0.0, 0.0) if strategy == "redact" else (1.0, 1.0, 1.0)
 
                 x, y, w, h = bbox
-                rect = fitz.Rect(x * W, y * H, (x + w) * W, (y + h) * H)
+                # Compute in display space, then transform to raw PDF coordinates.
+                rect_display = fitz.Rect(x * W, y * H, (x + w) * W, (y + h) * H)
+                rect = rect_display * derot
 
                 # If this bbox covers a form widget, update the widget
                 # value directly instead of painting a redact rect on top.
@@ -198,16 +207,20 @@ class MaskingService:
                 else:
                     page.add_redact_annot(rect, fill=fill_color)
                     if replacement:
-                        inserts.append((rect, replacement))
+                        inserts.append((rect, rect_display, replacement))
 
             page.apply_redactions()
 
-            for rect, text in inserts:
-                fontsize = max(6, min(10, int(rect.height * 0.7)))
+            for rect, rect_display, text in inserts:
+                # Use display rect height for font sizing (visually correct scale).
+                # Use raw PDF rect for position; rotate to counter page rotation so
+                # replacement text appears horizontal in the display view.
+                fontsize = max(6, min(10, int(rect_display.height * 0.7)))
                 page.insert_text(
                     (rect.x0 + 2, rect.y1 - 2),
                     text,
                     fontsize=fontsize,
+                    rotate=rotation,
                 )
 
         buf = io.BytesIO()
