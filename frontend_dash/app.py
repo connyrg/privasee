@@ -865,7 +865,7 @@ app.layout = dbc.Container(
         # Polling interval — disabled until process endpoint returns 202
         dcc.Interval(id="poll-interval", interval=5000, n_intervals=0, disabled=True),
         # Batch processing interval — drives the per-file state machine
-        dcc.Interval(id="batch-interval", interval=2000, n_intervals=0, disabled=True),
+        dcc.Interval(id="batch-interval", interval=5000, n_intervals=0, disabled=True),
         # --- UI ---
         _navbar(),
         # Step indicator
@@ -1898,7 +1898,7 @@ def start_batch(n_clicks: int, files: list, fields: list):
         [dbc.Spinner(size="sm", color="primary"), html.Span(f" File 1 of {n} — {first_filename}: Uploading...", className="ms-2 text-muted")],
         className="d-flex align-items-center",
     )
-    return 0, "upload", [], None, 0, [], False, progress
+    return 0, "uploading", [], None, 0, [], True, progress
 
 
 @callback(
@@ -1949,24 +1949,10 @@ def batch_tick(n_intervals, cursor, phase, session_id, poll_count, files, result
             [dbc.Spinner(size="sm", color="primary"), html.Span(f" File {next_cursor + 1} of {n_files} — {next_fname}: Uploading...", className="ms-2 text-muted")],
             className="d-flex align-items-center",
         )
-        return next_cursor, "upload", None, 0, [], new_results, no_update, no_update, progress
+        return next_cursor, "uploading", None, 0, [], new_results, True, no_update, progress
 
     file_info = files[cursor]
     filename = file_info["filename"]
-
-    # ------------------------------------------------------------------
-    # Upload — fast gate only, no HTTP calls here.
-    # Disables the interval and sets phase="uploading" so that
-    # batch_do_blocking (store-triggered) performs the actual upload +
-    # process calls exactly once, without risk of duplicate invocations.
-    # ------------------------------------------------------------------
-    if phase == "upload":
-        fname = files[cursor]["filename"]
-        progress = html.Div(
-            [dbc.Spinner(size="sm", color="primary"), html.Span(f" File {cursor + 1} of {n_files} — {fname}: Uploading...", className="ms-2 text-muted")],
-            className="d-flex align-items-center",
-        )
-        return cursor, "uploading", no_update, no_update, no_update, no_update, True, no_update, progress
 
     # ------------------------------------------------------------------
     # Poll extraction status
@@ -2070,8 +2056,8 @@ def batch_do_blocking(phase, cursor, session_id, current_entities, files, result
             [dbc.Spinner(size="sm", color="primary"), html.Span(f" File {next_cursor + 1} of {n_files} — {next_fname}: Uploading...", className="ms-2 text-muted")],
             className="d-flex align-items-center",
         )
-        # Re-enable the interval (was disabled by the gate return in batch_tick)
-        return next_cursor, "upload", None, 0, [], new_results, False, no_update, progress
+        # Trigger batch_do_blocking immediately for the next file (no interval wait)
+        return next_cursor, "uploading", None, 0, [], new_results, True, no_update, progress
 
     filename = files[cursor]["filename"]
 
