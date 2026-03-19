@@ -1,3 +1,4 @@
+import asyncio
 import httpx
 import json
 
@@ -196,11 +197,46 @@ def http_client_factory(workspace_url, openai_apikey=None, proxy_client_id=None,
 
         logger.info("--- Finished Request Hook ---\n")
 
-    # --- 2. Create your httpx clients with the hook ---
-    event_hooks = {'request': [_nginx_request_hook]}
+    # Async version of the hook — httpx's AsyncClient awaits event hooks, so the
+    # hook must be an async function.  The blocking generate_sp_token() call is
+    # offloaded to a thread via asyncio.to_thread() so it doesn't block the loop.
+    async def _nginx_async_request_hook(request: httpx.Request):
+        logger.info("--- Running Async Request Hook ---")
 
-    # Create both sync and async clients if you plan to use both .invoke() and .ainvoke()
-    custom_sync_client = httpx.Client(event_hooks=event_hooks)
-    custom_async_client = httpx.AsyncClient(event_hooks=event_hooks)
+        logger.debug(f"[URL] Original URL: {request.url}")
+        logger.debug(f"[Params] Original query params: {request.url.params}")
+
+        logger.debug(f"[Headers] Original headers: {request.headers}")
+        auth_headers = await asyncio.to_thread(
+            authenticate_and_get_headers,
+            openai_apikey, proxy_client_id, proxy_client_secret, workspace_url,
+        )
+        for k, v in auth_headers.items():
+            request.headers[k] = v
+            logger.debug(f"[Headers] upsert '{k}' to '{v}'")
+
+        if not request.stream:
+            logger.warn("[JSON] No request body to inspect or modify.")
+        else:
+            body_bytes = request.read()
+            body_str = body_bytes.decode('utf-8')
+            logger.debug(f"[JSON] Original JSON payload (string): {body_str}")
+            data = json.loads(body_str)
+            if "model" not in data.keys():
+                data['model'] = 'gpt-4o'
+                logger.warn(f"[JSON] Modified data dictionary: {data}")
+            modified_body_bytes = json.dumps(data).encode('utf-8')
+            request.stream = httpx.ByteStream(modified_body_bytes)
+            request.headers['Content-Length'] = str(len(modified_body_bytes))
+            logger.debug(f"[JSON] Body replaced and Content-Length updated to {len(modified_body_bytes)}")
+
+        logger.info("--- Finished Async Request Hook ---\n")
+
+    # --- 2. Create your httpx clients with the hook ---
+    # Sync client uses the sync hook; async client uses the async hook.
+    # httpx's AsyncClient awaits event hooks — passing a sync hook causes
+    # "TypeError: object NoneType can't be used in 'await' expression".
+    custom_sync_client = httpx.Client(event_hooks={'request': [_nginx_request_hook]})
+    custom_async_client = httpx.AsyncClient(event_hooks={'request': [_nginx_async_request_hook]})
 
     return (custom_sync_client, custom_async_client)
