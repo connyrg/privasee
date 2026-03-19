@@ -273,7 +273,7 @@ class OpenAIVisionService:
             return entities
 
         except Exception as e:
-            logger.error(f"Error extracting entities with Azure OpenAI (async, page {page_number}): {str(e)}")
+            logger.error(f"Error extracting entities with Azure OpenAI (async, page {page_number}): {str(e)}", exc_info=True)
             return []
 
     def _build_extraction_prompt(
