@@ -15,7 +15,7 @@ Features:
 Dependencies: PyMuPDF (fitz), python-docx, requests
 """
 
-import asyncio
+import concurrent.futures
 import os
 import io
 import base64
@@ -144,7 +144,7 @@ class OCRService:
         ext = file_extension.lower().lstrip('.')
 
         if ext == 'pdf':
-            return asyncio.run(self._process_pdf_async(document_bytes))
+            return self._process_pdf(document_bytes)
         elif ext == 'docx':
             return self._process_docx(document_bytes)
         elif ext in ['png', 'jpg', 'jpeg']:
@@ -168,7 +168,7 @@ class OCRService:
         self._token_expiry = time.time() + 3500  # tokens are valid for 3600 s
         return token
 
-    async def _process_pdf_async(self, pdf_bytes: bytes) -> List[Dict[str, Any]]:
+    def _process_pdf(self, pdf_bytes: bytes) -> List[Dict[str, Any]]:
         """
         Process PDF with intelligent page detection, running ADI calls concurrently.
 
@@ -176,14 +176,13 @@ class OCRService:
         processed immediately (PyMuPDF only, no network).  Scanned pages are
         rendered to PNG and queued — the fitz document must stay open for this.
 
-        Pass 2 (async): all scanned pages are OCR'd via ADI concurrently, bounded
-        by an asyncio.Semaphore.  asyncio.to_thread wraps the blocking requests
-        call so it doesn't block the event loop.  A single OAuth token is fetched
-        once and shared across all ADI calls in this document.
+        Pass 2 (threaded): all scanned pages are OCR'd via ADI concurrently using
+        ThreadPoolExecutor — avoids asyncio.run() which corrupts the Databricks
+        Serverless event loop shared with the Vision API's asyncio.gather() tasks.
+        A single OAuth token is fetched once and shared across all ADI calls.
         """
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         results: List[Optional[Dict[str, Any]]] = [None] * len(doc)
-        # (page_idx, page_num, png_bytes, png_w, png_h, page_image_b64)
         scanned_tasks = []
 
         # Pass 1: classify and render while the doc object is open
@@ -205,7 +204,7 @@ class OCRService:
 
         doc.close()
 
-        # Pass 2: OCR all scanned pages concurrently
+        # Pass 2: OCR all scanned pages concurrently via thread pool (no asyncio)
         if scanned_tasks:
             if not self.adi_available:
                 raise ValueError(
@@ -214,20 +213,13 @@ class OCRService:
                     "and ADI_CLIENT_SECRET environment variables with valid credentials."
                 )
             token = self._get_adi_token()  # one OAuth call for the whole document
-            sem = asyncio.Semaphore(self._adi_max_concurrent)
 
-            async def _bounded_ocr(task):
+            def _ocr_task(task):
                 page_idx, page_num, png_bytes, png_w, png_h, page_image_b64 = task
-                async with sem:
-                    logger.info(f"ADI OCR starting (async) for page {page_num}")
-                    t0 = time.time()
-                    ocr_result = await asyncio.to_thread(
-                        self._ocr_with_adi, png_bytes, token
-                    )
-                    logger.info(
-                        f"⏱️  ADI OCR (async, page {page_num}): {time.time() - t0:.2f}s"
-                    )
-                # Normalise ADI pixel coords (rendered PNG space) to [0, 1]
+                logger.info(f"ADI OCR starting for page {page_num}")
+                t0 = time.time()
+                ocr_result = self._ocr_with_adi(png_bytes, token)
+                logger.info(f"⏱️  ADI OCR (page {page_num}): {time.time() - t0:.2f}s")
                 for word in ocr_result["words"]:
                     bb = word["bounding_box"]
                     word["bounding_box"] = {
@@ -244,11 +236,11 @@ class OCRService:
                     "image_base64": page_image_b64,
                 }
 
-            ocr_outputs = await asyncio.gather(
-                *[_bounded_ocr(t) for t in scanned_tasks]
-            )
-            for page_idx, page_result in ocr_outputs:
-                results[page_idx] = page_result
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=self._adi_max_concurrent
+            ) as executor:
+                for page_idx, page_result in executor.map(_ocr_task, scanned_tasks):
+                    results[page_idx] = page_result
 
         return results
     
