@@ -1949,10 +1949,24 @@ def batch_tick(n_intervals, cursor, phase, session_id, poll_count, files, result
             [dbc.Spinner(size="sm", color="primary"), html.Span(f" File {next_cursor + 1} of {n_files} — {next_fname}: Uploading...", className="ms-2 text-muted")],
             className="d-flex align-items-center",
         )
-        return next_cursor, "uploading", None, 0, [], new_results, True, no_update, progress
+        # Use "upload" gate phase + enabled interval so batch_tick can recover
+        # if the store-triggered batch_do_blocking is dropped by a proxy timeout.
+        return next_cursor, "upload", None, 0, [], new_results, False, no_update, progress
 
     file_info = files[cursor]
     filename = file_info["filename"]
+
+    # ------------------------------------------------------------------
+    # Upload gate — fast transition to "uploading", disables interval,
+    # triggering batch_do_blocking exactly once via store change.
+    # ------------------------------------------------------------------
+    if phase == "upload":
+        fname = files[cursor]["filename"]
+        progress = html.Div(
+            [dbc.Spinner(size="sm", color="primary"), html.Span(f" File {cursor + 1} of {n_files} — {fname}: Uploading...", className="ms-2 text-muted")],
+            className="d-flex align-items-center",
+        )
+        return cursor, "uploading", no_update, no_update, no_update, no_update, True, no_update, progress
 
     # ------------------------------------------------------------------
     # Poll extraction status
@@ -2056,8 +2070,9 @@ def batch_do_blocking(phase, cursor, session_id, current_entities, files, result
             [dbc.Spinner(size="sm", color="primary"), html.Span(f" File {next_cursor + 1} of {n_files} — {next_fname}: Uploading...", className="ms-2 text-muted")],
             className="d-flex align-items-center",
         )
-        # Trigger batch_do_blocking immediately for the next file (no interval wait)
-        return next_cursor, "uploading", None, 0, [], new_results, True, no_update, progress
+        # Enable interval so batch_tick can recover if the store-triggered
+        # batch_do_blocking is dropped by a proxy timeout on long callbacks.
+        return next_cursor, "upload", None, 0, [], new_results, False, no_update, progress
 
     filename = files[cursor]["filename"]
 
