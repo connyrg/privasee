@@ -478,6 +478,21 @@ def _step2_layout() -> html.Div:
                                     width="auto",
                                     className="ms-auto",
                                 ),
+                                dbc.Col(
+                                    html.Small(
+                                        [
+                                            html.Span(id="session-id-label-2", className="text-muted font-monospace"),
+                                            dcc.Clipboard(
+                                                id="session-id-copy-2",
+                                                title="Copy full session ID",
+                                                className="btn btn-link btn-sm p-0 ms-1 text-muted",
+                                                style={"fontSize": "0.75rem"},
+                                            ),
+                                        ]
+                                    ),
+                                    width="auto",
+                                    className="ms-2 d-flex align-items-center",
+                                ),
                             ],
                             className="mb-3 align-items-center",
                         ),
@@ -579,8 +594,22 @@ def _step3_layout() -> html.Div:
             dbc.Alert(
                 [html.I(className="bi bi-shield-fill-check me-2"), html.Span(id="entities-masked-count")],
                 color="success",
-                className="mb-4",
+                className="mb-2",
                 id="mask-success-banner",
+            ),
+            html.Div(
+                html.Small(
+                    [
+                        html.Span(id="session-id-label-3", className="text-muted font-monospace"),
+                        dcc.Clipboard(
+                            id="session-id-copy-3",
+                            title="Copy full session ID",
+                            className="btn btn-link btn-sm p-0 ms-1 text-muted",
+                            style={"fontSize": "0.75rem"},
+                        ),
+                    ]
+                ),
+                className="mb-3 text-end",
             ),
             dbc.Row(
                 [
@@ -2284,6 +2313,26 @@ def reset_workflow(n_clicks: int, navbar_n_clicks: int, session: dict | None):
             except Exception as exc:
                 logger.warning("Failed to delete session %s on reset: %s", session_id, exc)
     return 1, None, DEFAULT_FIELDS, None, None, None, None, None, None, True, None
+
+
+# ---------------------------------------------------------------------------
+# Session ID display (Step 2 + Step 3)
+# ---------------------------------------------------------------------------
+
+
+@callback(
+    Output("session-id-label-2", "children"),
+    Output("session-id-copy-2", "content"),
+    Output("session-id-label-3", "children"),
+    Output("session-id-copy-3", "content"),
+    Input("store-session", "data"),
+)
+def update_session_id_display(session: dict | None):
+    if not session:
+        return "", "", "", ""
+    sid = session.get("session_id", "")
+    label = f"Session: {sid[:8]}…" if len(sid) > 8 else f"Session: {sid}"
+    return label, sid, label, sid
 
 
 # ---------------------------------------------------------------------------
