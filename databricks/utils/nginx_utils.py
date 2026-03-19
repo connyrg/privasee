@@ -1,6 +1,7 @@
 import asyncio
 import httpx
 import json
+import time
 
 import os
 import requests
@@ -197,8 +198,25 @@ def http_client_factory(workspace_url, openai_apikey=None, proxy_client_id=None,
 
         logger.info("--- Finished Request Hook ---\n")
 
+    # Token cache shared across all async requests from this client pair.
+    # Tokens are valid for ~3600 s; refresh 60 s before expiry so concurrent
+    # pages never race to fetch a new one mid-request.
+    _cached_token: list = [None]
+    _token_expiry: list = [0.0]
+
+    def _get_proxy_token() -> str:
+        """Return a cached proxy OAuth token, fetching a new one when near expiry."""
+        if _cached_token[0] and time.time() < _token_expiry[0] - 60:
+            logger.debug("Reusing cached proxy OAuth token")
+            return _cached_token[0]
+        logger.info("Fetching new proxy OAuth token")
+        token = generate_sp_token(workspace_url, proxy_client_id, proxy_client_secret)
+        _cached_token[0] = token
+        _token_expiry[0] = time.time() + 3500  # tokens valid for 3600 s
+        return token
+
     # Async version of the hook — httpx's AsyncClient awaits event hooks, so the
-    # hook must be an async function.  The blocking generate_sp_token() call is
+    # hook must be an async function.  The blocking _get_proxy_token() call is
     # offloaded to a thread via asyncio.to_thread() so it doesn't block the loop.
     async def _nginx_async_request_hook(request: httpx.Request):
         logger.info("--- Running Async Request Hook ---")
@@ -207,10 +225,12 @@ def http_client_factory(workspace_url, openai_apikey=None, proxy_client_id=None,
         logger.debug(f"[Params] Original query params: {request.url.params}")
 
         logger.debug(f"[Headers] Original headers: {request.headers}")
-        auth_headers = await asyncio.to_thread(
-            authenticate_and_get_headers,
-            openai_apikey, proxy_client_id, proxy_client_secret, workspace_url,
-        )
+        token = await asyncio.to_thread(_get_proxy_token)
+        auth_headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+            "api-key": openai_apikey,
+        }
         for k, v in auth_headers.items():
             request.headers[k] = v
             logger.debug(f"[Headers] upsert '{k}' to '{v}'")
