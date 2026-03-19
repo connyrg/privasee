@@ -23,11 +23,10 @@ Environment Variables:
 - ADI_MODEL_ID: Document Intelligence model ID (defaults to "prebuilt-layout")
 """
 
-import asyncio
+import concurrent.futures
 import copy
 
 import mlflow.pyfunc
-import nest_asyncio
 import pandas as pd
 import json
 import base64
@@ -78,9 +77,6 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
             context: MLflow model context (unused but required by interface)
         """
         logger.info("Initializing Document Intelligence Model")
-
-        # Allow asyncio.run() to nest inside Databricks Serverless's own event loop.
-        nest_asyncio.apply()
 
         # Initialize OCR service (handles ADI OAuth internally)
         self.ocr_service = OCRService()
@@ -367,11 +363,30 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
 
         logger.info(f"Step 2: Running Vision API concurrently for {len(page_inputs)} page(s)")
         vision_start = time.time()
-        all_page_entities: List[List[Dict]] = asyncio.run(
-            self._extract_all_pages_async(page_inputs, field_definitions)
-        )
+
+        def _vision_task(page_input: Dict) -> List[Dict]:
+            page_number = page_input["page_number"]
+            page_image_b64 = page_input["page_image_b64"]
+            if not page_image_b64:
+                logger.warning(f"No image available for page {page_number}, skipping entity detection")
+                return []
+            logger.info(f"Vision API starting for page {page_number}")
+            t0 = time.time()
+            entities = self.vision_service.extract_entities_from_base64(
+                image_b64=page_image_b64,
+                mimetype=page_input["mimetype"],
+                ocr_data=page_input["ocr_data"],
+                field_definitions=field_definitions,
+                page_number=page_number,
+            )
+            logger.info(f"⏱️  Vision API (page {page_number}): {time.time() - t0:.2f}s — {len(entities)} entities")
+            return entities
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=_MAX_CONCURRENT_PAGES) as executor:
+            all_page_entities = list(executor.map(_vision_task, page_inputs))
+
         total_vision_time = time.time() - vision_start
-        logger.info(f"⏱️  Vision API (all {len(page_inputs)} pages, async): {total_vision_time:.2f}s")
+        logger.info(f"⏱️  Vision API (all {len(page_inputs)} pages, threaded): {total_vision_time:.2f}s")
 
         # Step 3: BBox Matcher + post-processing (sequential — CPU-bound, fast)
         for page_input, entities in zip(page_inputs, all_page_entities):
@@ -547,44 +562,6 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
         except Exception as e:
             logger.error(f"Error extracting entities from page {page_number}: {e}")
             return []
-
-    async def _extract_all_pages_async(
-        self,
-        page_inputs: List[Dict],
-        field_definitions: List[Dict],
-    ) -> List[List[Dict]]:
-        """
-        Run Vision API calls for all pages concurrently, bounded by a semaphore.
-
-        Args:
-            page_inputs: List of dicts with keys: page_number, page_image_b64, ocr_data, mimetype
-            field_definitions: Field definitions shared across all pages
-
-        Returns:
-            List of entity lists, one per page, in the same order as page_inputs.
-        """
-        sem = asyncio.Semaphore(_MAX_CONCURRENT_PAGES)
-
-        async def _bounded(page_input: Dict) -> List[Dict]:
-            async with sem:
-                page_number = page_input["page_number"]
-                page_image_b64 = page_input["page_image_b64"]
-                if not page_image_b64:
-                    logger.warning(f"No image available for page {page_number}, skipping entity detection")
-                    return []
-                logger.info(f"Vision API starting (async) for page {page_number}")
-                t0 = time.time()
-                entities = await self.vision_service.extract_entities_from_base64_async(
-                    image_b64=page_image_b64,
-                    mimetype=page_input["mimetype"],
-                    ocr_data=page_input["ocr_data"],
-                    field_definitions=field_definitions,
-                    page_number=page_number,
-                )
-                logger.info(f"⏱️  Vision API (async, page {page_number}): {time.time() - t0:.2f}s — {len(entities)} entities")
-                return entities
-
-        return list(await asyncio.gather(*[_bounded(p) for p in page_inputs]))
 
     @staticmethod
     def _merge_entity_variants(entities: List[Dict]) -> List[Dict]:
