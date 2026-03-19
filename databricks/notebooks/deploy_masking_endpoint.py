@@ -53,7 +53,7 @@ UC_MODEL_PATH = f"{CATALOG}.{SCHEMA}.{MODEL_NAME}"
 
 # Endpoint configuration
 ENDPOINT_NAME = "doc_masking"
-MODEL_VERSION = "3"  # Update to your registered model version
+MODEL_VERSION = "18"  # Update to your registered model version
 WORKLOAD_SIZE = "Small"  # Options: Small, Medium, Large
 SCALE_TO_ZERO = True  # Enable scale-to-zero to save costs
 
@@ -315,35 +315,59 @@ print("🧪 Testing endpoint availability...")
 test_payload = {
     "dataframe_records": [
         {
+
             "session_id": "integration_test_002",
             "entities_to_mask": json.dumps([
                 {
-                    "id": "test_e1",
+                    "id": "e1",
                     "entity_type": "claimant_name",
                     "original_text": "Stephen Parrot",
                     "replacement_text": "John Doe",
-                    "bounding_box": [
-                        0.14965359893857966,
-                        0.16382730180575378,
-                        0.11323988798943745,
-                        0.01599838422713382
-                    ],  # [x, y, width, height]
                     "strategy": "Fake Data",
                     "approved": True,
-                    "page_number": 1,
+                    "occurences": [
+                        {
+                            "page_number": 1,
+                            "bounding_box": [
+                                0.14965359893857966,
+                                0.16382730180575378,
+                                0.11323988798943745,
+                                0.01599838422713382
+                            ],
+                            "original_text": "Stephen Parrot",
+                        },
+                        {
+                            "page_number": 1,
+                            "bounding_box": [
+                                0.12094335670594705,
+                                0.20772694728975996,
+                                0.062211488372183626,
+                                0.015998384227133816
+                            ],
+                            "original_text": "Stephen",
+                        },
+                    ]
                 },
                 {
                     "id": "test_e2",
                     "entity_type": "incident_date",
                     "original_text": "12 January 2020,",
-                    "replacement_text": "[REDACTED]",
+                    "replacement_text": "incident_date_A",
                     "bounding_box": [
                         0.6438296945689354,
                         0.286119207615939,
                         0.1270384139471667,
                         0.01599838422713382
                     ],
-                    "strategy": "Black Out",
+                    'bounding_boxes': [
+                        {
+                            'x': 0.6438296945689354,
+                            'y': 0.286119207615939,
+                            'width': 0.12703841394716664,
+                            'height': 0.015998384227133844
+                        }
+                    ],
+                    "strategy": "Entity Label",
                     "approved": True,
                     "page_number": 1,
                 }

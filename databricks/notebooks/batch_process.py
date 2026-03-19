@@ -46,11 +46,6 @@ dbutils.widgets.text(
     "Config file (UC path to saved config JSON)",
 )
 dbutils.widgets.text(
-    "sessions_volume_path",
-    "/Volumes/datascience_dev_bronze_sandbox/privasee/privasee_sessions",
-    "Sessions volume path",
-)
-dbutils.widgets.text(
     "di_endpoint",
     "",
     "Document Intelligence endpoint URL",
@@ -86,9 +81,10 @@ logger = logging.getLogger("privasee.batch")
 INPUT_FOLDER        = dbutils.widgets.get("input_folder").rstrip("/")
 OUTPUT_FOLDER       = dbutils.widgets.get("output_folder").rstrip("/")
 CONFIG_PATH         = dbutils.widgets.get("config_path")
-SESSIONS_VOLUME     = dbutils.widgets.get("sessions_volume_path").rstrip("/")
 DI_ENDPOINT         = dbutils.widgets.get("di_endpoint").rstrip("/")
 MASKING_ENDPOINT    = dbutils.widgets.get("masking_endpoint").rstrip("/")
+# SESSIONS_VOLUME     = dbutils.widgets.get("sessions_volume_path").rstrip("/")
+SESSIONS_VOLUME     = "/Volumes/datascience_dev_bronze_sandbox/ds_document_deidentification/sessions"
 
 # Databricks token — available automatically in all notebook/job contexts
 DATABRICKS_HOST  = spark.conf.get("spark.databricks.workspaceUrl")

@@ -53,7 +53,7 @@ UC_MODEL_PATH = f"{CATALOG}.{SCHEMA}.{MODEL_NAME}"
 
 # Endpoint configuration
 ENDPOINT_NAME = "privasee_endpoint_local"
-MODEL_VERSION = "16"  # Update to your registered model version
+MODEL_VERSION = "34"  # Update to your registered model version
 WORKLOAD_SIZE = "Small"  # Options: Small, Medium, Large
 SCALE_TO_ZERO = True  # Enable scale-to-zero to save costs
 
@@ -128,10 +128,12 @@ if VISION_PROVIDER == "openai":
         # Azure Document Intelligence model to use
         "ADI_MODEL_ID": "prebuilt-read" , 
 
+        "VISION_MAX_CONCURRENT_PAGES": "20",
         "AZURE_OPENAI_API_KEY": f"{{{{secrets/{OPENAI_SECRET_SCOPE}/apikey}}}}",
         "AZURE_OPENAI_ENDPOINT": "https://openai-00010-non-prod-1.openai.azure.com/",
         "AZURE_OPENAI_API_VERSION": "2024-02-15-preview",
         "AZURE_OPENAI_DEPLOYMENT_NAME": "gpt-5-global",
+        # "AZURE_OPENAI_DEPLOYMENT_NAME": "gpt-4.1-global",
         "WORKSPACE_URL": "https://suncorp-dev.cloud.databricks.com/",
         "WORKSPACE_ID": "1238531023703058",
         "PROXY_CLUSTER_ID": "0503-061117-o2rl78n9",
