@@ -478,23 +478,20 @@ def _step2_layout() -> html.Div:
                                     width="auto",
                                     className="ms-auto",
                                 ),
-                                dbc.Col(
-                                    html.Small(
-                                        [
-                                            html.Span(id="session-id-label-2", className="text-muted font-monospace"),
-                                            dcc.Clipboard(
-                                                id="session-id-copy-2",
-                                                title="Copy full session ID",
-                                                className="btn btn-link btn-sm p-0 ms-1 text-muted",
-                                                style={"fontSize": "0.75rem"},
-                                            ),
-                                        ]
-                                    ),
-                                    width="auto",
-                                    className="ms-2 d-flex align-items-center",
+                            ],
+                            className="mb-1 align-items-center",
+                        ),
+                        html.Small(
+                            [
+                                html.Span(id="session-id-label-2", className="text-muted font-monospace"),
+                                dcc.Clipboard(
+                                    id="session-id-copy-2",
+                                    title="Copy full session ID",
+                                    className="btn btn-link btn-sm p-0 ms-1 text-muted",
+                                    style={"fontSize": "0.75rem"},
                                 ),
                             ],
-                            className="mb-3 align-items-center",
+                            className="d-block mb-2",
                         ),
                         html.Small(
                             "Tip: check the rows you want to mask. Edit the Replacement column to customise values.",
@@ -2245,9 +2242,23 @@ def render_batch_results(results: list, step: int, mode: str):
                 n_clicks=0,
             ) if session_id and not r.get("error") and r.get("verdict") != "No entities found" else html.Span("—", className="text-muted")
         )
+        file_cell = html.Td([
+            html.Div(r["filename"], className="fw-semibold"),
+            html.Small(
+                [
+                    html.Span(session_id[:8] + "…" if session_id else "—", className="text-muted font-monospace"),
+                    dcc.Clipboard(
+                        content=session_id or "",
+                        title="Copy full session ID",
+                        className="btn btn-link btn-sm p-0 ms-1 text-muted",
+                        style={"fontSize": "0.75rem"},
+                    ) if session_id else None,
+                ]
+            ),
+        ])
         rows.append(
             html.Tr([
-                html.Td(r["filename"]),
+                file_cell,
                 html.Td(str(r.get("entities_found", 0))),
                 html.Td(str(r.get("entities_masked", 0))),
                 html.Td(score_str),
