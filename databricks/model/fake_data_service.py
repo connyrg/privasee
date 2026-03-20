@@ -39,12 +39,22 @@ except Exception:
 _PREFIXES = {"mr", "mrs", "ms", "miss", "dr", "prof", "rev", "sir", "lord", "lady", "mx", "master"}
 _SUFFIXES = {"jr", "sr", "i", "ii", "iii", "iv", "v", "esq", "phd", "md", "dds", "dvm", "jd"}
 
+# Address parsing helpers
+_AU_STATE_RE = re.compile(r'\b(ACT|NSW|NT|QLD|SA|TAS|VIC|WA)\b')
+_AU_POSTCODE_RE = re.compile(r'\b(\d{4})\b')
+_STREET_TYPE_RE = re.compile(
+    r'(?i)\b(street|st|road|rd|avenue|ave|drive|dr|lane|ln|court|ct|'
+    r'place|pl|way|crescent|cres|terrace|tce|parade|pde|highway|hwy|'
+    r'close|cl|circuit|cct|grove|gr|boulevard|blvd)\b'
+)
+
 
 class FakeDataService:
     """Generate a single realistic fake replacement for a sensitive entity."""
 
     def __init__(self, seed: Optional[int] = None):
         self.faker = Faker()
+        self.faker_au = Faker('en_AU')
         if seed is not None:
             Faker.seed(seed)
 
@@ -89,13 +99,13 @@ class FakeDataService:
         if "address" in t:
             if "street" in t:
                 return self.faker.street_address()
-            if "city" in t:
+            if "city" in t or "suburb" in t:
                 return self.faker.city()
             if "state" in t:
                 return self.faker.state()
-            if "zip" in t or "postal" in t:
+            if "zip" in t or "postal" in t or "postcode" in t:
                 return self.faker.zipcode()
-            return self.faker.address().replace("\n", ", ")
+            return self._generate_address(original_text)
 
         # ---- Government / financial IDs ----------------------------------
         if "ssn" in t or "social security" in t:
@@ -253,6 +263,98 @@ class FakeDataService:
 
         # Fallback — no recognised format
         return fake.strftime("%d/%m/%Y")
+
+    def _generate_address(self, original: str) -> str:
+        """
+        Generate a fake address that mirrors the structure and locale of *original*.
+
+        Locale: uses ``en_AU`` Faker when the original contains an AU state
+        abbreviation (NSW, VIC, …) or a 4-digit postcode; falls back to the
+        default locale otherwise.
+
+        Component detection (regex-based):
+            has_unit    — "Unit N/", "Apt N", or bare "N/" prefix
+            has_street  — street number followed by a word
+            has_suburb  — text between the street line and the state/postcode
+            has_state   — AU state abbreviation found
+            has_postcode — 4-digit token found
+
+        The fake components are assembled in the same order as the original
+        and joined with the same separator (newline or ", ").
+        """
+        s = original.strip()
+
+        # --- Locale detection ---
+        au_state_m = _AU_STATE_RE.search(s)
+        au_pc_m = _AU_POSTCODE_RE.search(s)
+        is_au = bool(au_state_m or au_pc_m)
+        loc = self.faker_au if is_au else self.faker
+
+        # --- Separator ---
+        sep = "\n" if "\n" in s else ", "
+
+        # --- Component detection ---
+        has_unit = bool(
+            re.search(r'(?i)\b(unit|apt|apartment|flat|suite|level)\s+\d+', s)
+            or re.match(r'^\d+/', s)
+        )
+        has_street = bool(re.search(r'\b\d{1,4}[A-Za-z]?\s+\w', s))
+        has_state = bool(au_state_m)
+        has_postcode = bool(au_pc_m)
+
+        # Suburb: text that sits between the street line and the state/postcode.
+        # Strategy: find where the first marker (state or postcode) begins, look
+        # at everything before it, then take the segment after the last street-
+        # type keyword (e.g. "Street", "Rd") or after the last comma.
+        has_suburb = False
+        if has_state or has_postcode:
+            marker_pos = min(
+                au_state_m.start() if au_state_m else len(s),
+                au_pc_m.start() if au_pc_m else len(s),
+            )
+            before = s[:marker_pos].strip().rstrip(',').strip()
+            # Prefer the segment after the last comma (most reliable split)
+            last_comma = before.rfind(',')
+            if last_comma >= 0:
+                candidate = before[last_comma + 1:].strip()
+            elif has_street:
+                # No comma — try to find suburb after the street type keyword
+                st_m = _STREET_TYPE_RE.search(before)
+                candidate = before[st_m.end():].strip() if st_m else ""
+            else:
+                candidate = before
+            has_suburb = len(candidate) > 1
+
+        # --- Build fake components ---
+        parts: list = []
+
+        if has_street:
+            if has_unit:
+                unit_n = self.faker.random_int(1, 20)
+                st_n = self.faker.random_int(1, 200)
+                parts.append(f"Unit {unit_n}/{st_n} {loc.street_name()}")
+            else:
+                parts.append(loc.street_address())
+
+        # Suburb, state, and postcode form a single space-joined "city line"
+        # (e.g. "Blacktown VIC 3012") so they are never split by the address
+        # separator.  Only add as one part to preserve the original structure.
+        city_line: list = []
+        if has_suburb:
+            city_line.append(loc.city())
+        if has_state and has_postcode:
+            city_line.append(f"{loc.state_abbr()} {loc.postcode()}")
+        elif has_state:
+            city_line.append(loc.state_abbr())
+        elif has_postcode:
+            city_line.append(loc.postcode())
+        if city_line:
+            parts.append(" ".join(city_line))
+
+        if not parts:
+            return loc.address().replace("\n", sep)
+
+        return sep.join(parts)
 
     # ------------------------------------------------------------------
     # Name structure helpers
