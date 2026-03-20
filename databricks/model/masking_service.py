@@ -254,46 +254,69 @@ class MaskingService:
         draw = ImageDraw.Draw(image)
         img_width, img_height = image.size
         logger.info(
-            "apply_masks: image %dx%d, %d entities",
+            "apply_masks: image %dx%d, %d entities (%d approved)",
             img_width, img_height, len(entities),
+            sum(1 for e in entities if e.get("approved", True)),
         )
 
-        for entity in entities:
+        label_counters: Dict[str, int] = {}
+        consistency_map: Dict[str, str] = {}
+
+        approved = [e for e in entities if e.get("approved", True)]
+
+        # Seed consistency map from old-format entities so partial name variants
+        # inherit their replacement from the corresponding full-name entity.
+        old_format = [e for e in approved if not e.get("occurrences")]
+        if old_format:
+            self._seed_consistency_map(old_format, consistency_map)
+
+        for entity in approved:
             raw_strategy = entity.get("strategy", "")
             strategy = self._STRATEGY_MAP.get(raw_strategy, "redact")
-            replacement_text = entity.get("replacement_text", "")
-            # Use occurrences if present (new format produced by _merge_entity_variants),
-            # otherwise fall back to bounding_boxes / bounding_box (old format).
-            if entity.get("occurrences"):
-                bboxes = [
-                    occ["bounding_box"]
-                    for occ in entity["occurrences"]
-                    if occ.get("bounding_box") and len(occ["bounding_box"]) == 4
-                ]
-            else:
-                bboxes = self._resolve_bboxes(entity)
-
             fill = (0, 0, 0) if strategy == "redact" else mask_color
 
-            for bbox in bboxes:
-                if len(bbox) != 4:
-                    continue
-                x, y, width, height = self._normalize_bbox(bbox, img_width, img_height)
-
-                if width <= 0 or height <= 0:
-                    continue
-
-                # Black Out → solid black rectangle, no text
-                # Fake Data / Entity Label → white rectangle + replacement text
-                draw.rectangle(
-                    [x, y, x + width, y + height],
-                    fill=fill,
-                    outline=border_color,
-                    width=1,
+            if entity.get("occurrences"):
+                # New format: resolve replacement per occurrence so that partial
+                # name variants (e.g. "Stephen" inside "Stephen Parrot") receive
+                # the aligned replacement token slice, matching apply_pdf_masks.
+                for occ in entity["occurrences"]:
+                    bbox = occ.get("bounding_box", [])
+                    if len(bbox) != 4:
+                        continue
+                    occ_original_text = occ.get("original_text", entity.get("original_text", ""))
+                    replacement = self._resolve_occurrence_replacement(
+                        entity, occ_original_text, strategy, label_counters, consistency_map
+                    )
+                    x, y, width, height = self._normalize_bbox(bbox, img_width, img_height)
+                    if width <= 0 or height <= 0:
+                        continue
+                    draw.rectangle(
+                        [x, y, x + width, y + height],
+                        fill=fill,
+                        outline=border_color,
+                        width=1,
+                    )
+                    if strategy != "redact" and replacement:
+                        self._draw_text(draw, replacement, x, y, width, height, text_color)
+            else:
+                # Old format: single replacement for all bounding boxes.
+                replacement = self._resolve_replacement(
+                    entity, strategy, label_counters, consistency_map
                 )
-
-                if strategy != "redact" and replacement_text:
-                    self._draw_text(draw, replacement_text, x, y, width, height, text_color)
+                for bbox in self._resolve_bboxes(entity):
+                    if len(bbox) != 4:
+                        continue
+                    x, y, width, height = self._normalize_bbox(bbox, img_width, img_height)
+                    if width <= 0 or height <= 0:
+                        continue
+                    draw.rectangle(
+                        [x, y, x + width, y + height],
+                        fill=fill,
+                        outline=border_color,
+                        width=1,
+                    )
+                    if strategy != "redact" and replacement:
+                        self._draw_text(draw, replacement, x, y, width, height, text_color)
 
         image.save(output_path, "PNG", quality=95)
         logger.info("apply_masks complete: saved to %s", output_path)
