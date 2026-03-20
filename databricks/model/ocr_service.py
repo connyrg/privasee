@@ -322,11 +322,40 @@ class OCRService:
             "image_base64": None  # No visual representation
         }]
     
+    def _scale_for_vision(self, img: "Image.Image", original_bytes: bytes) -> bytes:
+        """
+        Scale image up to match the effective resolution of the PDF render path.
+
+        The PDF path renders pages at RENDER_ZOOM_FACTOR=2.0 (≈144 DPI), producing
+        ~1190×1684 px for an A4 page.  Images whose longer side is already at or
+        above MIN_VISION_PIXELS are returned unchanged; smaller images are upscaled
+        proportionally so the vision model receives comparable detail.
+
+        Only used for the vision API call — ADI OCR always receives the original
+        bytes to keep OCR coordinate offsets stable.
+        """
+        MIN_VISION_PIXELS = 1200  # ≈144 DPI for an A4 page (~11.7" tall)
+
+        w, h = img.size
+        if max(w, h) >= MIN_VISION_PIXELS:
+            return original_bytes  # already high-res enough
+
+        scale = MIN_VISION_PIXELS / max(w, h)
+        new_w, new_h = int(w * scale), int(h * scale)
+        scaled = img.resize((new_w, new_h), Image.LANCZOS)
+        logger.info(
+            f"Scaled image for vision API: {w}×{h} → {new_w}×{new_h} "
+            f"(×{scale:.2f} to match PDF render quality)"
+        )
+        buf = io.BytesIO()
+        scaled.save(buf, format=img.format or "PNG")
+        return buf.getvalue()
+
     def _process_image(self, image_bytes: bytes) -> List[Dict[str, Any]]:
         """
         OCR an image file with Azure Document Intelligence.
         Also includes the image as base64 for vision API processing.
-        
+
         Requires Azure Document Intelligence OAuth credentials.
         """
         if not self.adi_available:
@@ -335,13 +364,15 @@ class OCRService:
                 "Please set ADI_TENANT_ID, ADI_CLIENT_ID, and ADI_CLIENT_SECRET "
                 "environment variables with valid credentials."
             )
-        
-        # Encode image to base64 for vision API
-        image_b64 = base64.b64encode(image_bytes).decode('utf-8')
 
         # Get image dimensions for normalisation (no extra I/O - bytes already in memory)
         img = Image.open(io.BytesIO(image_bytes))
         img_w, img_h = img.size
+
+        # Scale image for vision API to match PDF render quality (~144 DPI equivalent).
+        # ADI OCR always receives the original bytes so its coordinate offsets are stable.
+        vision_bytes = self._scale_for_vision(img, image_bytes)
+        image_b64 = base64.b64encode(vision_bytes).decode('utf-8')
 
         # OCR the image
         ocr_result = self._ocr_with_adi(image_bytes)
