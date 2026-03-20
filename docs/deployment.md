@@ -16,7 +16,7 @@ CI workflows (`.github/workflows/`) run on PRs to catch failures early:
 | Workflow | Trigger | What it does |
 |---|---|---|
 | `deploy-backend.yml` | PRs touching `backend/` | Runs the full backend test suite |
-| `deploy-frontend.yml` | PRs/pushes touching `frontend/` | Lints and builds the frontend |
+| `deploy-frontend.yml` | PRs/pushes touching `frontend/` | Lints and builds the legacy React frontend (not actively deployed) |
 | `deploy-databricks.yml` | PRs/pushes touching `databricks/` | Placeholder — Databricks CI not yet configured |
 
 ---
@@ -97,8 +97,12 @@ In the Databricks UI (Serving → your endpoint → Edit endpoint → Environmen
 | `DATABRICKS_HOST` | Workspace URL |
 | `DATABRICKS_TOKEN` | Service principal token with Files API read/write access to UC volume |
 | `UC_VOLUME_PATH` | Same value as the backend |
-| `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT` | Azure DI endpoint URL |
-| `AZURE_DOCUMENT_INTELLIGENCE_KEY` | Azure DI API key |
+| `ADI_TENANT_ID` | Azure tenant ID for ADI OAuth |
+| `ADI_CLIENT_ID` | OAuth client ID for Azure Document Intelligence |
+| `ADI_CLIENT_SECRET` | OAuth client secret for Azure Document Intelligence |
+| `ADI_ENDPOINT` | APIM endpoint URL for Azure Document Intelligence |
+| `ADI_APPSPACE_ID` | AppSpace ID (default: `A-007100`) |
+| `ADI_MODEL_ID` | Document Intelligence model ID (default: `prebuilt-layout`) |
 | `VISION_SERVICE_PROVIDER` | `openai` (default) or `claude` |
 | `AZURE_OPENAI_API_KEY` | Required when provider is `openai` |
 | `AZURE_OPENAI_ENDPOINT` | Required when provider is `openai` |

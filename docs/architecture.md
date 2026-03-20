@@ -61,6 +61,7 @@ Key API endpoints:
 
 | Method | Path | Description |
 |---|---|---|
+| `GET` | `/api/health` | Health check |
 | `POST` | `/api/upload` | Upload a document, create a session |
 | `POST` | `/api/process` | Extract entities via Databricks |
 | `POST` | `/api/approve-and-mask` | Apply redactions via Databricks |
@@ -69,7 +70,10 @@ Key API endpoints:
 | `DELETE` | `/api/sessions/{id}` | Delete session and all UC artefacts |
 | `GET` | `/api/files/{folder}/{filename}` | Serve original or masked PDF |
 | `GET` | `/api/templates` | List built-in system templates |
+| `GET` | `/api/templates/{key}` | Get a single system template by key |
+| `POST` | `/api/configs` | Save a named field configuration |
 | `GET` | `/api/configs` | List saved field configurations |
+| `GET` | `/api/configs/{key}` | Get a saved field configuration by key |
 
 ### Databricks Models (`databricks/model/`)
 

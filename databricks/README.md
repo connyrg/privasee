@@ -191,8 +191,12 @@ approved entities. Only entities with `approved: true` are redacted.
 
 | Variable | Description |
 |---|---|
-| `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT` | Azure DI endpoint URL |
-| `AZURE_DOCUMENT_INTELLIGENCE_KEY` | Azure DI API key |
+| `ADI_TENANT_ID` | Azure tenant ID for ADI OAuth |
+| `ADI_CLIENT_ID` | OAuth client ID for Azure Document Intelligence |
+| `ADI_CLIENT_SECRET` | OAuth client secret for Azure Document Intelligence |
+| `ADI_ENDPOINT` | APIM endpoint URL for Azure Document Intelligence |
+| `ADI_APPSPACE_ID` | AppSpace ID (default: `A-007100`) |
+| `ADI_MODEL_ID` | Document Intelligence model ID (default: `prebuilt-layout`) |
 
 #### Vision Service (choose one)
 

@@ -1973,10 +1973,6 @@ def batch_tick(n_intervals, cursor, phase, session_id, poll_count, files, result
     # ------------------------------------------------------------------
     if phase == "polling":
         if poll_count >= 200:
-            try:
-                req.delete(f"{API_BASE_URL}/api/sessions/{session_id}", headers=headers, verify=SSL_VERIFY, timeout=10)
-            except Exception as de:
-                logger.warning("Failed to clean up session %s after polling timeout: %s", session_id, de)
             new_results = results + [{"filename": filename, "session_id": session_id, "entities_found": 0,
                                       "entities_masked": 0, "score": None, "verdict": "Processing failed", "error": "Timed out after 10 minutes."}]
             return _advance(new_results)
@@ -2003,10 +1999,6 @@ def batch_tick(n_intervals, cursor, phase, session_id, poll_count, files, result
             return cursor, "masking_run", session_id, 0, entities, no_update, True, no_update, _progress("Masking entities...")
         if status_val == "error":
             err = poll_data.get("error_message") or "Entity extraction failed."
-            try:
-                req.delete(f"{API_BASE_URL}/api/sessions/{session_id}", headers=headers, verify=SSL_VERIFY, timeout=10)
-            except Exception as de:
-                logger.warning("Failed to clean up session %s after extraction error: %s", session_id, de)
             new_results = results + [{"filename": filename, "session_id": session_id, "entities_found": 0,
                                       "entities_masked": 0, "score": None, "verdict": "Processing failed", "error": err}]
             return _advance(new_results)
@@ -2112,10 +2104,6 @@ def batch_do_blocking(phase, cursor, session_id, current_entities, files, result
             )
             resp.raise_for_status()
         except Exception as exc:
-            try:
-                req.delete(f"{API_BASE_URL}/api/sessions/{new_session_id}", headers=headers, verify=SSL_VERIFY, timeout=10)
-            except Exception as de:
-                logger.warning("Failed to clean up session %s after process error: %s", new_session_id, de)
             new_results = results + [{"filename": filename, "session_id": new_session_id, "entities_found": 0,
                                       "entities_masked": 0, "score": None, "verdict": "Processing failed", "error": str(exc)}]
             return _advance(new_results)
@@ -2331,24 +2319,9 @@ def download_masked_batch(n_clicks_list):
     running=[(Output("batch-reset-btn", "disabled"), True, False)],
     prevent_initial_call=True,
 )
-def batch_reset_workflow(n_clicks: int, results: list, current_session: str | None):
+def batch_reset_workflow(n_clicks: int, _results, _current_session):
     if not n_clicks:
         raise PreventUpdate
-    headers = {"Authorization": f"Key {os.environ.get('POSIT_CONNECT_API_KEY', '')}"}
-    # Delete all completed sessions
-    for r in (results or []):
-        sid = r.get("session_id")
-        if sid:
-            try:
-                req.delete(f"{API_BASE_URL}/api/sessions/{sid}", headers=headers, verify=SSL_VERIFY, timeout=10)
-            except Exception as exc:
-                logger.warning("Failed to delete session %s during batch reset: %s", sid, exc)
-    # Delete the in-progress session if the batch was interrupted mid-run
-    if current_session:
-        try:
-            req.delete(f"{API_BASE_URL}/api/sessions/{current_session}", headers=headers, verify=SSL_VERIFY, timeout=10)
-        except Exception as exc:
-            logger.warning("Failed to delete in-progress session %s during batch reset: %s", current_session, exc)
     return 1, [], [], 0, None, None, 0, [], True, None, None
 
 
@@ -2371,30 +2344,15 @@ def batch_reset_workflow(n_clicks: int, results: list, current_session: str | No
     Output("process-loading", "children", allow_duplicate=True),
     Input("reset-btn", "n_clicks"),
     Input("navbar-reset-btn", "n_clicks"),
-    State("store-session", "data"),
     running=[
         (Output("reset-btn", "disabled"), True, False),
         (Output("navbar-reset-btn", "disabled"), True, False),
     ],
     prevent_initial_call=True,
 )
-def reset_workflow(n_clicks: int, navbar_n_clicks: int, session: dict | None):
+def reset_workflow(n_clicks: int, navbar_n_clicks: int):
     if not n_clicks and not navbar_n_clicks:
         raise PreventUpdate
-    if session:
-        session_id = session.get("session_id")
-        if session_id:
-            headers = {"Authorization": f"Key {os.environ.get('POSIT_CONNECT_API_KEY', '')}"}
-            try:
-                _del_resp = req.delete(
-                    f"{API_BASE_URL}/api/sessions/{session_id}",
-                    headers=headers,
-                    verify=SSL_VERIFY,
-                    timeout=10,
-                )
-                logger.warning("Delete session %s response: %s", session_id, _del_resp.status_code)
-            except Exception as exc:
-                logger.warning("Failed to delete session %s on reset: %s", session_id, exc)
     return 1, None, DEFAULT_FIELDS, None, None, None, None, None, None, True, None
 
 

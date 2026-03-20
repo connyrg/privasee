@@ -86,7 +86,7 @@ Practical examples:
 - New endpoint `POST /api/export` → integration tests in `tests/integration/test_export_endpoint.py`
 - New field added to the Databricks response → contract test update in `tests/contracts/`
 - New field added to the masking payload → integration test update in `tests/integration/test_approve_and_mask_endpoint.py`
-- New endpoint `POST /api/sessions/{id}/verify` → integration tests in `tests/integration/test_verify_endpoint.py` (not yet written — covers 200 with text extraction, 404 on missing masked.pdf, empty entity list)
+- New endpoint `POST /api/sessions/{id}/verify` → integration tests in `tests/integration/test_verify_endpoint.py` (not yet written — should cover: 200 with text extraction, 404 on missing masked.pdf, empty entity list edge case)
 
 Every test must carry one of `@pytest.mark.unit`, `@pytest.mark.integration`,
 or `@pytest.mark.contract` so the Makefile targets select the right subset.
