@@ -262,7 +262,16 @@ class MaskingService:
             raw_strategy = entity.get("strategy", "")
             strategy = self._STRATEGY_MAP.get(raw_strategy, "redact")
             replacement_text = entity.get("replacement_text", "")
-            bboxes = self._resolve_bboxes(entity)
+            # Use occurrences if present (new format produced by _merge_entity_variants),
+            # otherwise fall back to bounding_boxes / bounding_box (old format).
+            if entity.get("occurrences"):
+                bboxes = [
+                    occ["bounding_box"]
+                    for occ in entity["occurrences"]
+                    if occ.get("bounding_box") and len(occ["bounding_box"]) == 4
+                ]
+            else:
+                bboxes = self._resolve_bboxes(entity)
 
             fill = (0, 0, 0) if strategy == "redact" else mask_color
 
