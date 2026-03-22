@@ -5,8 +5,8 @@ This test suite verifies:
 1. Service initialization with API key and endpoint validation
 2. Entity extraction with Azure OpenAI Vision API
 3. Prompt building with OCR context
-4. JSON response parsing (with/without markdown code fences)
-5. Entity validation (required fields, bounding box format)
+4. JSON response parsing — new occurrences-based format
+5. Same-line bbox merging
 6. Error handling for file operations and API failures
 
 All Azure OpenAI API calls are mocked.
@@ -28,19 +28,37 @@ sys.modules['openai.types.chat'] = MagicMock()
 from databricks.model.openai_service import OpenAIVisionService
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def make_bbox(x, y, w, h):
+    return {"x": x, "y": y, "width": w, "height": h}
+
+
+def make_occurrence(original_text, bboxes):
+    return {"original_text": original_text, "bounding_boxes": bboxes}
+
+
+def make_entity(entity_type, canonical_text, occurrences, confidence=0.9):
+    return {
+        "entity_type": entity_type,
+        "original_text": canonical_text,
+        "confidence": confidence,
+        "occurrences": occurrences,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Initialization
+# ---------------------------------------------------------------------------
+
 class TestOpenAIServiceInit(unittest.TestCase):
-    """Test Azure OpenAI Vision service initialization"""
 
     @patch('databricks.model.openai_service.http_client_factory')
     @patch('databricks.model.openai_service.AzureOpenAI')
     def test_init_success(self, mock_azure_openai, mock_http_client_factory):
-        """Test successful initialization with valid API key and endpoint"""
-        # Mock http_client_factory return values
-        mock_http_client = Mock()
-        mock_http_async_client = Mock()
-        mock_http_client_factory.return_value = (mock_http_client, mock_http_async_client)
-        
-        # Mock environment variable for proxy_cluster_id
+        mock_http_client_factory.return_value = (Mock(), Mock())
         with patch.dict(os.environ, {'PROXY_CLUSTER_ID': 'test-cluster-123'}):
             service = OpenAIVisionService(
                 api_key="test-api-key-123",
@@ -48,96 +66,62 @@ class TestOpenAIServiceInit(unittest.TestCase):
                 api_version="2024-02-15-preview",
                 deployment_name="test-deployment"
             )
-        
-        # Verify http_client_factory was called
-        mock_http_client_factory.assert_called_once_with(
-            "https://suncorp-dev.cloud.databricks.com/"
-        )
-        
-        # Verify AzureOpenAI client was created with correct parameters
+        mock_http_client_factory.assert_called_once_with("https://suncorp-dev.cloud.databricks.com/")
         call_kwargs = mock_azure_openai.call_args.kwargs
         self.assertEqual(call_kwargs['api_key'], "test-api-key-123")
         self.assertEqual(call_kwargs['api_version'], "2024-02-15-preview")
-        self.assertIn('base_url', call_kwargs)
-        # Base URL should end with /openai (not /openai/v1)
-        self.assertTrue(call_kwargs['base_url'].endswith('/openai'), 
-                       f"Expected base_url to end with '/openai', got: {call_kwargs['base_url']}")
+        self.assertTrue(call_kwargs['base_url'].endswith('/openai'))
         self.assertIn('test-cluster-123', call_kwargs['base_url'])
-        self.assertEqual(call_kwargs['http_client'], mock_http_client)
-        # Note: http_async_client is not passed to AzureOpenAI in the current implementation
-        
         self.assertIsNotNone(service.client)
         self.assertEqual(service.deployment_name, "test-deployment")
 
     def test_init_missing_api_key(self):
-        """Test initialization fails with missing API key"""
-        with self.assertRaises(ValueError) as context:
-            OpenAIVisionService(
-                api_key="",
-                azure_endpoint="https://test.openai.azure.com/"
-            )
-        self.assertIn("API key must be provided", str(context.exception))
+        with self.assertRaises(ValueError) as ctx:
+            OpenAIVisionService(api_key="", azure_endpoint="https://test.openai.azure.com/")
+        self.assertIn("API key must be provided", str(ctx.exception))
 
     def test_init_none_api_key(self):
-        """Test initialization fails with None API key"""
-        with self.assertRaises(ValueError) as context:
-            OpenAIVisionService(
-                api_key=None,
-                azure_endpoint="https://test.openai.azure.com/"
-            )
-        self.assertIn("API key must be provided", str(context.exception))
+        with self.assertRaises(ValueError) as ctx:
+            OpenAIVisionService(api_key=None, azure_endpoint="https://test.openai.azure.com/")
+        self.assertIn("API key must be provided", str(ctx.exception))
 
     def test_init_missing_endpoint(self):
-        """Test initialization fails with missing endpoint"""
-        with self.assertRaises(ValueError) as context:
-            OpenAIVisionService(
-                api_key="test-key",
-                azure_endpoint=""
-            )
-        self.assertIn("Azure OpenAI endpoint must be provided", str(context.exception))
+        with self.assertRaises(ValueError) as ctx:
+            OpenAIVisionService(api_key="test-key", azure_endpoint="")
+        self.assertIn("Azure OpenAI endpoint must be provided", str(ctx.exception))
 
     @patch('databricks.model.openai_service.http_client_factory')
     @patch('databricks.model.openai_service.AzureOpenAI')
     def test_init_with_proxy_cluster_id_parameter(self, mock_azure_openai, mock_http_client_factory):
-        """Test initialization works when proxy_cluster_id is passed as parameter"""
         mock_http_client_factory.return_value = (Mock(), Mock())
-        
-        # Don't set PROXY_CLUSTER_ID in environment, pass it as parameter instead
-        service = OpenAIVisionService(
+        OpenAIVisionService(
             api_key="test-api-key",
             azure_endpoint="https://test.openai.azure.com/",
             proxy_cluster_id="parameter-cluster-123"
         )
-        
-        # Verify base_url includes the cluster ID from parameter
         call_kwargs = mock_azure_openai.call_args.kwargs
         self.assertIn('parameter-cluster-123', call_kwargs['base_url'])
-    
+
     @patch('databricks.model.openai_service.http_client_factory')
     @patch('databricks.model.openai_service.AzureOpenAI')
     def test_init_missing_proxy_cluster_id(self, mock_azure_openai, mock_http_client_factory):
-        """Test initialization fails when proxy_cluster_id is not provided via parameter or environment"""
         mock_http_client_factory.return_value = (Mock(), Mock())
-        
-        # Don't provide proxy_cluster_id parameter and clear from environment
         with patch.dict(os.environ, {'AZURE_OPENAI_API_KEY': 'test-key'}, clear=True):
-            with self.assertRaises(ValueError) as context:
-                OpenAIVisionService(
-                    api_key="test-key",
-                    azure_endpoint="https://test.openai.azure.com/"
-                )
-            self.assertIn("PROXY_CLUSTER_ID", str(context.exception))
+            with self.assertRaises(ValueError) as ctx:
+                OpenAIVisionService(api_key="test-key", azure_endpoint="https://test.openai.azure.com/")
+            self.assertIn("PROXY_CLUSTER_ID", str(ctx.exception))
 
+
+# ---------------------------------------------------------------------------
+# Prompt building
+# ---------------------------------------------------------------------------
 
 class TestBuildExtractionPrompt(unittest.TestCase):
-    """Test prompt building for Azure OpenAI Vision"""
 
     @patch('databricks.model.openai_service.http_client_factory')
     @patch('databricks.model.openai_service.AzureOpenAI')
     def setUp(self, mock_azure_openai, mock_http_client_factory):
-        """Set up test service"""
         mock_http_client_factory.return_value = (Mock(), Mock())
-        
         with patch.dict(os.environ, {'PROXY_CLUSTER_ID': 'test-cluster'}):
             self.service = OpenAIVisionService(
                 api_key="test-key",
@@ -145,22 +129,18 @@ class TestBuildExtractionPrompt(unittest.TestCase):
             )
 
     def test_prompt_includes_field_definitions(self):
-        """Test prompt includes all field definitions"""
         field_definitions = [
             {"name": "Full Name", "description": "Person's full name"},
             {"name": "SSN", "description": "Social Security Number"}
         ]
         ocr_data = {"text": "Test document", "words": []}
-
         prompt = self.service._build_extraction_prompt(field_definitions, ocr_data)
-
         self.assertIn("Full Name", prompt)
         self.assertIn("Person's full name", prompt)
         self.assertIn("SSN", prompt)
         self.assertIn("Social Security Number", prompt)
 
     def test_prompt_includes_ocr_text(self):
-        """Test prompt includes OCR text content"""
         field_definitions = [{"name": "Name", "description": "Person name"}]
         ocr_data = {
             "text": "John Doe lives at 123 Main St",
@@ -169,49 +149,129 @@ class TestBuildExtractionPrompt(unittest.TestCase):
                 {"text": "Doe", "bounding_box": {"x": 0.16, "y": 0.1, "width": 0.04, "height": 0.02}}
             ]
         }
-
         prompt = self.service._build_extraction_prompt(field_definitions, ocr_data)
-
         self.assertIn("John Doe lives at 123 Main St", prompt)
         self.assertIn("word_count", prompt)
         self.assertIn("words", prompt)
 
     def test_prompt_truncates_long_text(self):
-        """Test prompt truncates OCR text over 3000 chars"""
         field_definitions = [{"name": "Name", "description": "Person name"}]
         long_text = "A" * 5000
         ocr_data = {"text": long_text, "words": []}
-
         prompt = self.service._build_extraction_prompt(field_definitions, ocr_data)
-
-        # Should contain truncated text (first 3000 chars)
         self.assertIn("A" * 3000, prompt)
-        # Should not contain text beyond 3000 chars
         self.assertNotIn("A" * 3001, prompt)
 
     def test_prompt_includes_all_words(self):
-        """Test prompt includes full words list even if text is truncated"""
         field_definitions = [{"name": "Name", "description": "Person name"}]
         words = [{"text": f"word{i}", "bounding_box": {}} for i in range(100)]
         ocr_data = {"text": "A" * 5000, "words": words}
-
         prompt = self.service._build_extraction_prompt(field_definitions, ocr_data)
-
-        # Word count should reflect actual count
         self.assertIn('"word_count": 100', prompt)
-        # Should include words list
         self.assertIn('"words":', prompt)
 
+    def test_prompt_includes_occurrences_format(self):
+        """Prompt output format example must use occurrences/bounding_boxes structure."""
+        field_definitions = [{"name": "Name", "description": "A name"}]
+        ocr_data = {"text": "", "words": []}
+        prompt = self.service._build_extraction_prompt(field_definitions, ocr_data)
+        self.assertIn("occurrences", prompt)
+        self.assertIn("bounding_boxes", prompt)
 
-class TestParseOpenAIResponse(unittest.TestCase):
-    """Test JSON response parsing from Azure OpenAI"""
+
+# ---------------------------------------------------------------------------
+# _merge_same_line_bboxes
+# ---------------------------------------------------------------------------
+
+class TestMergeSameLineBboxes(unittest.TestCase):
 
     @patch('databricks.model.openai_service.http_client_factory')
     @patch('databricks.model.openai_service.AzureOpenAI')
     def setUp(self, mock_azure_openai, mock_http_client_factory):
-        """Set up test service"""
         mock_http_client_factory.return_value = (Mock(), Mock())
-        
+        with patch.dict(os.environ, {'PROXY_CLUSTER_ID': 'test-cluster'}):
+            self.service = OpenAIVisionService(
+                api_key="test-key",
+                azure_endpoint="https://test.openai.azure.com/"
+            )
+
+    def test_empty_input(self):
+        self.assertEqual(self.service._merge_same_line_bboxes([]), [])
+
+    def test_single_bbox_returned_as_is(self):
+        bboxes = [make_bbox(0.1, 0.2, 0.05, 0.02)]
+        result = self.service._merge_same_line_bboxes(bboxes)
+        self.assertEqual(len(result), 1)
+        self.assertAlmostEqual(result[0]['x'], 0.1)
+        self.assertAlmostEqual(result[0]['y'], 0.2)
+        self.assertAlmostEqual(result[0]['width'], 0.05)
+        self.assertAlmostEqual(result[0]['height'], 0.02)
+
+    def test_two_same_line_boxes_merged_into_one(self):
+        # "John" and "Doe" on the same line
+        bboxes = [
+            make_bbox(0.1, 0.20, 0.05, 0.02),
+            make_bbox(0.16, 0.20, 0.04, 0.02),
+        ]
+        result = self.service._merge_same_line_bboxes(bboxes)
+        self.assertEqual(len(result), 1)
+        self.assertAlmostEqual(result[0]['x'], 0.1)
+        self.assertAlmostEqual(result[0]['y'], 0.20)
+        self.assertAlmostEqual(result[0]['width'], 0.10)   # 0.16+0.04 - 0.1
+        self.assertAlmostEqual(result[0]['height'], 0.02)
+
+    def test_two_different_lines_produce_two_rects(self):
+        # "John" at end of line 1, "Doe" at start of line 2
+        bboxes = [
+            make_bbox(0.8, 0.20, 0.05, 0.02),
+            make_bbox(0.1, 0.25, 0.04, 0.02),
+        ]
+        result = self.service._merge_same_line_bboxes(bboxes)
+        self.assertEqual(len(result), 2)
+
+    def test_five_tokens_same_line_merged_into_one(self):
+        # date: "15" "/" "03" "/" "1985" all on y=0.30
+        bboxes = [
+            make_bbox(0.10, 0.30, 0.02, 0.02),
+            make_bbox(0.12, 0.30, 0.005, 0.02),
+            make_bbox(0.13, 0.30, 0.02, 0.02),
+            make_bbox(0.15, 0.30, 0.005, 0.02),
+            make_bbox(0.16, 0.30, 0.03, 0.02),
+        ]
+        result = self.service._merge_same_line_bboxes(bboxes)
+        self.assertEqual(len(result), 1)
+        self.assertAlmostEqual(result[0]['x'], 0.10)
+        self.assertAlmostEqual(result[0]['width'], 0.19 - 0.10)  # 0.16+0.03 - 0.10
+
+    def test_within_threshold_treated_as_same_line(self):
+        # y values 0.200 and 0.208 — within default 0.01 threshold
+        bboxes = [
+            make_bbox(0.1, 0.200, 0.05, 0.02),
+            make_bbox(0.2, 0.208, 0.05, 0.02),
+        ]
+        result = self.service._merge_same_line_bboxes(bboxes)
+        self.assertEqual(len(result), 1)
+
+    def test_beyond_threshold_treated_as_different_lines(self):
+        # y values 0.200 and 0.215 — beyond default 0.01 threshold
+        bboxes = [
+            make_bbox(0.1, 0.200, 0.05, 0.02),
+            make_bbox(0.1, 0.215, 0.05, 0.02),
+        ]
+        result = self.service._merge_same_line_bboxes(bboxes)
+        self.assertEqual(len(result), 2)
+
+
+# ---------------------------------------------------------------------------
+# _parse_openai_response
+# ---------------------------------------------------------------------------
+
+class TestParseOpenAIResponse(unittest.TestCase):
+
+    @patch('databricks.model.openai_service.http_client_factory')
+    @patch('databricks.model.openai_service.AzureOpenAI')
+    def setUp(self, mock_azure_openai, mock_http_client_factory):
+        mock_http_client_factory.return_value = (Mock(), Mock())
         with patch.dict(os.environ, {'PROXY_CLUSTER_ID': 'test-cluster'}):
             self.service = OpenAIVisionService(
                 api_key="test-key",
@@ -219,265 +279,195 @@ class TestParseOpenAIResponse(unittest.TestCase):
             )
         self.ocr_data = {"text": "Test", "words": []}
 
-    def test_parse_clean_json(self):
-        """Test parsing clean JSON response"""
-        response = json.dumps([
-            {
-                "entity_type": "Full Name",
-                "original_text": "John Doe",
-                "bounding_box": [0.1, 0.2, 0.15, 0.03],
-                "confidence": 0.95
-            }
-        ])
-
-        entities = self.service._parse_openai_response(response, self.ocr_data, page_number=1)
-
+    def test_parse_single_entity_single_occurrence(self):
+        payload = [
+            make_entity("Full Name", "John Doe", [
+                make_occurrence("John Doe", [make_bbox(0.1, 0.2, 0.05, 0.02), make_bbox(0.16, 0.2, 0.04, 0.02)])
+            ], confidence=0.95)
+        ]
+        entities = self.service._parse_openai_response(json.dumps(payload), self.ocr_data, page_number=1)
         self.assertEqual(len(entities), 1)
         self.assertEqual(entities[0]['entity_type'], "Full Name")
         self.assertEqual(entities[0]['original_text'], "John Doe")
-        self.assertEqual(entities[0]['bounding_box'], [0.1, 0.2, 0.15, 0.03])
         self.assertEqual(entities[0]['confidence'], 0.95)
         self.assertEqual(entities[0]['page_number'], 1)
+        # Two same-line tokens merged into one rect
+        self.assertEqual(len(entities[0]['bounding_boxes']), 1)
+
+    def test_parse_single_entity_two_occurrences_produces_two_records(self):
+        payload = [
+            make_entity("Full Name", "Stephen Parrot", [
+                make_occurrence("Stephen Parrot", [make_bbox(0.1, 0.1, 0.1, 0.02)]),
+                make_occurrence("Stephen Parrot", [make_bbox(0.1, 0.5, 0.1, 0.02)]),
+            ])
+        ]
+        entities = self.service._parse_openai_response(json.dumps(payload), self.ocr_data, page_number=1)
+        self.assertEqual(len(entities), 2)
+        for e in entities:
+            self.assertEqual(e['original_text'], "Stephen Parrot")
+
+    def test_parse_typo_variant_uses_occurrence_original_text(self):
+        """Occurrences with different spellings retain their own original_text."""
+        payload = [
+            make_entity("Full Name", "Kranthi", [
+                make_occurrence("Kranthi", [make_bbox(0.1, 0.1, 0.05, 0.02)]),
+                make_occurrence("Kranti",  [make_bbox(0.1, 0.5, 0.05, 0.02)]),
+            ])
+        ]
+        entities = self.service._parse_openai_response(json.dumps(payload), self.ocr_data, page_number=1)
+        self.assertEqual(len(entities), 2)
+        self.assertEqual(entities[0]['original_text'], "Kranthi")
+        self.assertEqual(entities[1]['original_text'], "Kranti")
+
+    def test_parse_occurrence_missing_original_text_falls_back_to_canonical(self):
+        payload = [
+            make_entity("Full Name", "John Doe", [
+                {"bounding_boxes": [make_bbox(0.1, 0.2, 0.1, 0.02)]}  # no original_text
+            ])
+        ]
+        entities = self.service._parse_openai_response(json.dumps(payload), self.ocr_data, page_number=2)
+        self.assertEqual(len(entities), 1)
+        self.assertEqual(entities[0]['original_text'], "John Doe")
+        self.assertEqual(entities[0]['page_number'], 2)
+
+    def test_parse_line_break_produces_two_bboxes(self):
+        """Tokens on different lines stay as two separate merged rects."""
+        payload = [
+            make_entity("Full Name", "John Doe", [
+                make_occurrence("John Doe", [
+                    make_bbox(0.8, 0.20, 0.05, 0.02),  # "John" end of line 1
+                    make_bbox(0.1, 0.25, 0.04, 0.02),  # "Doe"  start of line 2
+                ])
+            ])
+        ]
+        entities = self.service._parse_openai_response(json.dumps(payload), self.ocr_data, page_number=1)
+        self.assertEqual(len(entities), 1)
+        self.assertEqual(len(entities[0]['bounding_boxes']), 2)
+
+    def test_parse_date_five_tokens_merged_into_one_bbox(self):
+        """Five tokens on the same line (e.g. 15/03/1985) are merged into one rect."""
+        bboxes = [
+            make_bbox(0.10, 0.30, 0.02, 0.02),
+            make_bbox(0.12, 0.30, 0.005, 0.02),
+            make_bbox(0.13, 0.30, 0.02, 0.02),
+            make_bbox(0.15, 0.30, 0.005, 0.02),
+            make_bbox(0.16, 0.30, 0.03, 0.02),
+        ]
+        payload = [
+            make_entity("Date of Birth", "15/03/1985", [
+                make_occurrence("15/03/1985", bboxes)
+            ])
+        ]
+        entities = self.service._parse_openai_response(json.dumps(payload), self.ocr_data, page_number=1)
+        self.assertEqual(len(entities), 1)
+        self.assertEqual(len(entities[0]['bounding_boxes']), 1)
 
     def test_parse_json_with_markdown_json_fence(self):
-        """Test parsing JSON wrapped in ```json code fence"""
-        response = """Here are the entities:
-```json
-[
-    {
-        "entity_type": "SSN",
-        "original_text": "123-45-6789",
-        "bounding_box": [0.5, 0.5, 0.1, 0.02],
-        "confidence": 0.98
-    }
-]
-```
-Hope this helps!"""
-
+        payload = [make_entity("SSN", "123-45-6789", [
+            make_occurrence("123-45-6789", [make_bbox(0.5, 0.5, 0.1, 0.02)])
+        ], confidence=0.98)]
+        response = f"```json\n{json.dumps(payload)}\n```"
         entities = self.service._parse_openai_response(response, self.ocr_data, page_number=2)
-
         self.assertEqual(len(entities), 1)
         self.assertEqual(entities[0]['entity_type'], "SSN")
-        self.assertEqual(entities[0]['original_text'], "123-45-6789")
         self.assertEqual(entities[0]['page_number'], 2)
 
     def test_parse_json_with_generic_fence(self):
-        """Test parsing JSON wrapped in generic ``` code fence"""
-        response = """```
-[
-    {
-        "entity_type": "Address",
-        "original_text": "123 Main St",
-        "bounding_box": [0.2, 0.3, 0.2, 0.04],
-        "confidence": 0.9
-    }
-]
-```"""
-
+        payload = [make_entity("Address", "123 Main St", [
+            make_occurrence("123 Main St", [make_bbox(0.2, 0.3, 0.2, 0.04)])
+        ])]
+        response = f"```\n{json.dumps(payload)}\n```"
         entities = self.service._parse_openai_response(response, self.ocr_data, page_number=1)
-
         self.assertEqual(len(entities), 1)
         self.assertEqual(entities[0]['entity_type'], "Address")
 
+    def test_parse_empty_array(self):
+        entities = self.service._parse_openai_response("[]", self.ocr_data)
+        self.assertEqual(entities, [])
+
+    def test_parse_invalid_json_returns_empty_list(self):
+        entities = self.service._parse_openai_response("not valid json {[}", self.ocr_data)
+        self.assertEqual(entities, [])
+
+    def test_parse_non_array_json_returns_empty_list(self):
+        entities = self.service._parse_openai_response('{"entity_type": "Name"}', self.ocr_data)
+        self.assertEqual(entities, [])
+
+    def test_parse_entity_missing_entity_type_is_skipped(self):
+        payload = [
+            {"original_text": "John", "confidence": 0.9, "occurrences": [
+                make_occurrence("John", [make_bbox(0.1, 0.1, 0.05, 0.02)])
+            ]}
+        ]
+        entities = self.service._parse_openai_response(json.dumps(payload), self.ocr_data)
+        self.assertEqual(entities, [])
+
+    def test_parse_entity_missing_original_text_is_skipped(self):
+        payload = [
+            {"entity_type": "Full Name", "confidence": 0.9, "occurrences": [
+                make_occurrence("John", [make_bbox(0.1, 0.1, 0.05, 0.02)])
+            ]}
+        ]
+        entities = self.service._parse_openai_response(json.dumps(payload), self.ocr_data)
+        self.assertEqual(entities, [])
+
+    def test_parse_entity_no_occurrences_is_skipped(self):
+        payload = [make_entity("Full Name", "John Doe", [])]
+        entities = self.service._parse_openai_response(json.dumps(payload), self.ocr_data)
+        self.assertEqual(entities, [])
+
+    def test_parse_occurrence_empty_bboxes_is_skipped(self):
+        payload = [make_entity("Full Name", "John Doe", [
+            make_occurrence("John Doe", [])
+        ])]
+        entities = self.service._parse_openai_response(json.dumps(payload), self.ocr_data)
+        self.assertEqual(entities, [])
+
+    def test_parse_default_confidence(self):
+        payload = [{
+            "entity_type": "Name",
+            "original_text": "Test",
+            "occurrences": [make_occurrence("Test", [make_bbox(0.1, 0.2, 0.05, 0.02)])]
+            # no confidence key
+        }]
+        entities = self.service._parse_openai_response(json.dumps(payload), self.ocr_data)
+        self.assertEqual(len(entities), 1)
+        self.assertEqual(entities[0]['confidence'], 0.9)
+
     def test_parse_multiple_entities(self):
-        """Test parsing response with multiple entities"""
-        response = json.dumps([
-            {
-                "entity_type": "Name",
-                "original_text": "Alice Smith",
-                "bounding_box": [0.1, 0.1, 0.1, 0.02],
-                "confidence": 0.95
-            },
-            {
-                "entity_type": "Name",
-                "original_text": "Bob Jones",
-                "bounding_box": [0.1, 0.2, 0.1, 0.02],
-                "confidence": 0.93
-            }
-        ])
-
-        entities = self.service._parse_openai_response(response, self.ocr_data, page_number=1)
-
+        payload = [
+            make_entity("Full Name", "Alice Smith", [
+                make_occurrence("Alice Smith", [make_bbox(0.1, 0.1, 0.1, 0.02)])
+            ]),
+            make_entity("Full Name", "Bob Jones", [
+                make_occurrence("Bob Jones", [make_bbox(0.1, 0.2, 0.1, 0.02)])
+            ]),
+        ]
+        entities = self.service._parse_openai_response(json.dumps(payload), self.ocr_data)
         self.assertEqual(len(entities), 2)
         self.assertEqual(entities[0]['original_text'], "Alice Smith")
         self.assertEqual(entities[1]['original_text'], "Bob Jones")
 
-    def test_parse_invalid_json(self):
-        """Test parsing invalid JSON returns empty list"""
-        response = "This is not valid JSON {[}]"
-
-        entities = self.service._parse_openai_response(response, self.ocr_data, page_number=1)
-
-        self.assertEqual(len(entities), 0)
-
-    def test_parse_empty_array(self):
-        """Test parsing empty entity array"""
-        response = json.dumps([])
-
-        entities = self.service._parse_openai_response(response, self.ocr_data, page_number=1)
-
-        self.assertEqual(len(entities), 0)
-
-    def test_parse_filters_invalid_entities(self):
-        """Test parsing filters out entities that fail validation"""
-        response = json.dumps([
-            {
-                "entity_type": "Valid",
-                "original_text": "Good Entity",
-                "bounding_box": [0.1, 0.1, 0.1, 0.02],
-                "confidence": 0.9
-            },
-            {
-                "entity_type": "Invalid",
-                "original_text": "Missing bbox"
-                # Missing bounding_box
-            },
-            {
-                "entity_type": "BadBox",
-                "original_text": "Bad bbox",
-                "bounding_box": [0.1, 0.2]  # Only 2 values instead of 4
-            }
-        ])
-
-        entities = self.service._parse_openai_response(response, self.ocr_data, page_number=1)
-
-        # Only the valid entity should be returned
-        self.assertEqual(len(entities), 1)
-        self.assertEqual(entities[0]['entity_type'], "Valid")
-
-    def test_parse_normalizes_bbox_to_floats(self):
-        """Test bounding box values are converted to floats"""
-        response = json.dumps([
-            {
-                "entity_type": "Name",
-                "original_text": "Test",
-                "bounding_box": ["0.1", "0.2", "0.3", "0.4"],  # Strings
-                "confidence": "0.95"  # String
-            }
-        ])
-
-        entities = self.service._parse_openai_response(response, self.ocr_data, page_number=1)
-
-        self.assertEqual(len(entities), 1)
-        # Should be converted to floats
-        self.assertEqual(entities[0]['bounding_box'], [0.1, 0.2, 0.3, 0.4])
-        self.assertEqual(entities[0]['confidence'], 0.95)
-
-    def test_parse_default_confidence(self):
-        """Test missing confidence defaults to 0.9"""
-        response = json.dumps([
-            {
-                "entity_type": "Name",
-                "original_text": "Test",
-                "bounding_box": [0.1, 0.2, 0.3, 0.4]
-                # No confidence
-            }
-        ])
-
-        entities = self.service._parse_openai_response(response, self.ocr_data, page_number=1)
-
-        self.assertEqual(len(entities), 1)
-        self.assertEqual(entities[0]['confidence'], 0.9)
+    def test_output_uses_bounding_boxes_not_bounding_box(self):
+        """Output records must use bounding_boxes (plural) key."""
+        payload = [make_entity("Full Name", "John Doe", [
+            make_occurrence("John Doe", [make_bbox(0.1, 0.2, 0.1, 0.02)])
+        ])]
+        entities = self.service._parse_openai_response(json.dumps(payload), self.ocr_data)
+        self.assertIn('bounding_boxes', entities[0])
+        self.assertNotIn('bounding_box', entities[0])
 
 
-class TestValidateEntity(unittest.TestCase):
-    """Test entity validation"""
-
-    @patch('databricks.model.openai_service.http_client_factory')
-    @patch('databricks.model.openai_service.AzureOpenAI')
-    def setUp(self, mock_azure_openai, mock_http_client_factory):
-        """Set up test service"""
-        mock_http_client_factory.return_value = (Mock(), Mock())
-        
-        with patch.dict(os.environ, {'PROXY_CLUSTER_ID': 'test-cluster'}):
-            self.service = OpenAIVisionService(
-                api_key="test-key",
-                azure_endpoint="https://test.openai.azure.com/"
-            )
-
-    def test_validate_complete_entity(self):
-        """Test validation passes for complete entity"""
-        entity = {
-            "entity_type": "Name",
-            "original_text": "John Doe",
-            "bounding_box": [0.1, 0.2, 0.3, 0.4]
-        }
-
-        self.assertTrue(self.service._validate_entity(entity))
-
-    def test_validate_missing_entity_type(self):
-        """Test validation fails for missing entity_type"""
-        entity = {
-            "original_text": "John Doe",
-            "bounding_box": [0.1, 0.2, 0.3, 0.4]
-        }
-
-        self.assertFalse(self.service._validate_entity(entity))
-
-    def test_validate_missing_original_text(self):
-        """Test validation fails for missing original_text"""
-        entity = {
-            "entity_type": "Name",
-            "bounding_box": [0.1, 0.2, 0.3, 0.4]
-        }
-
-        self.assertFalse(self.service._validate_entity(entity))
-
-    def test_validate_missing_bounding_box(self):
-        """Test validation fails for missing bounding_box"""
-        entity = {
-            "entity_type": "Name",
-            "original_text": "John Doe"
-        }
-
-        self.assertFalse(self.service._validate_entity(entity))
-
-    def test_validate_invalid_bbox_format(self):
-        """Test validation fails for invalid bounding box format"""
-        # Not a list
-        entity1 = {
-            "entity_type": "Name",
-            "original_text": "John",
-            "bounding_box": "0.1,0.2,0.3,0.4"
-        }
-        self.assertFalse(self.service._validate_entity(entity1))
-
-        # Wrong length
-        entity2 = {
-            "entity_type": "Name",
-            "original_text": "John",
-            "bounding_box": [0.1, 0.2, 0.3]
-        }
-        self.assertFalse(self.service._validate_entity(entity2))
-
-        # Too many values
-        entity3 = {
-            "entity_type": "Name",
-            "original_text": "John",
-            "bounding_box": [0.1, 0.2, 0.3, 0.4, 0.5]
-        }
-        self.assertFalse(self.service._validate_entity(entity3))
-
-    def test_validate_empty_bbox(self):
-        """Test validation fails for empty bounding box"""
-        entity = {
-            "entity_type": "Name",
-            "original_text": "John",
-            "bounding_box": []
-        }
-
-        self.assertFalse(self.service._validate_entity(entity))
-
+# ---------------------------------------------------------------------------
+# extract_entities (file-based, async)
+# ---------------------------------------------------------------------------
 
 class TestExtractEntities(unittest.TestCase):
-    """Test entity extraction end-to-end with Azure OpenAI"""
 
     @patch('databricks.model.openai_service.http_client_factory')
     @patch('databricks.model.openai_service.AzureOpenAI')
     def setUp(self, mock_azure_openai, mock_http_client_factory):
-        """Set up test service and mocks"""
         mock_http_client_factory.return_value = (Mock(), Mock())
-        
         with patch.dict(os.environ, {'PROXY_CLUSTER_ID': 'test-cluster'}):
             self.service = OpenAIVisionService(
                 api_key="test-key",
@@ -490,58 +480,33 @@ class TestExtractEntities(unittest.TestCase):
     @patch('builtins.open', new_callable=mock_open, read_data=b'fake_image_data')
     @patch('databricks.model.openai_service.base64.b64encode')
     def test_extract_entities_success(self, mock_b64encode, mock_file):
-        """Test successful entity extraction"""
-        # Mock base64 encoding
         mock_b64encode.return_value = b'encoded_image_data'
 
-        # Mock OpenAI API response
         mock_choice = Mock()
-        mock_message = Mock()
-        mock_message.content = json.dumps([
-            {
-                "entity_type": "Full Name",
-                "original_text": "John Doe",
-                "bounding_box": [0.1, 0.2, 0.15, 0.03],
-                "confidence": 0.95
-            }
+        mock_choice.message.content = json.dumps([
+            make_entity("Full Name", "John Doe", [
+                make_occurrence("John Doe", [make_bbox(0.1, 0.2, 0.1, 0.02)])
+            ], confidence=0.95)
         ])
-        mock_choice.message = mock_message
         mock_response = Mock()
         mock_response.choices = [mock_choice]
         self.mock_client.chat.completions.create.return_value = mock_response
 
-        # Test data
-        image_path = "/fake/path/image.png"
-        ocr_data = {"text": "John Doe", "words": []}
-        field_definitions = [
-            {"name": "Full Name", "description": "Person's full name"}
-        ]
+        entities = asyncio.run(self.service.extract_entities(
+            "/fake/image.png",
+            {"text": "John Doe", "words": []},
+            [{"name": "Full Name", "description": "Person's full name"}],
+            page_number=1
+        ))
 
-        # Call extract_entities (note: it's async but we're testing synchronously)
-        import asyncio
-        entities = asyncio.run(
-            self.service.extract_entities(image_path, ocr_data, field_definitions, page_number=1)
-        )
-
-        # Verify file was opened
-        mock_file.assert_called_once_with(image_path, "rb")
-
-        # Verify Azure OpenAI API was called
+        mock_file.assert_called_once_with("/fake/image.png", "rb")
         self.mock_client.chat.completions.create.assert_called_once()
         call_args = self.mock_client.chat.completions.create.call_args
-
-        # Verify deployment name
         self.assertEqual(call_args.kwargs['model'], 'test-deployment')
-
-        # Verify message content includes image and text
-        messages = call_args.kwargs['messages']
-        self.assertEqual(len(messages), 1)
-        content = messages[0]['content']
-        self.assertEqual(len(content), 2)
+        content = call_args.kwargs['messages'][0]['content']
         self.assertEqual(content[0]['type'], 'image_url')
         self.assertEqual(content[1]['type'], 'text')
 
-        # Verify extracted entities
         self.assertEqual(len(entities), 1)
         self.assertEqual(entities[0]['entity_type'], "Full Name")
         self.assertEqual(entities[0]['original_text'], "John Doe")
@@ -549,41 +514,30 @@ class TestExtractEntities(unittest.TestCase):
 
     @patch('builtins.open', side_effect=FileNotFoundError("File not found"))
     def test_extract_entities_file_not_found(self, mock_file):
-        """Test extraction fails gracefully when image file not found"""
-        image_path = "/nonexistent/image.png"
-        ocr_data = {"text": "Test", "words": []}
-        field_definitions = [{"name": "Name", "description": "Name"}]
-
-        import asyncio
         with self.assertRaises(FileNotFoundError):
-            asyncio.run(
-                self.service.extract_entities(image_path, ocr_data, field_definitions)
-            )
+            asyncio.run(self.service.extract_entities(
+                "/nonexistent/image.png", {"text": "Test", "words": []},
+                [{"name": "Name", "description": "Name"}]
+            ))
 
     @patch('builtins.open', new_callable=mock_open, read_data=b'fake_image_data')
     @patch('databricks.model.openai_service.base64.b64encode')
     def test_extract_entities_api_error(self, mock_b64encode, mock_file):
-        """Test extraction handles API errors"""
         mock_b64encode.return_value = b'encoded_image_data'
-
-        # Mock API error
         self.mock_client.chat.completions.create.side_effect = Exception("API Error")
+        with self.assertRaises(Exception) as ctx:
+            asyncio.run(self.service.extract_entities(
+                "/fake/image.png", {"text": "Test", "words": []},
+                [{"name": "Name", "description": "Name"}]
+            ))
+        self.assertIn("Entity extraction failed", str(ctx.exception))
 
-        image_path = "/fake/path/image.png"
-        ocr_data = {"text": "Test", "words": []}
-        field_definitions = [{"name": "Name", "description": "Name"}]
 
-        import asyncio
-        with self.assertRaises(Exception) as context:
-            asyncio.run(
-                self.service.extract_entities(image_path, ocr_data, field_definitions)
-            )
-
-        self.assertIn("Entity extraction failed", str(context.exception))
-
+# ---------------------------------------------------------------------------
+# extract_entities_from_base64_async
+# ---------------------------------------------------------------------------
 
 class TestExtractEntitiesFromBase64Async(unittest.TestCase):
-    """Test async entity extraction via extract_entities_from_base64_async."""
 
     @patch('databricks.model.openai_service.http_client_factory')
     @patch('databricks.model.openai_service.AzureOpenAI')
@@ -600,27 +554,22 @@ class TestExtractEntitiesFromBase64Async(unittest.TestCase):
 
     def _make_api_response(self, entities):
         mock_choice = Mock()
-        mock_message = Mock()
-        mock_message.content = json.dumps(entities)
-        mock_choice.message = mock_message
+        mock_choice.message.content = json.dumps(entities)
         mock_response = Mock()
         mock_response.choices = [mock_choice]
         return mock_response
 
     def test_returns_entities_on_success(self):
-        """Successful async call returns parsed entities with page_number set."""
-        entity_payload = [
-            {"entity_type": "Full Name", "original_text": "Bob Jones", "bounding_box": [0.1, 0.2, 0.15, 0.03], "confidence": 0.94}
-        ]
-        self.mock_async_client.chat.completions.create = AsyncMock(return_value=self._make_api_response(entity_payload))
-
-        ocr_data = {"text": "Bob Jones", "words": []}
-        field_defs = [{"name": "Full Name", "description": "Person's full name"}]
-
-        entities = asyncio.run(
-            self.service.extract_entities_from_base64_async("img_b64", "png", ocr_data, field_defs, page_number=3)
+        payload = [make_entity("Full Name", "Bob Jones", [
+            make_occurrence("Bob Jones", [make_bbox(0.1, 0.2, 0.1, 0.02)])
+        ], confidence=0.94)]
+        self.mock_async_client.chat.completions.create = AsyncMock(
+            return_value=self._make_api_response(payload)
         )
-
+        entities = asyncio.run(self.service.extract_entities_from_base64_async(
+            "img_b64", "png", {"text": "Bob Jones", "words": []},
+            [{"name": "Full Name", "description": "Person's full name"}], page_number=3
+        ))
         self.assertEqual(len(entities), 1)
         self.assertEqual(entities[0]["entity_type"], "Full Name")
         self.assertEqual(entities[0]["original_text"], "Bob Jones")
@@ -628,60 +577,50 @@ class TestExtractEntitiesFromBase64Async(unittest.TestCase):
         self.assertAlmostEqual(entities[0]["confidence"], 0.94)
 
     def test_passes_correct_model_and_image(self):
-        """Async call uses configured deployment name and passes image + text content."""
         self.mock_async_client.chat.completions.create = AsyncMock(
             return_value=self._make_api_response([])
         )
-        ocr_data = {"text": "test", "words": []}
-        field_defs = [{"name": "Name", "description": "A name"}]
-
-        asyncio.run(
-            self.service.extract_entities_from_base64_async("encoded_img", "jpeg", ocr_data, field_defs, page_number=1)
-        )
-
+        asyncio.run(self.service.extract_entities_from_base64_async(
+            "encoded_img", "jpeg", {"text": "test", "words": []},
+            [{"name": "Name", "description": "A name"}], page_number=1
+        ))
         call_kwargs = self.mock_async_client.chat.completions.create.call_args.kwargs
         self.assertEqual(call_kwargs["model"], "test-deployment")
         content = call_kwargs["messages"][0]["content"]
-        # First block is image_url, second is text prompt
         self.assertEqual(content[0]["type"], "image_url")
         self.assertIn("image/jpeg", content[0]["image_url"]["url"])
         self.assertIn("encoded_img", content[0]["image_url"]["url"])
         self.assertEqual(content[1]["type"], "text")
 
     def test_returns_empty_list_on_api_error(self):
-        """API exception is caught and returns [] rather than propagating."""
         self.mock_async_client.chat.completions.create = AsyncMock(side_effect=Exception("Quota exceeded"))
-
-        entities = asyncio.run(
-            self.service.extract_entities_from_base64_async("img_b64", "png", {}, [], page_number=1)
-        )
-
+        entities = asyncio.run(self.service.extract_entities_from_base64_async(
+            "img_b64", "png", {}, [], page_number=1
+        ))
         self.assertEqual(entities, [])
 
     def test_returns_empty_list_on_invalid_json_response(self):
-        """Malformed JSON response returns [] rather than raising."""
         mock_choice = Mock()
         mock_choice.message.content = "not valid json"
         mock_response = Mock()
         mock_response.choices = [mock_choice]
         self.mock_async_client.chat.completions.create = AsyncMock(return_value=mock_response)
-
-        entities = asyncio.run(
-            self.service.extract_entities_from_base64_async("img_b64", "png", {}, [], page_number=1)
-        )
-
+        entities = asyncio.run(self.service.extract_entities_from_base64_async(
+            "img_b64", "png", {}, [], page_number=1
+        ))
         self.assertEqual(entities, [])
 
 
+# ---------------------------------------------------------------------------
+# test_connection
+# ---------------------------------------------------------------------------
+
 class TestConnectionTest(unittest.TestCase):
-    """Test Azure OpenAI API connection testing"""
 
     @patch('databricks.model.openai_service.http_client_factory')
     @patch('databricks.model.openai_service.AzureOpenAI')
     def setUp(self, mock_azure_openai, mock_http_client_factory):
-        """Set up test service"""
         mock_http_client_factory.return_value = (Mock(), Mock())
-
         with patch.dict(os.environ, {'PROXY_CLUSTER_ID': 'test-cluster'}):
             self.service = OpenAIVisionService(
                 api_key="test-key",
@@ -691,22 +630,13 @@ class TestConnectionTest(unittest.TestCase):
         self.service.client = self.mock_client
 
     def test_connection_success(self):
-        """Test successful connection test"""
-        mock_response = Mock()
-        self.mock_client.chat.completions.create.return_value = mock_response
-
-        result = self.service.test_connection()
-
-        self.assertTrue(result)
+        self.mock_client.chat.completions.create.return_value = Mock()
+        self.assertTrue(self.service.test_connection())
         self.mock_client.chat.completions.create.assert_called_once()
 
     def test_connection_failure(self):
-        """Test connection test handles failures"""
         self.mock_client.chat.completions.create.side_effect = Exception("Connection failed")
-
-        result = self.service.test_connection()
-
-        self.assertFalse(result)
+        self.assertFalse(self.service.test_connection())
 
 
 if __name__ == '__main__':

@@ -3,8 +3,7 @@ Document Intelligence Model for Databricks Model Serving
 
 This MLflow PyFunc model chains:
 1. OCR Service (Azure Document Intelligence via Suncorp APIM OAuth) - Extract text and bounding boxes
-2. Vision Service (Claude or Databricks or Azure OpenAI) - Detect sensitive entities
-3. BBox Matcher - Match entities to OCR words for precise redaction coordinates
+2. Vision Service (Claude or Databricks or Azure OpenAI) - Detect sensitive entities with word-level bounding boxes
 
 The model implements write-through storage to Unity Catalog volumes.
 
@@ -45,7 +44,6 @@ from .ocr_service import OCRService
 from .databricks_service import DatabricksVisionService
 from .claude_service import ClaudeVisionService
 from .openai_service import OpenAIVisionService
-from .bbox_matcher import BBoxMatcher
 from .fake_data_service import FakeDataService
 
 logger = logging.getLogger(__name__)
@@ -147,8 +145,7 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
             )
             logger.info(f"Azure OpenAI vision service initialized (deployment: {azure_openai_deployment})")
         
-        # Initialize BBox matcher and fake data generator
-        self.bbox_matcher = BBoxMatcher()
+        # Initialize fake data generator
         self.fake_data_service = FakeDataService()
         
         # Get Unity Catalog volume path and Databricks credentials for Files API
@@ -350,7 +347,6 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
         entity_label_counters: Dict[str, int] = {}
 
         result_pages = []
-        total_bbox_time = 0.0
 
         # Step 2: Vision AI — prepare page inputs then run all pages concurrently.
         # Determine mimetype once (same for every page in a document).
@@ -402,24 +398,12 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
         total_vision_time = time.time() - vision_start
         logger.info(f"⏱️  Vision API (all {len(page_inputs)} pages, threaded): {total_vision_time:.2f}s")
 
-        # Step 3: BBox Matcher + post-processing (sequential — CPU-bound, fast)
+        # Step 3: Post-processing (entity IDs, strategies, replacement text)
         for page_input, entities in zip(page_inputs, all_page_entities):
             page_idx = page_input["page_number"]
-            ocr_data = page_input["ocr_data"]
             logger.info(f"Post-processing page {page_idx}/{len(pages)}: {len(entities)} entities detected")
 
-            # BBox Matcher - Enrich entities with precise word-level bounding boxes
-            if entities:
-                bbox_start = time.time()
-                enriched_entities = self.bbox_matcher.match_entities_to_words(
-                    entities=entities,
-                    ocr_words=ocr_data['words']
-                )
-                bbox_time = time.time() - bbox_start
-                total_bbox_time += bbox_time
-                logger.info(f"⏱️  BBox matching (page {page_idx}): {bbox_time:.2f}s")
-            else:
-                enriched_entities = []
+            enriched_entities = entities
 
             # Generate entity IDs and set defaults
             for entity in enriched_entities:
@@ -529,7 +513,6 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
         logger.info(f"  - File fetch:      {fetch_time:6.2f}s ({fetch_time/overall_time*100:5.1f}%)")
         logger.info(f"  - OCR processing:  {ocr_time:6.2f}s ({ocr_time/overall_time*100:5.1f}%)")
         logger.info(f"  - Vision API:      {total_vision_time:6.2f}s ({total_vision_time/overall_time*100:5.1f}%)")
-        logger.info(f"  - BBox matching:   {total_bbox_time:6.2f}s ({total_bbox_time/overall_time*100:5.1f}%)")
         logger.info(f"  - UC write:        {write_time:6.2f}s ({write_time/overall_time*100:5.1f}%)")
         logger.info(f"  - TOTAL:           {overall_time:6.2f}s")
         logger.info(f"{'='*80}\n")
