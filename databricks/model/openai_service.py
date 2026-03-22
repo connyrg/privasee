@@ -309,53 +309,135 @@ class OpenAIVisionService:
         prompt = f"""You are a document de-identification assistant. Your task is to identify sensitive information in documents that needs to be redacted or replaced.
 
 **Document Context:**
-The document has been processed with OCR. Here is the extracted text and structural information:
+The document has been processed with OCR. Below is the extracted text and structural information:
 
-```json
+```json id="9hf3lt"
 {ocr_context}
 ```
 
 **Fields to Identify:**
 {fields_text}
 
-**Instructions:**
-1. Carefully analyze the document image and OCR data
-2. Identify ALL instances of the specified field types
-3. Handle variations, typos, and partial matches intelligently
-   - Example: "Kranthi" and "Kranti" should be recognized as the same name
-   - Example: "SSN" and "Social Security Number" refer to the same field type
-4. For each identified entity, determine its bounding box coordinates
-5. Match entities to OCR word bounding boxes when possible for accuracy
+---
 
-**Output Format:**
+### **Instructions:**
+
+1. **Comprehensive Analysis**
+
+   * Analyze both textual content and spatial layout from OCR data.
+   * Use positional relationships (adjacency, alignment) only when they are strong and unambiguous.
+
+2. **Entity Detection (Names — Deduplication Logic)**
+
+   * Identify ALL instances of the specified field types, including:
+
+     * Full names (e.g., "John Doe")
+     * Partial names (e.g., "John", "Doe")
+     * Title-based names (e.g., "Mr Doe", "Dr Smith")
+
+   **Critical Rules:**
+
+   * Extract each occurrence independently based on what is actually present in the document.
+   * If a full name (e.g., "John Doe") appears as a single contiguous entity:
+
+     * Extract it as **one entity only**
+     * Do NOT additionally extract "John" or "Doe" from the same occurrence
+   * Only extract partial names ("John", "Doe") if they appear **separately elsewhere** in the document as their own occurrences
+   * Avoid duplicate or overlapping entities referring to the same exact text span
+
+   **Examples:**
+
+   * "John Doe" (single occurrence) → ✅ `"John Doe"` only
+   * "John Doe" + later "Doe" → ✅ `"John Doe"` and `"Doe"`
+   * "Mr Doe" → ✅ `"Mr Doe"` (not `"Doe"` unless it appears separately)
+
+3. **Variation Handling**
+
+   * Handle typos, abbreviations, and semantic equivalents.
+
+4. **Strict Multi-Box Entity Reconstruction (Controlled Adjacency)**
+
+   * Merge tokens only when they form a **continuous reading sequence** with strong spatial evidence.
+
+   **Allowed Merging Scenarios:**
+
+   * Horizontal concatenation (adjacent boxes)
+   * Line-break continuation with:
+
+     * Strong horizontal alignment
+     * Minimal vertical gap
+     * No intervening unrelated tokens
+
+   **Applies to:**
+
+   * Structured fields (dates, IDs, phone numbers)
+   * Names (e.g., "John" + "Doe", including across line breaks if clearly continuous)
+
+   **Rules:**
+
+   * Concatenate with natural spacing
+   * Compute a **minimum enclosing bounding box**
+   * Do NOT merge if ambiguous
+
+5. **Address Extraction Rules (Strict)**
+
+   * Only extract addresses that can pinpoint a specific location.
+   * Merge only when forming a clear, continuous address (single line or tight multi-line block)
+
+   **Do NOT extract:**
+
+   * Postcode alone
+   * State/region alone
+   * Country alone
+   * City alone
+   * Incomplete fragments
+
+6. **Bounding Box Assignment**
+
+   * Use OCR word-level bounding boxes when possible.
+   * For merged entities:
+
+     * Return a single bounding box enclosing all contributing boxes.
+   * Ensure normalized coordinates (0.0–1.0).
+
+7. **Confidence Scoring**
+
+   * Assign a confidence score (0.0–1.0).
+   * Lower confidence when merging across lines or uncertain grouping.
+
+---
+
+### **Output Format:**
+
 Return a JSON array with this exact structure (no additional text):
 
-```json
+```json id="3vu8ye"
 [
   {{
     "entity_type": "field name from definitions",
-    "original_text": "exact text found in document",
+    "original_text": "exact text (merged only if valid continuous entity)",
     "bounding_box": [x, y, width, height],
     "confidence": 0.0-1.0
   }}
 ]
 ```
 
-**Bounding Box Format:**
-- All coordinates are normalized 0.0–1.0 values (fraction of page width/height)
-- x: left edge (0 = left margin, 1 = right margin)
-- y: top edge (0 = top of page, 1 = bottom of page)
-- width: box width as fraction of page width
-- height: box height as fraction of page height
-- Match the bounding_box values from the words list above as closely as possible
+---
 
-**Important:**
-- Return ONLY the JSON array, no explanations
-- Include all instances found (even if the same entity appears multiple times)
-- Be thorough but precise
-- If unsure about an entity, include it with lower confidence (>0.5)
+### **Important Constraints:**
 
-Begin analysis:"""
+* Return ONLY the JSON array
+* Do NOT include explanations
+* Include all valid instances, but avoid duplicates from the same text span
+* Do NOT emit partial name entities if they are already part of a single extracted full-name occurrence
+* Only include partial names if they appear independently elsewhere
+* Merge tokens only when forming a clear continuous entity (including valid line-break continuation)
+* Ignore incomplete or non-specific address fragments
+
+---
+
+**Begin analysis:**
+"""
 
         return prompt
 
