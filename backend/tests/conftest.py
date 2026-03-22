@@ -177,37 +177,38 @@ def sample_entities() -> List[dict]:
         "01/01/1990"              50  200         75        188
         "123-45-6789"             50  250         80        238
 
-    bounding_box = [x/W, top/H, width/W, FS/H]  (all values in [0, 1])
+    bounding_boxes (inside occurrences) = [[x/W, top/H, width/W, FS/H]]
     """
     W, H, FS = 595, 842, 12
 
     rows = [
         # (id, text, x, baseline_y, est_width, field, replacement, strategy)
-        ("entity-1", "John Smith",             50, 100,  80,  "Full Name",    "Jane Doe",    "fake_name"),
-        ("entity-2", "john.smith@example.com", 50, 150, 155,  "Email",        "[REDACTED]",  "redact"),
-        ("entity-3", "01/01/1990",             50, 200,  75,  "Date of Birth","[DATE OF BIRTH]", "entity_label"),
-        ("entity-4", "123-45-6789",            50, 250,  80,  "SSN",          "[REDACTED]",  "redact"),
+        ("entity-1", "John Smith",             50, 100,  80,  "Full Name",    "Jane Doe",          "fake_name"),
+        ("entity-2", "john.smith@example.com", 50, 150, 155,  "Email",        "[REDACTED]",        "redact"),
+        ("entity-3", "01/01/1990",             50, 200,  75,  "Date of Birth","[DATE OF BIRTH]",   "entity_label"),
+        ("entity-4", "123-45-6789",            50, 250,  80,  "SSN",          "[REDACTED]",        "redact"),
     ]
 
     entities = []
     for eid, text, x, y_base, w, field, replacement, strategy in rows:
         top = y_base - FS
+        bbox = [round(x / W, 4), round(top / H, 4), round(w / W, 4), round(FS / H, 4)]
         entities.append(
             {
                 "id": eid,
                 "entity_type": field,
                 "original_text": text,
                 "replacement_text": replacement,
-                "bounding_box": [
-                    round(x / W, 4),
-                    round(top / H, 4),
-                    round(w / W, 4),
-                    round(FS / H, 4),
-                ],
                 "confidence": 0.95,
                 "approved": True,
-                "page_number": 1,
                 "strategy": strategy,
+                "occurrences": [
+                    {
+                        "page_number": 1,
+                        "original_text": text,
+                        "bounding_boxes": [bbox],
+                    }
+                ],
             }
         )
     return entities

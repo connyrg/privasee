@@ -47,6 +47,7 @@ from app.models import (
     DatabricksProcessResponse,
     Entity,
     EntityVerifyResult,
+    Occurrence,
     ErrorResponse,
     FieldDefinition,
     HealthResponse,
@@ -279,12 +280,17 @@ def _mock_entities(session_id: str, field_definitions: list) -> List[Entity]:
                 entity_type=name,
                 original_text=original,
                 replacement_text=replacement,
-                # Distribute boxes vertically so they don't overlap in the preview
-                bounding_box=[0.05, 0.08 + i * 0.07, 0.45, 0.025],
                 confidence=0.95,
                 approved=True,
-                page_number=1,
                 strategy=field_strategy,
+                occurrences=[
+                    Occurrence(
+                        page_number=1,
+                        original_text=original,
+                        # Distribute boxes vertically so they don't overlap in the preview
+                        bounding_boxes=[[0.05, 0.08 + i * 0.07, 0.45, 0.025]],
+                    )
+                ],
             )
         )
     return entities

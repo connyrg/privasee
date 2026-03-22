@@ -183,7 +183,7 @@ def test_save_entities_sets_status_awaiting_review(session_manager_instance):
 
 
 @pytest.mark.unit
-def test_save_entities_preserves_bounding_boxes(session_manager_instance):
+def test_save_entities_preserves_occurrences(session_manager_instance):
     session_id = "abc-session-123"
     bbox = [0.0841, 0.1044, 0.1344, 0.0142]
     entities = [
@@ -191,7 +191,9 @@ def test_save_entities_preserves_bounding_boxes(session_manager_instance):
             "id": "e1",
             "entity_type": "Full Name",
             "original_text": "John Smith",
-            "bounding_box": bbox,
+            "occurrences": [
+                {"page_number": 1, "original_text": "John Smith", "bounding_boxes": [bbox]},
+            ],
         }
     ]
 
@@ -200,7 +202,7 @@ def test_save_entities_preserves_bounding_boxes(session_manager_instance):
         session_manager_instance.save_entities(session_id, entities)
 
     body = json.loads(mock_request.call_args.kwargs["data"])
-    assert body["entities"][0]["bounding_box"] == bbox
+    assert body["entities"][0]["occurrences"][0]["bounding_boxes"] == [bbox]
 
 
 # ===========================================================================

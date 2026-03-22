@@ -154,12 +154,7 @@ class MockDatabricksClient:
             strategy = _extract_strategy(field_def)
             original, replacement = _mock_values(name)
 
-            bbox = {
-                "x": 0.05,
-                "y": round(0.08 + i * 0.07, 4),
-                "width": 0.45,
-                "height": 0.025,
-            }
+            bbox = [0.05, round(0.08 + i * 0.07, 4), 0.45, 0.025]
             entities.append(
                 {
                     "id": f"{session_id}_mock_{i}",
@@ -169,9 +164,13 @@ class MockDatabricksClient:
                     "strategy": strategy,
                     "confidence": 0.95,
                     "approved": True,
-                    "bounding_boxes": [bbox],
-                    # Derived from bounding_boxes[0] — mirrors DocumentIntelligenceModel
-                    "bounding_box": [bbox["x"], bbox["y"], bbox["width"], bbox["height"]],
+                    "occurrences": [
+                        {
+                            "page_number": 1,
+                            "original_text": original,
+                            "bounding_boxes": [bbox],
+                        }
+                    ],
                 }
             )
 

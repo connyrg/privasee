@@ -7,13 +7,19 @@ Two public entry points:
 
 ``apply_pdf_masks(pdf_bytes, entities) -> bytes``
     PDF-native redaction via PyMuPDF.  Bounding boxes are normalised [0, 1].
-    Handles form widgets (updates field values in place).  Accepts both the
-    new ``occurrences`` entity format and the old ``bounding_box`` /
-    ``bounding_boxes`` format.
+    Handles form widgets (updates field values in place).
 
 ``apply_masks(image_path, entities, output_path) -> str``
     Image-based masking via PIL.  Used for PNG/JPG originals; output is saved
     as a PNG.  The caller (MaskingModel) wraps the result in a PDF.
+
+Entity format
+-------------
+Each entity must have an ``occurrences`` list.  Each occurrence has:
+- ``page_number`` (int, 1-indexed)
+- ``original_text`` (str, exact text at this location)
+- ``bounding_boxes`` (list of [x, y, width, height] — one per line of text,
+  normalised 0.0–1.0 relative to page/image dimensions)
 
 Masking strategies
 ------------------
@@ -97,46 +103,16 @@ class MaskingService:
 
         approved = [e for e in entities if e.get("approved", True)]
 
-        # ------------------------------------------------------------------
-        # Build per-page work items.
-        #
-        # New format: entity has "occurrences" — iterate them directly,
-        # deriving replacement_text per occurrence via token alignment.
-        #
-        # Old format (no occurrences): fall back to bounding_box /
-        # bounding_boxes + page_number, using the consistency_map path.
-        # ------------------------------------------------------------------
         # page_idx → list of (entity, bbox, occurrence_original_text)
         by_page: Dict[int, List[tuple]] = {}
 
-        old_format: List[Dict[str, Any]] = []
         for entity in approved:
-            if entity.get("occurrences"):
-                for occ in entity["occurrences"]:
-                    page_idx = occ.get("page_number", 1) - 1
-                    bbox = occ.get("bounding_box", [])
+            for occ in entity.get("occurrences", []):
+                page_idx = occ.get("page_number", 1) - 1
+                occ_text = occ.get("original_text", entity.get("original_text", ""))
+                for bbox in occ.get("bounding_boxes", []):
                     if len(bbox) == 4:
-                        by_page.setdefault(page_idx, []).append(
-                            (entity, bbox, occ.get("original_text", entity.get("original_text", "")))
-                        )
-            else:
-                old_format.append(entity)
-
-        # Old-format entities: seed consistency map and group by page
-        if old_format:
-            self._seed_consistency_map(old_format, consistency_map)
-            old_by_page: Dict[int, List[Dict[str, Any]]] = {}
-            for entity in old_format:
-                page_idx = entity.get("page_number", 1) - 1
-                old_by_page.setdefault(page_idx, []).append(entity)
-            for page_idx in old_by_page:
-                old_by_page[page_idx] = self._remove_contained_entities(old_by_page[page_idx])
-            for page_idx, ents in old_by_page.items():
-                for entity in ents:
-                    for bbox in self._resolve_bboxes(entity):
-                        by_page.setdefault(page_idx, []).append(
-                            (entity, bbox, entity.get("original_text", ""))
-                        )
+                        by_page.setdefault(page_idx, []).append((entity, bbox, occ_text))
 
         for page_idx, page_items in sorted(by_page.items()):
             if page_idx >= len(doc):
@@ -264,46 +240,17 @@ class MaskingService:
 
         approved = [e for e in entities if e.get("approved", True)]
 
-        # Seed consistency map from old-format entities so partial name variants
-        # inherit their replacement from the corresponding full-name entity.
-        old_format = [e for e in approved if not e.get("occurrences")]
-        if old_format:
-            self._seed_consistency_map(old_format, consistency_map)
-
         for entity in approved:
             raw_strategy = entity.get("strategy", "")
             strategy = self._STRATEGY_MAP.get(raw_strategy, "redact")
             fill = (0, 0, 0) if strategy == "redact" else mask_color
 
-            if entity.get("occurrences"):
-                # New format: resolve replacement per occurrence so that partial
-                # name variants (e.g. "Stephen" inside "Stephen Parrot") receive
-                # the aligned replacement token slice, matching apply_pdf_masks.
-                for occ in entity["occurrences"]:
-                    bbox = occ.get("bounding_box", [])
-                    if len(bbox) != 4:
-                        continue
-                    occ_original_text = occ.get("original_text", entity.get("original_text", ""))
-                    replacement = self._resolve_occurrence_replacement(
-                        entity, occ_original_text, strategy, label_counters, consistency_map
-                    )
-                    x, y, width, height = self._normalize_bbox(bbox, img_width, img_height)
-                    if width <= 0 or height <= 0:
-                        continue
-                    draw.rectangle(
-                        [x, y, x + width, y + height],
-                        fill=fill,
-                        outline=border_color,
-                        width=1,
-                    )
-                    if strategy != "redact" and replacement:
-                        self._draw_text(draw, replacement, x, y, width, height, text_color)
-            else:
-                # Old format: single replacement for all bounding boxes.
-                replacement = self._resolve_replacement(
-                    entity, strategy, label_counters, consistency_map
+            for occ in entity.get("occurrences", []):
+                occ_original_text = occ.get("original_text", entity.get("original_text", ""))
+                replacement = self._resolve_occurrence_replacement(
+                    entity, occ_original_text, strategy, label_counters, consistency_map
                 )
-                for bbox in self._resolve_bboxes(entity):
+                for bbox in occ.get("bounding_boxes", []):
                     if len(bbox) != 4:
                         continue
                     x, y, width, height = self._normalize_bbox(bbox, img_width, img_height)
@@ -325,22 +272,6 @@ class MaskingService:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _resolve_bboxes(entity: Dict[str, Any]) -> List[List[float]]:
-        multi = entity.get("bounding_boxes")
-        if multi:
-            result = []
-            for b in multi:
-                if isinstance(b, (list, tuple)) and len(b) == 4:
-                    result.append(list(b))
-                elif isinstance(b, dict) and all(k in b for k in ("x", "y", "width", "height")):
-                    result.append([b["x"], b["y"], b["width"], b["height"]])
-            return result
-        single = entity.get("bounding_box")
-        if single and len(single) == 4:
-            return [list(single)]
-        return []
 
     @staticmethod
     def _resolve_occurrence_replacement(
@@ -480,121 +411,6 @@ class MaskingService:
         text_x = x + (box_width - text_width) // 2
         text_y = y + (box_height - text_height) // 2
         draw.text((text_x, text_y), text, fill=text_color, font=font)
-
-    def _seed_consistency_map(
-        self,
-        entities: List[Dict[str, Any]],
-        consistency_map: Dict[str, str],
-    ) -> None:
-        """
-        Pre-populate consistency_map so that partial name variants inherit
-        their replacement from the corresponding full-name entity.
-
-        Process longest original_text first so that full names are mapped
-        before their subsets are encountered.  For each shorter entity,
-        find a contiguous token window in a longer mapped entry and take
-        the aligned replacement tokens.
-
-        Examples:
-            "John Michael Smith" → "Jane Alice Doe"
-            "John"               → "Jane"       (token 0)
-            "Michael"            → "Alice"      (token 1)
-            "John Michael"       → "Jane Alice" (tokens 0–1)
-            "Michael Smith"      → "Alice Doe"  (tokens 1–2)
-            "John Smith"         → own replacement (not contiguous — safe fallback)
-        """
-        fake_entities = [
-            e for e in entities
-            if self._STRATEGY_MAP.get(e.get("strategy", ""), "") == "fake_name"
-            and e.get("replacement_text")
-            and e.get("original_text")
-        ]
-        # Sort longest-first so full names seed the map before subsets
-        fake_entities.sort(key=lambda e: len(e["original_text"]), reverse=True)
-
-        for entity in fake_entities:
-            key = entity["original_text"].lower().strip()
-            if key not in consistency_map:
-                consistency_map[key] = entity["replacement_text"]
-
-        # Second pass: resolve subsets against already-mapped full names.
-        # For each entity, look for a longer entry whose tokens contain the
-        # entity's tokens as a contiguous slice, then take the aligned
-        # replacement tokens.  Falls back to the entity's own replacement
-        # if no contiguous match is found.
-        full_name_entries = list(consistency_map.items())  # snapshot
-        for entity in fake_entities:
-            key = entity["original_text"].lower().strip()
-            orig_tokens = key.split()
-            n = len(orig_tokens)
-            for full_key, full_replacement in full_name_entries:
-                if full_key == key:
-                    continue  # skip self-match
-                full_tokens = full_key.split()
-                if len(full_tokens) <= n:
-                    continue  # not longer — can't be a superset
-                repl_tokens = full_replacement.split()
-                if len(repl_tokens) < len(full_tokens):
-                    continue  # replacement token count mismatch — skip to avoid misalignment
-                # Find contiguous window match
-                for i in range(len(full_tokens) - n + 1):
-                    if full_tokens[i:i + n] == orig_tokens:
-                        consistency_map[key] = " ".join(repl_tokens[i:i + n])
-                        break
-                else:
-                    continue  # no window matched — try next full-name entry
-                break  # matched — stop searching
-
-    @staticmethod
-    def _remove_contained_entities(
-        entities: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """
-        Remove entities whose first bounding box is substantially contained
-        within a larger entity's bounding box on the same page.
-
-        An entity is considered contained if its bbox overlaps ≥80 % of its
-        own area with a larger entity's bbox.
-        """
-        def _first_bbox(e):
-            bboxes = MaskingService._resolve_bboxes(e)
-            return bboxes[0] if bboxes else None
-
-        def _area(bbox):
-            return bbox[2] * bbox[3]
-
-        def _intersection_area(a, b):
-            ax, ay, aw, ah = a
-            bx, by, bw, bh = b
-            ix = max(ax, bx)
-            iy = max(ay, by)
-            iw = min(ax + aw, bx + bw) - ix
-            ih = min(ay + ah, by + bh) - iy
-            if iw <= 0 or ih <= 0:
-                return 0.0
-            return iw * ih
-
-        # Sort by area descending so larger entities come first
-        indexed = [(e, _first_bbox(e)) for e in entities]
-        indexed.sort(key=lambda t: _area(t[1]) if t[1] else 0, reverse=True)
-
-        kept = []
-        kept_bboxes = []
-        for entity, bbox in indexed:
-            if bbox is None:
-                kept.append(entity)
-                continue
-            entity_area = _area(bbox)
-            contained = any(
-                entity_area > 0
-                and _intersection_area(bbox, kb) / entity_area >= 0.80
-                and _area(kb) > entity_area
-                for kb in kept_bboxes
-            )
-            if not contained:
-                kept.append(entity)
-                kept_bboxes.append(bbox)
-        return kept
 
     def _get_font(self, height: int) -> ImageFont.ImageFont:
         font_size = max(8, int(height * 0.7))

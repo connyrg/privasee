@@ -29,10 +29,11 @@ _ENTITY_1 = {
     "entity_type": "Full Name",
     "original_text": "John Smith",
     "replacement_text": "Jane Doe",
-    "bounding_box": [0.05, 0.08, 0.45, 0.025],
     "confidence": 0.95,
     "approved": True,
-    "page_number": 1,
+    "occurrences": [
+        {"page_number": 1, "original_text": "John Smith", "bounding_boxes": [[0.05, 0.08, 0.45, 0.025]]},
+    ],
 }
 
 _ENTITY_2 = {
@@ -40,10 +41,11 @@ _ENTITY_2 = {
     "entity_type": "Email",
     "original_text": "john@example.com",
     "replacement_text": "[REDACTED]",
-    "bounding_box": [0.05, 0.15, 0.45, 0.025],
     "confidence": 0.95,
     "approved": True,
-    "page_number": 1,
+    "occurrences": [
+        {"page_number": 1, "original_text": "john@example.com", "bounding_boxes": [[0.05, 0.15, 0.45, 0.025]]},
+    ],
 }
 
 
@@ -165,13 +167,7 @@ async def test_approve_and_mask_applies_entity_updates(
                 "updated_entities": [
                     {
                         "id": "entity-1",
-                        "entity_type": "Full Name",
-                        "original_text": "John Smith",
                         "replacement_text": "Updated Text",
-                        "bounding_box": [0.05, 0.08, 0.45, 0.025],
-                        "confidence": 0.95,
-                        "approved": True,
-                        "page_number": 1,
                     }
                 ],
             },

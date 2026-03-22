@@ -4,11 +4,13 @@ Unit tests for databricks.model.MaskingService
 Uses real PyMuPDF operations — fitz is NOT mocked.  Test PDFs are created
 with the create_pdf_with_text helper so the exact text positions are known.
 
-Mirrors the structure of backend/tests/unit/test_masking_service.py.
+Entity format (canonical):
+    occurrences[].page_number, occurrences[].original_text,
+    occurrences[].bounding_boxes  ([[x, y, w, h], ...], normalised 0–1)
+No entity-level bounding_box, bounding_boxes, or page_number fields.
 """
 
 import io
-import re
 import unittest
 
 import fitz
@@ -31,15 +33,7 @@ _RECT_TOLERANCE = 5.0
 # ---------------------------------------------------------------------------
 
 def create_pdf_with_text(text_items: list) -> bytes:
-    """
-    Create a minimal single-page A4 PDF with text inserted at given positions.
-
-    Args:
-        text_items: list of (text, x, baseline_y) tuples
-
-    Returns:
-        PDF bytes
-    """
+    """Create a minimal single-page A4 PDF with text at given positions."""
     doc = fitz.open()
     page = doc.new_page(width=W, height=H)
     for text, x, y in text_items:
@@ -66,15 +60,41 @@ def _entity(
     replacement_text: str = "",
     approved: bool = True,
     page_number: int = 1,
+    occ_text: str = None,
 ) -> dict:
+    """Build a canonical entity dict with a single occurrence."""
     return {
         "entity_type": entity_type,
         "original_text": original_text,
         "replacement_text": replacement_text,
-        "bounding_box": _bbox(x, baseline_y, width),
         "strategy": strategy,
         "approved": approved,
-        "page_number": page_number,
+        "occurrences": [
+            {
+                "page_number": page_number,
+                "original_text": occ_text if occ_text is not None else original_text,
+                "bounding_boxes": [_bbox(x, baseline_y, width)],
+            }
+        ],
+    }
+
+
+def _entity_multi_occ(
+    entity_type: str,
+    original_text: str,
+    strategy: str,
+    replacement_text: str = "",
+    approved: bool = True,
+    occurrences: list = None,
+) -> dict:
+    """Build a canonical entity dict with multiple occurrences."""
+    return {
+        "entity_type": entity_type,
+        "original_text": original_text,
+        "replacement_text": replacement_text,
+        "strategy": strategy,
+        "approved": approved,
+        "occurrences": occurrences or [],
     }
 
 
@@ -160,90 +180,79 @@ class TestFakeData(unittest.TestCase):
         doc.close()
         self.assertIn("Jane Doe", page_text)
 
-    def test_consistent_replacement_for_same_original(self):
-        """Two entities with the same original_text must use the same replacement."""
-        entities = [
-            _entity("Full Name", "John Smith", 50, 100, 90,
-                    strategy="Fake Data", replacement_text="Jane Doe"),
-            _entity("Full Name", "John Smith", 50, 200, 90,
-                    strategy="Fake Data", replacement_text="Should Be Overridden"),
-        ]
+    def test_consistent_replacement_across_occurrences(self):
+        """Two occurrences of the same entity must use the same replacement."""
+        entity = _entity_multi_occ(
+            "Full Name", "John Smith", "Fake Data",
+            replacement_text="Jane Doe",
+            occurrences=[
+                {"page_number": 1, "original_text": "John Smith",
+                 "bounding_boxes": [_bbox(50, 100, 90)]},
+                {"page_number": 1, "original_text": "John Smith",
+                 "bounding_boxes": [_bbox(50, 200, 90)]},
+            ],
+        )
         pdf_bytes = create_pdf_with_text([("John Smith", 50, 100), ("John Smith", 50, 200)])
         svc = MaskingService()
-        result_bytes = svc.apply_pdf_masks(pdf_bytes, entities)
+        result_bytes = svc.apply_pdf_masks(pdf_bytes, [entity])
         doc = fitz.open(stream=result_bytes, filetype="pdf")
         page_text = doc[0].get_text()
         doc.close()
         self.assertEqual(page_text.count("Jane Doe"), 2)
-        self.assertNotIn("Should Be Overridden", page_text)
 
-    def test_first_name_inherits_replacement_from_full_name(self):
-        """A standalone first name entity must use the first token of the full name's replacement."""
-        entities = [
-            _entity("Full Name", "John Smith", 50, 100, 90,
-                    strategy="Fake Data", replacement_text="Jane Doe"),
-            _entity("Full Name", "John", 50, 200, 40,
-                    strategy="Fake Data", replacement_text="Unrelated"),
-        ]
+    def test_occurrence_text_token_aligned_to_full_name(self):
+        """An occurrence where original_text is a first name derives the replacement
+        slice from the entity's full replacement_text via token alignment."""
+        entity = _entity_multi_occ(
+            "Full Name", "John Smith", "Fake Data",
+            replacement_text="Jane Doe",
+            occurrences=[
+                {"page_number": 1, "original_text": "John Smith",
+                 "bounding_boxes": [_bbox(50, 100, 90)]},
+                {"page_number": 1, "original_text": "John",
+                 "bounding_boxes": [_bbox(50, 200, 40)]},
+            ],
+        )
         pdf_bytes = create_pdf_with_text([("John Smith", 50, 100), ("John", 50, 200)])
         svc = MaskingService()
-        result_bytes = svc.apply_pdf_masks(pdf_bytes, entities)
+        result_bytes = svc.apply_pdf_masks(pdf_bytes, [entity])
         doc = fitz.open(stream=result_bytes, filetype="pdf")
         page_text = doc[0].get_text()
         doc.close()
+        # Full name occurrence → "Jane Doe"
+        self.assertIn("Jane Doe", page_text)
+        # First name occurrence → "Jane" (first token slice)
         self.assertIn("Jane", page_text)
-        self.assertNotIn("Unrelated", page_text)
         self.assertNotIn("John", page_text)
 
-    def test_middle_name_contiguous_slice_inherits_replacement(self):
-        """First+middle and middle+last name slices derive replacement from the full name."""
-        entities = [
-            _entity("Full Name", "John Michael Smith", 50, 100, 130,
-                    strategy="Fake Data", replacement_text="Jane Alice Doe"),
-            _entity("Full Name", "John Michael", 50, 200, 90,
-                    strategy="Fake Data", replacement_text="Ignored"),
-            _entity("Full Name", "Michael Smith", 50, 300, 90,
-                    strategy="Fake Data", replacement_text="Ignored"),
-        ]
+    def test_middle_name_contiguous_slice(self):
+        """First+middle and middle+last slices derive replacement from the full name."""
+        entity = _entity_multi_occ(
+            "Full Name", "John Michael Smith", "Fake Data",
+            replacement_text="Jane Alice Doe",
+            occurrences=[
+                {"page_number": 1, "original_text": "John Michael Smith",
+                 "bounding_boxes": [_bbox(50, 100, 130)]},
+                {"page_number": 1, "original_text": "John Michael",
+                 "bounding_boxes": [_bbox(50, 200, 90)]},
+                {"page_number": 1, "original_text": "Michael Smith",
+                 "bounding_boxes": [_bbox(50, 300, 90)]},
+            ],
+        )
         pdf = create_pdf_with_text([
             ("John Michael Smith", 50, 100),
             ("John Michael", 50, 200),
             ("Michael Smith", 50, 300),
         ])
         svc = MaskingService()
-        result_bytes = svc.apply_pdf_masks(pdf, entities)
+        result_bytes = svc.apply_pdf_masks(pdf, [entity])
         doc = fitz.open(stream=result_bytes, filetype="pdf")
         text = doc[0].get_text()
         doc.close()
         self.assertIn("Jane Alice", text)   # John Michael → Jane Alice
         self.assertIn("Alice Doe", text)    # Michael Smith → Alice Doe
-        self.assertNotIn("Ignored", text)
         self.assertNotIn("John Michael", text)
         self.assertNotIn("Michael Smith", text)
-
-    def test_overlapping_bbox_not_double_masked(self):
-        """An entity whose bbox is contained within a larger entity's bbox is dropped."""
-        # Full name entity
-        full_entity = _entity("Full Name", "John Smith", 50, 100, 90, strategy="Black Out")
-        # First name entity at the same location (subset of full name bbox)
-        first_name_bbox = _bbox(50, 100, 40)  # smaller, same position
-        first_entity = {
-            "entity_type": "First Name",
-            "original_text": "John",
-            "replacement_text": "",
-            "bounding_box": first_name_bbox,
-            "strategy": "Black Out",
-            "approved": True,
-            "page_number": 1,
-        }
-        pdf_bytes = create_pdf_with_text([("John Smith", 50, 100)])
-        svc = MaskingService()
-        result_bytes = svc.apply_pdf_masks(pdf_bytes, [full_entity, first_entity])
-        doc = fitz.open(stream=result_bytes, filetype="pdf")
-        black_rects = [d["rect"] for d in doc[0].get_drawings() if d.get("fill") == (0.0, 0.0, 0.0)]
-        doc.close()
-        # Only one redaction rectangle should appear, not two
-        self.assertEqual(len(black_rects), 1)
 
 
 # ===========================================================================
@@ -290,38 +299,42 @@ class TestEdgeCases(unittest.TestCase):
         doc.close()
         self.assertIn("John Smith", page_text)
 
-    def test_handles_empty_bounding_box_without_crashing(self):
-        """An entity with bounding_box=[] must be silently skipped."""
+    def test_handles_entity_with_no_occurrences_without_crashing(self):
+        """An entity with occurrences=[] must be silently skipped."""
         entity = {
             "entity_type": "Full Name",
             "original_text": "John Smith",
             "replacement_text": "",
-            "bounding_box": [],
             "strategy": "Black Out",
             "approved": True,
-            "page_number": 1,
+            "occurrences": [],
         }
         doc = _apply([("John Smith", 50, 100)], [entity])
         doc.close()  # must not raise
 
-    def test_handles_multi_box_entity(self):
-        """An entity with bounding_boxes (plural) redacts every listed box."""
+    def test_handles_multi_bbox_occurrence(self):
+        """An occurrence with two bounding_boxes must redact both regions."""
         bbox1 = _bbox(50, 100, 45)
         bbox2 = _bbox(50, 120, 45)
         entity = {
             "entity_type": "Full Name",
             "original_text": "John",
             "replacement_text": "",
-            "bounding_boxes": [bbox1, bbox2],
             "strategy": "Black Out",
             "approved": True,
-            "page_number": 1,
+            "occurrences": [
+                {
+                    "page_number": 1,
+                    "original_text": "John",
+                    "bounding_boxes": [bbox1, bbox2],
+                }
+            ],
         }
         doc = _apply([("John", 50, 100), ("Smith", 50, 120)], [entity])
         page = doc[0]
         black_rects = [d["rect"] for d in page.get_drawings() if d.get("fill") == (0.0, 0.0, 0.0)]
         doc.close()
-        self.assertGreaterEqual(len(black_rects), 2, "Expected at least 2 black rects for multi-box entity")
+        self.assertGreaterEqual(len(black_rects), 2, "Expected at least 2 black rects for multi-bbox occurrence")
 
     def test_returns_valid_pdf_bytes(self):
         """Output must be parseable as valid PDF."""

@@ -55,22 +55,27 @@ POST /invocations  (session_id, field_definitions)
     │   ├─ DOCX: python-docx paragraph extraction
     │   └─ Image (PNG/JPG): Azure Document Intelligence
     │
-    ├─ (per page) VisionService.extract_entities_from_base64()
+    ├─ (per page, async) VisionService.extract_entities_from_base64_async()
     │   ├─ Azure OpenAI (default): GPT-4o with vision
     │   └─ Claude (alternative): Claude Vision
-    │   Note: digital PDF pages without a rendered image are skipped silently
+    │   Output: [{entity_type, original_text, confidence, occurrences: [{page_number,
+    │            original_text, bounding_boxes: [[x,y,w,h]...]}]}]
+    │   Note: each occurrence carries word-level bboxes merged by line
     │
-    ├─ BBoxMatcher.match_entities_to_words()
-    │   └─ Aligns entity text spans to OCR word-level bounding boxes
-    │
-    ├─ Pre-generate replacement_text for user review
-    │   ├─ "Fake Data"     → realistic fake value (consistent per original_text)
-    │   └─ "Entity Label"  → sequential label, e.g. Full_Name_A, Full_Name_B
+    ├─ Enrich entities
+    │   ├─ Assign stable UUID id per entity
+    │   └─ Pre-generate replacement_text for user review:
+    │       "Fake Data"    → realistic fake value (consistent per original_text)
+    │       "Entity Label" → sequential label e.g. Full_Name_A, Full_Name_B
     │                        (letters A–Z, then integers 27, 28, … per type)
     │
-    ├─ Write entities.json to UC volume via Files REST API
+    ├─ _merge_entity_variants()
+    │   └─ Merge partial-name references (e.g. "John" → occurrence of "John Doe")
+    │      and cross-page duplicates into a single entity with combined occurrences
     │
-    └─ Return {session_id, status, pages: [{page_num, entities}]}
+    ├─ Write entities.json to UC volume (includes intermediate_results for debugging)
+    │
+    └─ Return {session_id, status, entities: [...], pages: [{page_num, entities}]}
 ```
 
 ### Masking
@@ -114,6 +119,9 @@ The model fetches the document from:
 
 #### Output (MLflow predictions format)
 
+All positional data lives inside `occurrences`. No entity-level `bounding_box`,
+`bounding_boxes`, or `page_number` fields.
+
 ```json
 {
   "predictions": [
@@ -129,11 +137,16 @@ The model fetches the document from:
               "entity_type": "Full Name",
               "original_text": "John Doe",
               "replacement_text": "Jane Smith",
-              "bounding_box": [0.1, 0.2, 0.3, 0.05],
               "confidence": 0.95,
               "approved": true,
-              "page_number": 1,
-              "strategy": "Fake Data"
+              "strategy": "Fake Data",
+              "occurrences": [
+                {
+                  "page_number": 1,
+                  "original_text": "John Doe",
+                  "bounding_boxes": [[0.1, 0.2, 0.3, 0.05]]
+                }
+              ]
             }
           ]
         }
@@ -142,6 +155,12 @@ The model fetches the document from:
   ]
 }
 ```
+
+An entity with multiple appearances (e.g. full name on page 1 and first name only on
+page 3) carries multiple `occurrences` entries.  Each occurrence's `original_text` may
+differ from the entity's canonical `original_text` when the text was merged as a
+partial-name variant.  The masking service uses token-alignment to derive the correct
+replacement slice for each occurrence.
 
 ### Masking
 
@@ -152,7 +171,7 @@ The model fetches the document from:
   "dataframe_records": [
     {
       "session_id": "uuid-string",
-      "entities_to_mask": "[{\"id\": \"entity-uuid\", \"entity_type\": \"Full Name\", \"original_text\": \"John Doe\", \"replacement_text\": \"Jane Smith\", \"bounding_box\": [0.1, 0.2, 0.3, 0.05], \"strategy\": \"Fake Data\", \"approved\": true, \"page_number\": 1}]"
+      "entities_to_mask": "[{\"id\": \"entity-uuid\", \"entity_type\": \"Full Name\", \"original_text\": \"John Doe\", \"replacement_text\": \"Jane Smith\", \"strategy\": \"Fake Data\", \"approved\": true, \"occurrences\": [{\"page_number\": 1, \"original_text\": \"John Doe\", \"bounding_boxes\": [[0.1, 0.2, 0.3, 0.05]]}]}]"
     }
   ]
 }
@@ -244,9 +263,33 @@ The models read and write files under `{UC_VOLUME_PATH}/{session_id}/`:
   "session_id": "...",
   "saved_at": "2025-01-01T00:00:00+00:00",
   "status": "awaiting_review",
-  "entities": [ ... ]
+  "entities": [
+    {
+      "id": "uuid",
+      "entity_type": "Full Name",
+      "original_text": "John Doe",
+      "replacement_text": "Jane Smith",
+      "confidence": 0.95,
+      "approved": true,
+      "strategy": "Fake Data",
+      "occurrences": [
+        {
+          "page_number": 1,
+          "original_text": "John Doe",
+          "bounding_boxes": [[0.1, 0.2, 0.3, 0.05]]
+        }
+      ]
+    }
+  ],
+  "intermediate_results": {
+    "vision_raw": { "1": [ ... ] },
+    "pre_merge":  [ ... ]
+  }
 }
 ```
+
+`intermediate_results` is stored for debugging only and is not read by the backend
+or masking endpoint.
 
 ## Deployment
 
@@ -303,6 +346,6 @@ Add them in the Databricks UI: Serving → your endpoint → Edit endpoint → E
 
 ### Low OCR confidence on scanned pages
 
-- Increase `RENDER_ZOOM_FACTOR` in `ocr_service.py` to `3.0` for higher DPI rendering
 - Verify the original document was scanned at ≥200 DPI
 - Azure Document Intelligence performs best with `prebuilt-read` model (the default)
+- The vision service downscales images to 1500px on the longer side before calling the LLM (downscale-only; smaller images are left at original size to avoid payload issues)

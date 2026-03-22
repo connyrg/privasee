@@ -19,9 +19,10 @@ verify that the endpoint orchestrates its dependencies correctly — status code
 response shapes, call ordering, error propagation — without any live services.
 
 **Contract tests** (`tests/contracts/`, `@pytest.mark.contract`)
-Verify that `_mock_entities()` (the in-process Databricks stand-in) produces
+Verify that `MockDatabricksClient` (the in-process Databricks stand-in) produces
 responses that conform to the schema the real Databricks endpoint is expected
-to return. A mismatch here means integration tests are giving false confidence:
+to return (`DATABRICKS_RESPONSE_SCHEMA`, schema version 3.0.0).
+A mismatch here means integration tests are giving false confidence:
 the mock passes but the real endpoint would fail.
 
 ---
@@ -57,7 +58,7 @@ lines are untested.
 
 Contract tests must be run in two situations:
 
-1. **MockDatabricksClient is updated** — if `_mock_entities()` in `app/main.py`
+1. **MockDatabricksClient is updated** — if `tests/contracts/mock_databricks_client.py`
    changes its output shape (new fields, renamed fields, different types), the
    contract tests will catch mismatches before they reach production.
 

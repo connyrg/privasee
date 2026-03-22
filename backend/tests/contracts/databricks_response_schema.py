@@ -24,9 +24,12 @@ Response format (success)
                     "strategy": "Fake Data" | "Black Out" | "Entity Label",
                     "confidence": <float 0-1>,
                     "approved": <bool>,
-                    "bounding_boxes": [
-                        {"x": <float>, "y": <float>,
-                         "width": <float ≥ 0>, "height": <float ≥ 0>}
+                    "occurrences": [
+                        {
+                            "page_number": <int ≥ 1>,
+                            "original_text": "<exact text at this location>",
+                            "bounding_boxes": [[x, y, width, height], ...]
+                        }
                     ]
                 }
             ]
@@ -45,7 +48,7 @@ Response format (error)
 
 import jsonschema
 
-SCHEMA_VERSION = "2.0.0"
+SCHEMA_VERSION = "3.0.0"
 
 # ---------------------------------------------------------------------------
 # Success response schema
@@ -106,8 +109,6 @@ DATABRICKS_RESPONSE_SCHEMA: dict = {
                 "strategy",
                 "confidence",
                 "approved",
-                "bounding_boxes",
-                "bounding_box",
             ],
             "additionalProperties": True,
             "properties": {
@@ -139,29 +140,33 @@ DATABRICKS_RESPONSE_SCHEMA: dict = {
                 "approved": {
                     "type": "boolean",
                 },
-                "bounding_boxes": {
+                "occurrences": {
                     "type": "array",
-                    "items": {"$ref": "#/$defs/bounding_box"},
-                },
-                "bounding_box": {
-                    # Flat [x, y, width, height] derived from bounding_boxes[0].
-                    # Required by the backend Entity model for preview display.
-                    "type": "array",
-                    "items": {"type": "number"},
-                    "minItems": 4,
-                    "maxItems": 4,
+                    "items": {"$ref": "#/$defs/occurrence"},
                 },
             },
         },
-        "bounding_box": {
+        "occurrence": {
             "type": "object",
-            "required": ["x", "y", "width", "height"],
+            "required": ["page_number", "original_text", "bounding_boxes"],
             "additionalProperties": True,
             "properties": {
-                "x": {"type": "number"},
-                "y": {"type": "number"},
-                "width": {"type": "number", "minimum": 0},
-                "height": {"type": "number", "minimum": 0},
+                "page_number": {
+                    "type": "integer",
+                    "minimum": 1,
+                },
+                "original_text": {
+                    "type": "string",
+                },
+                "bounding_boxes": {
+                    "type": "array",
+                    "items": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "minItems": 4,
+                        "maxItems": 4,
+                    },
+                },
             },
         },
     },

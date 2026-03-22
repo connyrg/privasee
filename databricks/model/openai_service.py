@@ -441,23 +441,23 @@ Begin analysis:"""
                 logger.error(f"Expected JSON array from Azure OpenAI, got {type(raw_entities).__name__}")
                 return []
 
-            # Flatten: one output record per occurrence, with line-merged bboxes
             validated_entities = []
             for entity in raw_entities:
                 entity_type = entity.get('entity_type')
                 canonical_text = entity.get('original_text')
                 confidence = float(entity.get('confidence', 0.9))
-                occurrences = entity.get('occurrences', [])
+                raw_occurrences = entity.get('occurrences', [])
 
                 if not entity_type or not canonical_text:
                     logger.warning(f"Entity missing entity_type or original_text: {entity}")
                     continue
 
-                if not occurrences:
+                if not raw_occurrences:
                     logger.warning(f"Entity '{canonical_text}' has no occurrences, skipping")
                     continue
 
-                for occurrence in occurrences:
+                parsed_occurrences = []
+                for occurrence in raw_occurrences:
                     occurrence_text = occurrence.get('original_text') or canonical_text
                     raw_bboxes = occurrence.get('bounding_boxes', [])
                     valid_bboxes = [
@@ -469,13 +469,21 @@ Begin analysis:"""
                         logger.warning(f"Occurrence of '{occurrence_text}' has no valid bounding boxes, skipping")
                         continue
 
-                    merged_bboxes = self._merge_same_line_bboxes(valid_bboxes)
+                    # Merge word-level bboxes by line; convert each to flat [x, y, w, h]
+                    merged = self._merge_same_line_bboxes(valid_bboxes)
+                    bboxes_flat = [[b['x'], b['y'], b['width'], b['height']] for b in merged]
+                    parsed_occurrences.append({
+                        'page_number': page_number,
+                        'original_text': occurrence_text,
+                        'bounding_boxes': bboxes_flat,
+                    })
+
+                if parsed_occurrences:
                     validated_entities.append({
                         'entity_type': entity_type,
-                        'original_text': occurrence_text,
-                        'bounding_boxes': merged_bboxes,
+                        'original_text': canonical_text,
                         'confidence': confidence,
-                        'page_number': page_number
+                        'occurrences': parsed_occurrences,
                     })
 
             return validated_entities

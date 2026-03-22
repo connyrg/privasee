@@ -290,11 +290,14 @@ class TestParseOpenAIResponse(unittest.TestCase):
         self.assertEqual(entities[0]['entity_type'], "Full Name")
         self.assertEqual(entities[0]['original_text'], "John Doe")
         self.assertEqual(entities[0]['confidence'], 0.95)
-        self.assertEqual(entities[0]['page_number'], 1)
+        # Occurrences carry page_number and bounding_boxes
+        self.assertEqual(len(entities[0]['occurrences']), 1)
+        occ = entities[0]['occurrences'][0]
+        self.assertEqual(occ['page_number'], 1)
         # Two same-line tokens merged into one rect
-        self.assertEqual(len(entities[0]['bounding_boxes']), 1)
+        self.assertEqual(len(occ['bounding_boxes']), 1)
 
-    def test_parse_single_entity_two_occurrences_produces_two_records(self):
+    def test_parse_single_entity_two_occurrences_produces_one_entity_two_occurrences(self):
         payload = [
             make_entity("Full Name", "Stephen Parrot", [
                 make_occurrence("Stephen Parrot", [make_bbox(0.1, 0.1, 0.1, 0.02)]),
@@ -302,12 +305,12 @@ class TestParseOpenAIResponse(unittest.TestCase):
             ])
         ]
         entities = self.service._parse_openai_response(json.dumps(payload), self.ocr_data, page_number=1)
-        self.assertEqual(len(entities), 2)
-        for e in entities:
-            self.assertEqual(e['original_text'], "Stephen Parrot")
+        self.assertEqual(len(entities), 1)
+        self.assertEqual(entities[0]['original_text'], "Stephen Parrot")
+        self.assertEqual(len(entities[0]['occurrences']), 2)
 
     def test_parse_typo_variant_uses_occurrence_original_text(self):
-        """Occurrences with different spellings retain their own original_text."""
+        """Occurrences with different spellings retain their own original_text in occurrences."""
         payload = [
             make_entity("Full Name", "Kranthi", [
                 make_occurrence("Kranthi", [make_bbox(0.1, 0.1, 0.05, 0.02)]),
@@ -315,9 +318,12 @@ class TestParseOpenAIResponse(unittest.TestCase):
             ])
         ]
         entities = self.service._parse_openai_response(json.dumps(payload), self.ocr_data, page_number=1)
-        self.assertEqual(len(entities), 2)
+        self.assertEqual(len(entities), 1)
         self.assertEqual(entities[0]['original_text'], "Kranthi")
-        self.assertEqual(entities[1]['original_text'], "Kranti")
+        occs = entities[0]['occurrences']
+        self.assertEqual(len(occs), 2)
+        self.assertEqual(occs[0]['original_text'], "Kranthi")
+        self.assertEqual(occs[1]['original_text'], "Kranti")
 
     def test_parse_occurrence_missing_original_text_falls_back_to_canonical(self):
         payload = [
@@ -328,10 +334,10 @@ class TestParseOpenAIResponse(unittest.TestCase):
         entities = self.service._parse_openai_response(json.dumps(payload), self.ocr_data, page_number=2)
         self.assertEqual(len(entities), 1)
         self.assertEqual(entities[0]['original_text'], "John Doe")
-        self.assertEqual(entities[0]['page_number'], 2)
+        self.assertEqual(entities[0]['occurrences'][0]['page_number'], 2)
 
     def test_parse_line_break_produces_two_bboxes(self):
-        """Tokens on different lines stay as two separate merged rects."""
+        """Tokens on different lines stay as two separate merged rects within one occurrence."""
         payload = [
             make_entity("Full Name", "John Doe", [
                 make_occurrence("John Doe", [
@@ -342,7 +348,7 @@ class TestParseOpenAIResponse(unittest.TestCase):
         ]
         entities = self.service._parse_openai_response(json.dumps(payload), self.ocr_data, page_number=1)
         self.assertEqual(len(entities), 1)
-        self.assertEqual(len(entities[0]['bounding_boxes']), 2)
+        self.assertEqual(len(entities[0]['occurrences'][0]['bounding_boxes']), 2)
 
     def test_parse_date_five_tokens_merged_into_one_bbox(self):
         """Five tokens on the same line (e.g. 15/03/1985) are merged into one rect."""
@@ -360,7 +366,7 @@ class TestParseOpenAIResponse(unittest.TestCase):
         ]
         entities = self.service._parse_openai_response(json.dumps(payload), self.ocr_data, page_number=1)
         self.assertEqual(len(entities), 1)
-        self.assertEqual(len(entities[0]['bounding_boxes']), 1)
+        self.assertEqual(len(entities[0]['occurrences'][0]['bounding_boxes']), 1)
 
     def test_parse_json_with_markdown_json_fence(self):
         payload = [make_entity("SSN", "123-45-6789", [
@@ -370,7 +376,7 @@ class TestParseOpenAIResponse(unittest.TestCase):
         entities = self.service._parse_openai_response(response, self.ocr_data, page_number=2)
         self.assertEqual(len(entities), 1)
         self.assertEqual(entities[0]['entity_type'], "SSN")
-        self.assertEqual(entities[0]['page_number'], 2)
+        self.assertEqual(entities[0]['occurrences'][0]['page_number'], 2)
 
     def test_parse_json_with_generic_fence(self):
         payload = [make_entity("Address", "123 Main St", [
@@ -448,14 +454,19 @@ class TestParseOpenAIResponse(unittest.TestCase):
         self.assertEqual(entities[0]['original_text'], "Alice Smith")
         self.assertEqual(entities[1]['original_text'], "Bob Jones")
 
-    def test_output_uses_bounding_boxes_not_bounding_box(self):
-        """Output records must use bounding_boxes (plural) key."""
+    def test_output_uses_occurrences_with_bounding_boxes(self):
+        """Output records must use occurrences[].bounding_boxes — no entity-level bbox keys."""
         payload = [make_entity("Full Name", "John Doe", [
             make_occurrence("John Doe", [make_bbox(0.1, 0.2, 0.1, 0.02)])
         ])]
         entities = self.service._parse_openai_response(json.dumps(payload), self.ocr_data)
-        self.assertIn('bounding_boxes', entities[0])
+        self.assertIn('occurrences', entities[0])
         self.assertNotIn('bounding_box', entities[0])
+        self.assertNotIn('bounding_boxes', entities[0])
+        self.assertNotIn('page_number', entities[0])
+        occ = entities[0]['occurrences'][0]
+        self.assertIn('bounding_boxes', occ)
+        self.assertIn('page_number', occ)
 
 
 # ---------------------------------------------------------------------------
@@ -510,7 +521,7 @@ class TestExtractEntities(unittest.TestCase):
         self.assertEqual(len(entities), 1)
         self.assertEqual(entities[0]['entity_type'], "Full Name")
         self.assertEqual(entities[0]['original_text'], "John Doe")
-        self.assertEqual(entities[0]['page_number'], 1)
+        self.assertEqual(entities[0]['occurrences'][0]['page_number'], 1)
 
     @patch('builtins.open', side_effect=FileNotFoundError("File not found"))
     def test_extract_entities_file_not_found(self, mock_file):
@@ -573,7 +584,7 @@ class TestExtractEntitiesFromBase64Async(unittest.TestCase):
         self.assertEqual(len(entities), 1)
         self.assertEqual(entities[0]["entity_type"], "Full Name")
         self.assertEqual(entities[0]["original_text"], "Bob Jones")
-        self.assertEqual(entities[0]["page_number"], 3)
+        self.assertEqual(entities[0]["occurrences"][0]["page_number"], 3)
         self.assertAlmostEqual(entities[0]["confidence"], 0.94)
 
     def test_passes_correct_model_and_image(self):

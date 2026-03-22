@@ -1314,7 +1314,13 @@ def populate_entity_table(entities: list | None, step: int):
             pages = [e.get("page_number", 1)]
         return ", ".join(str(p) for p in pages)
 
-    rows = sorted(entities, key=lambda e: (e.get("page_number", 0), e.get("entity_type", "")))
+    def _first_page(e: dict) -> int:
+        occs = e.get("occurrences")
+        if occs:
+            return min((o.get("page_number", 1) for o in occs), default=1)
+        return e.get("page_number", 0)
+
+    rows = sorted(entities, key=lambda e: (_first_page(e), e.get("entity_type", "")))
     table_data = [
         {
             "id": e.get("id", ""),

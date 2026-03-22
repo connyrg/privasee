@@ -21,7 +21,6 @@ Input (dataframe_records format):
 
   Each entity dict in ``entities_to_mask`` must include:
 
-  New format (preferred — produced by DocumentIntelligenceModel after merging):
     {
       "id": "uuid",
       "entity_type": "Full Name",
@@ -32,33 +31,19 @@ Input (dataframe_records format):
       "occurrences": [
         {
           "page_number": 1,
-          "bounding_box": [0.1, 0.2, 0.3, 0.05],   // normalised [x, y, w, h]
+          "bounding_boxes": [[0.1, 0.2, 0.3, 0.05]],  // list of [x, y, w, h] (normalised)
           "original_text": "Stephen Parrot"
         },
         {
           "page_number": 2,
-          "bounding_box": [0.05, 0.1, 0.2, 0.04],
-          "original_text": "Stephen"                // partial variant
+          "bounding_boxes": [[0.05, 0.1, 0.2, 0.04]],
+          "original_text": "Stephen"                   // partial variant
         }
       ]
     }
 
-  Old format (fallback — single occurrence):
-    {
-      "id": "uuid",
-      "entity_type": "Full Name",
-      "original_text": "Stephen Parrot",
-      "replacement_text": "Jane Doe",
-      "strategy": "Fake Data",
-      "approved": true,
-      "page_number": 1,
-      "bounding_box": [0.1, 0.2, 0.3, 0.05],        // normalised [x, y, w, h]
-      "bounding_boxes": [[0.1, 0.2, 0.3, 0.05]]      // optional; all occurrences
-    }
-
-  When ``occurrences`` is present and non-empty, the masking service iterates
-  it directly.  Old-format entities fall back to ``bounding_box`` /
-  ``bounding_boxes`` + ``page_number``.
+  The masking service iterates ``occurrences`` to locate and redact each
+  appearance of the entity in the document.
 
 Output:
   {

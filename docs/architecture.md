@@ -81,9 +81,11 @@ Two MLflow PyFunc models, each deployed to its own Model Serving endpoint:
 
 **DocumentIntelligenceModel** (`document_intelligence.py`)
 - Fetches the uploaded document from the UC volume via the Files REST API
-- Runs Azure Document Intelligence (OCR) and Azure OpenAI / Claude Vision (entity extraction)
+- Runs Azure Document Intelligence (OCR) and Azure OpenAI / Claude Vision (entity extraction per page, async)
+- Each extracted entity carries an `occurrences` list — each occurrence has `page_number`, `original_text` (exact), and `bounding_boxes` ([[x,y,w,h]...], normalised 0–1)
+- Merges partial-name variants and cross-page duplicates via `_merge_entity_variants`
 - Pre-generates replacement text for Fake Data and Entity Label strategies
-- Writes `entities.json` to the session directory in the UC volume
+- Writes `entities.json` (merged entities + intermediate debugging results) to the UC session directory
 
 **MaskingModel** (`masking_model.py`)
 - Receives `session_id` + approved entities from the backend
@@ -98,7 +100,8 @@ Two MLflow PyFunc models, each deployed to its own Model Serving endpoint:
   {UC_VOLUME_PATH}/{session_id}/
       metadata.json          — session status and original filename (backend)
       original{ext}          — uploaded document, e.g. original.pdf (backend)
-      entities.json          — extracted entities (document intelligence model → backend)
+      entities.json          — extracted entities with occurrences (document intelligence model → backend)
+                               also includes intermediate_results (vision_raw, pre_merge) for debugging
       masking_decisions.json — audit record: every entity with approved flag and replacement_text (backend, written before masking call)
       masked.pdf             — de-identified output (masking model)
   ```

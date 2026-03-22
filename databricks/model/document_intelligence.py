@@ -200,22 +200,19 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
                       "entity_type": "Full Name",
                       "original_text": "Stephen Parrot",
                       "replacement_text": "Jane Doe",
-                      "bounding_box": [0.1, 0.2, 0.3, 0.05],
-                      "bounding_boxes": [[0.1, 0.2, 0.3, 0.05]],
                       "confidence": 0.95,
                       "approved": true,
-                      "page_number": 1,
                       "strategy": "Fake Data",
                       "occurrences": [
                         {
                           "page_number": 1,
-                          "bounding_box": [0.1, 0.2, 0.3, 0.05],
-                          "original_text": "Stephen Parrot"
+                          "original_text": "Stephen Parrot",
+                          "bounding_boxes": [[0.1, 0.2, 0.3, 0.05]]
                         },
                         {
                           "page_number": 2,
-                          "bounding_box": [0.05, 0.1, 0.2, 0.04],
-                          "original_text": "Stephen"
+                          "original_text": "Stephen",
+                          "bounding_boxes": [[0.05, 0.1, 0.2, 0.04]]
                         }
                       ]
                     }
@@ -419,19 +416,6 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
                 if matching_field:
                     entity['strategy'] = matching_field.get('strategy', 'Black Out')
 
-                # Add bounding_box (singular flat list) derived from the first
-                # occurrence in bounding_boxes.  The backend Entity model requires
-                # this field; the masking service uses bounding_boxes (all
-                # occurrences) so every appearance in the document is redacted.
-                if 'bounding_box' not in entity:
-                    first = next(iter(entity.get('bounding_boxes', [])), None)
-                    if isinstance(first, dict):
-                        entity['bounding_box'] = [first['x'], first['y'], first['width'], first['height']]
-                    elif isinstance(first, (list, tuple)) and len(first) == 4:
-                        entity['bounding_box'] = list(first)
-                    else:
-                        entity['bounding_box'] = [0.0, 0.0, 0.0, 0.0]
-
                 # Pre-generate replacement_text so users can review/edit it in
                 # Step 2 before masking is applied.
                 if entity.get('strategy') == 'Fake Data' and not entity.get('replacement_text'):
@@ -476,8 +460,7 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
             for entity in page.get('entities', []):
                 flat_entities.append(entity)
 
-        # Snapshot pre_merge before _merge_entity_variants mutates dicts in-place
-        # (it adds 'occurrences' to parent entities, which would corrupt the snapshot).
+        # Snapshot pre_merge before _merge_entity_variants mutates dicts in-place.
         pre_merge_snapshot = copy.deepcopy(flat_entities)
 
         merged_entities = self._merge_entity_variants(flat_entities)
@@ -568,40 +551,20 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
         Rules:
         - Only entities with the same entity_type are candidates for merging.
         - A child entity is merged into a parent if the child's original_text
-          tokens form a contiguous slice of the parent's tokens.
-        - The child's bbox and page_number are absorbed as an Occurrence on the
-          parent; replacement_text is derived dynamically at masking time.
-        - Already-merged entities (have occurrences) are left unchanged.
+          tokens form a contiguous slice of the parent's tokens, or if the child
+          uses a known honorific prefix sharing a suffix with the parent.
+        - The child's occurrences are absorbed into the parent; spatially
+          duplicate occurrences (child bbox contained in a parent bbox on the
+          same page) are dropped.
 
-        Returns a new list with child entities removed and parents updated with
-        occurrences covering all appearances (own + merged children's).
+        Expects entities in the canonical format: each entity has an
+        ``occurrences`` list, each occurrence has ``page_number``,
+        ``original_text``, and ``bounding_boxes`` ([[x, y, w, h], ...]).
+
+        Returns a new list with child entities removed and parents updated.
         """
         if not entities:
             return entities
-
-        # Skip if already merged
-        if all(e.get("occurrences") is not None for e in entities):
-            return entities
-
-        def _normalise_bb(bb):
-            if isinstance(bb, (list, tuple)) and len(bb) == 4:
-                return list(bb)
-            if isinstance(bb, dict) and all(k in bb for k in ("x", "y", "width", "height")):
-                return [bb["x"], bb["y"], bb["width"], bb["height"]]
-            return None
-
-        def _to_occurrences(e: Dict) -> List[Dict]:
-            if e.get("occurrences") is not None:
-                return list(e["occurrences"])
-            page = e.get("page_number", 1)
-            orig = e.get("original_text", "")
-            boxes = e.get("bounding_boxes") or ([e["bounding_box"]] if e.get("bounding_box") else [])
-            result = []
-            for bb in boxes:
-                norm = _normalise_bb(bb)
-                if norm:
-                    result.append({"page_number": page, "bounding_box": norm, "original_text": orig})
-            return result
 
         def _is_contained(child_bb: list, parent_bb: list, threshold: float = 0.8) -> bool:
             """Return True if child_bb is >= threshold covered by parent_bb."""
@@ -612,6 +575,22 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
             ix = max(0, min(cx + cw, px + pw) - max(cx, px))
             iy = max(0, min(cy + ch, py + ph) - max(cy, py))
             return (ix * iy) / (cw * ch) >= threshold
+
+        def _occ_is_covered(child_occ: Dict, parent_occs: List[Dict]) -> bool:
+            """True if the child occurrence's first bbox is spatially contained
+            within any same-page parent occurrence bbox."""
+            child_page = child_occ.get("page_number", 1)
+            child_bboxes = child_occ.get("bounding_boxes", [])
+            if not child_bboxes:
+                return False
+            child_bb = child_bboxes[0]
+            for p_occ in parent_occs:
+                if p_occ.get("page_number") != child_page:
+                    continue
+                for p_bb in p_occ.get("bounding_boxes", []):
+                    if _is_contained(child_bb, p_bb):
+                        return True
+            return False
 
         # Known honorific/title prefixes used to identify same-person variants
         # e.g. "Mr Doe" and "John Doe" share "Doe" with "Mr" being a title prefix
@@ -628,27 +607,25 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
                 continue
             parent_type = parent.get("entity_type", "")
             parent_tokens = parent.get("original_text", "").lower().strip().split()
-
-            parent_occs = _to_occurrences(parent)
+            parent_occs = list(parent.get("occurrences", []))
 
             for j, child in enumerate(sorted_ents):
                 if j <= i or j in merged:
                     continue
                 if child.get("entity_type", "") != parent_type:
-                    continue  # different entity types — skip
+                    continue
                 child_tokens = child.get("original_text", "").lower().strip().split()
                 n = len(child_tokens)
                 if n > len(parent_tokens):
-                    continue  # child longer than parent — not a variant
+                    continue
 
                 merge_match = False
 
                 if child_tokens == parent_tokens:
-                    # Exact same text on a different page — always merge as another occurrence
+                    # Exact same text — merge as additional occurrences (e.g. same name, different page)
                     merge_match = True
                 elif n < len(parent_tokens):
                     # Partial match: child tokens form a contiguous slice of parent tokens
-                    # e.g. "Doe" or "John" inside "John Doe"
                     for k in range(len(parent_tokens) - n + 1):
                         if parent_tokens[k:k + n] == child_tokens:
                             merge_match = True
@@ -669,36 +646,12 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
                             merge_match = True
 
                 if merge_match:
-                    child_page = child.get("page_number", 1)
-                    child_boxes = child.get("bounding_boxes") or (
-                        [child["bounding_box"]] if child.get("bounding_box") else []
-                    )
-                    for bb in child_boxes:
-                        norm = _normalise_bb(bb)
-                        if not norm:
-                            continue
-                        # Skip if already covered by an existing occurrence on
-                        # the same page (e.g. "Stephen" sub-bbox inside "Stephen Parrot").
-                        already_covered = any(
-                            occ.get("page_number") == child_page
-                            and _is_contained(norm, occ["bounding_box"])
-                            for occ in parent_occs
-                            if occ.get("bounding_box")
-                        )
-                        if not already_covered:
-                            parent_occs.append({
-                                "page_number": child_page,
-                                "bounding_box": norm,
-                                "original_text": child.get("original_text", ""),
-                            })
+                    for child_occ in child.get("occurrences", []):
+                        if not _occ_is_covered(child_occ, parent_occs):
+                            parent_occs.append(child_occ)
                     merged.add(j)
 
             parent["occurrences"] = parent_occs
-
-        # Ensure unmerged entities also get occurrences populated
-        for i, entity in enumerate(sorted_ents):
-            if i not in merged and entity.get("occurrences") is None:
-                entity["occurrences"] = _to_occurrences(entity)
 
         result_list = [e for i, e in enumerate(sorted_ents) if i not in merged]
         logger.info(f"Entity variant merge: {len(entities)} → {len(result_list)} entities")
@@ -733,9 +686,7 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
             else:
                 flat_entities = []
                 for page in result.get("pages", []):
-                    page_num = page.get("page_num", 1)
                     for entity in page.get("entities", []):
-                        entity.setdefault("page_number", page_num)
                         flat_entities.append(entity)
                 flat_entities = self._merge_entity_variants(flat_entities)
 

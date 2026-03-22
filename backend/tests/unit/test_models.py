@@ -20,12 +20,11 @@ _ENTITY = {
     "entity_type": "Full Name",
     "original_text": "John Smith",
     "replacement_text": "Jane Doe",
-    "bounding_box": [0.05, 0.08, 0.45, 0.025],
 }
 
 
 def _entity(**overrides) -> dict:
-    """Return a fresh copy of _ENTITY, avoiding cross-test mutation via setdefault."""
+    """Return a fresh copy of _ENTITY, avoiding cross-test mutation."""
     return {**_ENTITY, **overrides}
 
 
@@ -57,40 +56,6 @@ def test_from_mlflow_response_flattens_pages_entities():
 
 
 @pytest.mark.unit
-def test_from_mlflow_response_sets_page_number_from_page_num():
-    """page_number on each entity is sourced from its page's page_num."""
-    raw = {
-        "predictions": [
-            {
-                "pages": [
-                    {"page_num": 3, "entities": [_entity()]},
-                ]
-            }
-        ]
-    }
-    result = DatabricksProcessResponse.from_mlflow_response(raw)
-
-    assert result.entities[0].page_number == 3
-
-
-@pytest.mark.unit
-def test_from_mlflow_response_preserves_explicit_page_number():
-    """An entity that already carries page_number must not be overwritten by page_num."""
-    entity_with_page = _entity(page_number=5)
-    raw = {
-        "predictions": [
-            {
-                "pages": [{"page_num": 1, "entities": [entity_with_page]}]
-            }
-        ]
-    }
-    result = DatabricksProcessResponse.from_mlflow_response(raw)
-
-    # setdefault does not overwrite an existing page_number
-    assert result.entities[0].page_number == 5
-
-
-@pytest.mark.unit
 def test_from_mlflow_response_handles_empty_pages():
     """A pages list with no entities must produce an empty entity list."""
     raw = {
@@ -106,25 +71,6 @@ def test_from_mlflow_response_handles_empty_pages():
     result = DatabricksProcessResponse.from_mlflow_response(raw)
 
     assert result.entities == []
-
-
-@pytest.mark.unit
-def test_from_mlflow_response_multi_page_preserves_page_numbers():
-    """Entities from different pages carry distinct page_number values."""
-    raw = {
-        "predictions": [
-            {
-                "pages": [
-                    {"page_num": 1, "entities": [_entity()]},
-                    {"page_num": 2, "entities": [_entity(id="e2")]},
-                ]
-            }
-        ]
-    }
-    result = DatabricksProcessResponse.from_mlflow_response(raw)
-
-    assert result.entities[0].page_number == 1
-    assert result.entities[1].page_number == 2
 
 
 # ===========================================================================
@@ -182,27 +128,25 @@ def test_from_mlflow_response_model_version_defaults_to_none():
 
 
 # ===========================================================================
-# bounding_boxes round-trip
+# occurrences round-trip
 # ===========================================================================
 
 
 @pytest.mark.unit
-def test_from_mlflow_response_preserves_bounding_boxes():
-    """bounding_boxes (all occurrences) must survive Entity parsing intact.
-
-    The masking model reads this field to redact every occurrence of an entity,
-    not just the first one stored in bounding_box.
-    """
-    bboxes = [
-        {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.04},
-        {"x": 0.5, "y": 0.6, "width": 0.3, "height": 0.04},
+def test_from_mlflow_response_preserves_occurrences():
+    """occurrences (with bounding_boxes) must survive Entity parsing intact."""
+    occurrences = [
+        {
+            "page_number": 1,
+            "original_text": "John Smith",
+            "bounding_boxes": [[0.1, 0.2, 0.3, 0.04], [0.5, 0.6, 0.3, 0.04]],
+        }
     ]
-    entity = _entity(bounding_boxes=bboxes)
+    entity = _entity(occurrences=occurrences)
     raw = {"predictions": [{"pages": [{"page_num": 1, "entities": [entity]}]}]}
 
     result = DatabricksProcessResponse.from_mlflow_response(raw)
 
-    assert result.entities[0].bounding_boxes == bboxes, (
-        "bounding_boxes was dropped during Entity parsing — "
-        "masking will only redact the first occurrence"
-    )
+    occ = result.entities[0].occurrences[0]
+    assert occ.page_number == 1
+    assert occ.bounding_boxes == [[0.1, 0.2, 0.3, 0.04], [0.5, 0.6, 0.3, 0.04]]
