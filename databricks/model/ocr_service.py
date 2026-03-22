@@ -324,26 +324,23 @@ class OCRService:
     
     def _scale_for_vision(self, img: "Image.Image", original_bytes: bytes) -> bytes:
         """
-        Scale image to a vision-API-friendly resolution matching the PDF render path.
-
-        The PDF path renders at RENDER_ZOOM_FACTOR=2.0 (≈144 DPI), producing
-        ~1190×1684 px for A4.  Images are clamped to [MIN_VISION_PIXELS,
-        MAX_VISION_PIXELS] on the longer side so the vision model receives
-        consistent detail without oversized payloads.
+        Downscale image for the vision API if it exceeds MAX_VISION_PIXELS on
+        the longer side.  Images already within the limit are returned unchanged
+        at original quality.  No upscaling is applied.
 
         Only used for the vision API call — ADI OCR always receives the original
         bytes to keep OCR coordinate offsets stable.
         """
-        MIN_VISION_PIXELS = 1200  # ≈144 DPI for A4 — upscale floor
-        MAX_VISION_PIXELS = 2000  # cap to avoid large payloads / slow API calls
+        MAX_VISION_PIXELS = 1500  # cap to avoid large payloads — downscale only
 
         w, h = img.size
         longer = max(w, h)
 
-        if MIN_VISION_PIXELS <= longer <= MAX_VISION_PIXELS:
-            return original_bytes  # already in the target range
+        logger.info(f"Vision API image size: {w}×{h} px (longer side: {longer})")
+        if longer <= MAX_VISION_PIXELS:
+            return original_bytes  # already small enough, preserve original quality
 
-        scale = MIN_VISION_PIXELS / longer if longer < MIN_VISION_PIXELS else MAX_VISION_PIXELS / longer
+        scale = MAX_VISION_PIXELS / longer
         new_w, new_h = int(w * scale), int(h * scale)
         scaled = img.resize((new_w, new_h), Image.LANCZOS)
         logger.info(
