@@ -324,28 +324,31 @@ class OCRService:
     
     def _scale_for_vision(self, img: "Image.Image", original_bytes: bytes) -> bytes:
         """
-        Scale image up to match the effective resolution of the PDF render path.
+        Scale image to a vision-API-friendly resolution matching the PDF render path.
 
-        The PDF path renders pages at RENDER_ZOOM_FACTOR=2.0 (≈144 DPI), producing
-        ~1190×1684 px for an A4 page.  Images whose longer side is already at or
-        above MIN_VISION_PIXELS are returned unchanged; smaller images are upscaled
-        proportionally so the vision model receives comparable detail.
+        The PDF path renders at RENDER_ZOOM_FACTOR=2.0 (≈144 DPI), producing
+        ~1190×1684 px for A4.  Images are clamped to [MIN_VISION_PIXELS,
+        MAX_VISION_PIXELS] on the longer side so the vision model receives
+        consistent detail without oversized payloads.
 
         Only used for the vision API call — ADI OCR always receives the original
         bytes to keep OCR coordinate offsets stable.
         """
-        MIN_VISION_PIXELS = 1200  # ≈144 DPI for an A4 page (~11.7" tall)
+        MIN_VISION_PIXELS = 1200  # ≈144 DPI for A4 — upscale floor
+        MAX_VISION_PIXELS = 2000  # cap to avoid large payloads / slow API calls
 
         w, h = img.size
-        if max(w, h) >= MIN_VISION_PIXELS:
-            return original_bytes  # already high-res enough
+        longer = max(w, h)
 
-        scale = MIN_VISION_PIXELS / max(w, h)
+        if MIN_VISION_PIXELS <= longer <= MAX_VISION_PIXELS:
+            return original_bytes  # already in the target range
+
+        scale = MIN_VISION_PIXELS / longer if longer < MIN_VISION_PIXELS else MAX_VISION_PIXELS / longer
         new_w, new_h = int(w * scale), int(h * scale)
         scaled = img.resize((new_w, new_h), Image.LANCZOS)
         logger.info(
             f"Scaled image for vision API: {w}×{h} → {new_w}×{new_h} "
-            f"(×{scale:.2f} to match PDF render quality)"
+            f"(×{scale:.2f})"
         )
         buf = io.BytesIO()
         scaled.save(buf, format=img.format or "PNG")
