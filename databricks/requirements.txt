@@ -20,6 +20,7 @@ azure-core>=1.29.0
 
 # Vision AI providers
 anthropic>=0.25.0  # Claude vision service
+databricks-openai  # Databricks vision service
 openai>=1.12.0     # Azure OpenAI vision service
 
 # Async support (allows asyncio.run() inside Databricks Serverless which uses its own event loop)

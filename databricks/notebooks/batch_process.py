@@ -12,7 +12,6 @@
 # MAGIC | `input_folder` | UC volume path containing documents to process |
 # MAGIC | `output_folder` | UC volume path where masked files will be written |
 # MAGIC | `config_path` | UC volume path to a saved PrivaSee config JSON file |
-# MAGIC | `sessions_volume_path` | UC volume path used for session storage |
 # MAGIC | `di_endpoint` | Document Intelligence model serving endpoint URL |
 # MAGIC | `masking_endpoint` | Masking model serving endpoint URL |
 # MAGIC

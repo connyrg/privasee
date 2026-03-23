@@ -3,14 +3,15 @@ Document Intelligence Model for Databricks Model Serving
 
 This MLflow PyFunc model chains:
 1. OCR Service (Azure Document Intelligence via Suncorp APIM OAuth) - Extract text and bounding boxes
-2. Vision Service (Claude or Azure OpenAI) - Detect sensitive entities
+2. Vision Service (Claude or Databricks or Azure OpenAI) - Detect sensitive entities
 3. BBox Matcher - Match entities to OCR words for precise redaction coordinates
 
 The model implements write-through storage to Unity Catalog volumes.
 
 Environment Variables:
-- VISION_SERVICE_PROVIDER: "openai" (default) or "claude"
+- VISION_SERVICE_PROVIDER: "openai" (default) or "databricks" or "claude"
 - ANTHROPIC_API_KEY: Required if provider is "claude"
+- DATABRICKS_MODEL_NAME: Required if provider is "databricks"
 - AZURE_OPENAI_API_KEY: Required if provider is "openai"
 - AZURE_OPENAI_ENDPOINT: Required if provider is "openai"
 - AZURE_OPENAI_API_VERSION: Optional, defaults to "2024-02-15-preview"
@@ -26,6 +27,7 @@ Environment Variables:
 import concurrent.futures
 import copy
 
+import mlflow
 import mlflow.pyfunc
 import pandas as pd
 import json
@@ -40,6 +42,7 @@ from mimetypes import guess_type
 
 # Our service modules
 from .ocr_service import OCRService
+from .databricks_service import DatabricksVisionService
 from .claude_service import ClaudeVisionService
 from .openai_service import OpenAIVisionService
 from .bbox_matcher import BBoxMatcher
@@ -59,7 +62,7 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
 
     Implements the complete pipeline:
     - Document OCR (text + word-level bounding boxes) via ADI OAuth
-    - Entity detection with vision AI (Claude or Azure OpenAI)
+    - Entity detection with vision AI (Claude or Databricks or Azure OpenAI)
     - Bounding box matching for precise redaction
     - Write-through storage to Unity Catalog volumes
 
@@ -78,6 +81,9 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
         """
         logger.info("Initializing Document Intelligence Model")
 
+        # Enable auto-tracing for OpenAI
+        mlflow.openai.autolog()
+
         # Initialize OCR service (handles ADI OAuth internally)
         self.ocr_service = OCRService()
         logger.info("OCR service initialized (ADI OAuth)")
@@ -86,10 +92,10 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
         vision_provider = os.environ.get("VISION_SERVICE_PROVIDER", "openai").lower()
         self.vision_provider = vision_provider
         
-        if vision_provider not in ["claude", "openai"]:
+        if vision_provider not in ["claude", "databricks", "openai"]:
             raise ValueError(
                 f"Invalid VISION_SERVICE_PROVIDER: {vision_provider}. "
-                "Must be 'claude' or 'openai'"
+                "Must be 'claude' or 'databricks' or 'openai'"
             )
         
         logger.info(f"Vision service provider: {vision_provider}")
@@ -102,6 +108,14 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
             
             self.vision_service = ClaudeVisionService(api_key=anthropic_key)
             logger.info("Claude vision service initialized")
+            
+        elif vision_provider == "databricks":
+            model_name = os.environ.get("DATABRICKS_MODEL_NAME")
+            if not model_name:
+                raise ValueError("DATABRICKS_MODEL_NAME must be set when using Databricks")
+            
+            self.vision_service = DatabricksVisionService(model_name=model_name)
+            logger.info("Databricks vision service initialized")
             
         elif vision_provider == "openai":
             # Azure OpenAI configuration
@@ -534,7 +548,7 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
         """
         Extract entities from a page using the configured vision service.
         
-        This method delegates to the appropriate vision service (Claude or OpenAI)
+        This method delegates to the appropriate vision service (Claude or Databricks or OpenAI)
         which handles prompt building, API calls, and response parsing.
         
         Args:

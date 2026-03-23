@@ -151,7 +151,8 @@ print("✅ Input example created")
 mlflow.set_registry_uri("databricks-uc")
 
 # Set or create experiment
-experiment_path = f"/Users/{dbutils.notebook.entry_point.getDbutils().notebook().getContext().userName().get()}/privasee_experiments"
+# experiment_path = f"/Users/{dbutils.notebook.entry_point.getDbutils().notebook().getContext().userName().get()}/privasee_experiments"
+experiment_path = "/datascience/projects/ds_document_deidentification_tool/privasee"
 mlflow.set_experiment(experiment_path)
 
 print(f"✅ Using experiment: {experiment_path}")

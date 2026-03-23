@@ -53,7 +53,7 @@ UC_MODEL_PATH = f"{CATALOG}.{SCHEMA}.{MODEL_NAME}"
 
 # Endpoint configuration
 ENDPOINT_NAME = "privasee_endpoint_local"
-MODEL_VERSION = "34"  # Update to your registered model version
+MODEL_VERSION = "44"  # Update to your registered model version
 WORKLOAD_SIZE = "Small"  # Options: Small, Medium, Large
 SCALE_TO_ZERO = True  # Enable scale-to-zero to save costs
 
@@ -61,7 +61,7 @@ SCALE_TO_ZERO = True  # Enable scale-to-zero to save costs
 UC_VOLUME_PATH = f"/Volumes/{CATALOG}/{SCHEMA}/sessions"
 
 # Vision service provider
-VISION_PROVIDER = "openai"  # Options: "openai" or "claude"
+VISION_PROVIDER = "openai"  # Options: "openai" or "databricks" or "claude"
 
 print(f"✅ Configuration loaded:")
 print(f"   Model: {UC_MODEL_PATH} v{MODEL_VERSION}")
@@ -99,6 +99,8 @@ OPENAI_SECRET_SCOPE = "openai_00010_1"  # Update to your secret scope
 PROXY_SECRET_SCOPE = "nginx_proxy_sp"
 
 env_vars = {
+    "ENABLE_MLFLOW_TRACING": True,
+    "MLFLOW_EXPERIMENT_ID": "2142914363372294",
     "VISION_SERVICE_PROVIDER": VISION_PROVIDER,
     "UC_VOLUME_PATH": UC_VOLUME_PATH,
     # Azure Document Intelligence secrets
@@ -109,45 +111,50 @@ env_vars = {
 }
 
 # Add OpenAI or Claude secrets based on provider
-if VISION_PROVIDER == "openai":
-    env_vars.update({
-        "DATABRICKS_HOST": "https://suncorp-dev.cloud.databricks.com/",
-        "DATABRICKS_TOKEN": f"{{{{secrets/Conny.GUNADI@suncorp.com.au/DATABRICKS_TOKEN_DEV}}}}",
-        "ADI_TENANT_ID": "1356bcf3-c075-43d5-a54c-ba71df07ff70",
-        "ADI_CLIENT_ID": f"{{{{secrets/apim_00010_1/client_id}}}}",
-        "ADI_CLIENT_SECRET": f"{{{{secrets/apim_00010_1/client_secret}}}}",   
+# if VISION_PROVIDER == "openai":
+env_vars.update({
+    "DATABRICKS_HOST": "https://suncorp-dev.cloud.databricks.com/",
+    "DATABRICKS_TOKEN": f"{{{{secrets/Conny.GUNADI@suncorp.com.au/DATABRICKS_TOKEN_DEV}}}}",
+    "ADI_TENANT_ID": "1356bcf3-c075-43d5-a54c-ba71df07ff70",
+    "ADI_CLIENT_ID": f"{{{{secrets/apim_00010_1/client_id}}}}",
+    "ADI_CLIENT_SECRET": f"{{{{secrets/apim_00010_1/client_secret}}}}",   
 
 
-        "ADI_API_APP_ID_URI": "api://aeddc053-d47f-4352-9977-4313e0625905",
-        # Suncorp APIM Gateway endpoint for Azure Document Intelligence
-        "ADI_ENDPOINT": 'https://apim-nonprod-idp.azure-api.net/documentintelligence/documentModels/{model}:analyze',
+    "ADI_API_APP_ID_URI": "api://aeddc053-d47f-4352-9977-4313e0625905",
+    # Suncorp APIM Gateway endpoint for Azure Document Intelligence
+    "ADI_ENDPOINT": 'https://apim-nonprod-idp.azure-api.net/documentintelligence/documentModels/{model}:analyze',
 
-        # APIM AppSpace ID header value
-        "ADI_APPSPACE_ID": "A-007100",
+    # APIM AppSpace ID header value
+    "ADI_APPSPACE_ID": "A-007100",
 
-        # Azure Document Intelligence model to use
-        "ADI_MODEL_ID": "prebuilt-read" , 
+    # Azure Document Intelligence model to use
+    "ADI_MODEL_ID": "prebuilt-read" , 
 
-        "VISION_MAX_CONCURRENT_PAGES": "20",
-        "AZURE_OPENAI_API_KEY": f"{{{{secrets/{OPENAI_SECRET_SCOPE}/apikey}}}}",
-        "AZURE_OPENAI_ENDPOINT": "https://openai-00010-non-prod-1.openai.azure.com/",
-        "AZURE_OPENAI_API_VERSION": "2024-02-15-preview",
-        "AZURE_OPENAI_DEPLOYMENT_NAME": "gpt-5-global",
-        # "AZURE_OPENAI_DEPLOYMENT_NAME": "gpt-4.1-global",
-        "WORKSPACE_URL": "https://suncorp-dev.cloud.databricks.com/",
-        "WORKSPACE_ID": "1238531023703058",
-        "PROXY_CLUSTER_ID": "0503-061117-o2rl78n9",
-        "PROXY_PORT": "8110",
-        "PROXY_ROUTE": "openai-00010-1",
-        "PROXY_CLIENT_ID": f"{{{{secrets/{PROXY_SECRET_SCOPE}/client_id}}}}",
-        "PROXY_CLIENT_SECRET": f"{{{{secrets/{PROXY_SECRET_SCOPE}/client_secret}}}}",
-    })
-    print("✅ OpenAI environment variables configured")
-elif VISION_PROVIDER == "claude":
-    env_vars.update({
-        "ANTHROPIC_API_KEY": "dummy_apikey",
-    })
-    print("✅ Claude environment variables configured")
+    "VISION_MAX_CONCURRENT_PAGES": "20",
+    "AZURE_OPENAI_API_KEY": f"{{{{secrets/{OPENAI_SECRET_SCOPE}/apikey}}}}",
+    "AZURE_OPENAI_ENDPOINT": "https://openai-00010-non-prod-1.openai.azure.com/",
+    "AZURE_OPENAI_API_VERSION": "2024-02-15-preview",
+    "AZURE_OPENAI_DEPLOYMENT_NAME": "gpt-5-global",
+    # "AZURE_OPENAI_DEPLOYMENT_NAME": "gpt-4.1-global",
+    "WORKSPACE_URL": "https://suncorp-dev.cloud.databricks.com/",
+    "WORKSPACE_ID": "1238531023703058",
+    "PROXY_CLUSTER_ID": "0503-061117-o2rl78n9",
+    "PROXY_PORT": "8110",
+    "PROXY_ROUTE": "openai-00010-1",
+    "PROXY_CLIENT_ID": f"{{{{secrets/{PROXY_SECRET_SCOPE}/client_id}}}}",
+    "PROXY_CLIENT_SECRET": f"{{{{secrets/{PROXY_SECRET_SCOPE}/client_secret}}}}",
+})
+print("✅ OpenAI environment variables configured")
+# elif VISION_PROVIDER == "claude":
+env_vars.update({
+    "ANTHROPIC_API_KEY": "dummy_apikey",
+})
+print("✅ Claude environment variables configured")
+# elif VISION_PROVIDER == "databricks":
+env_vars.update({
+    "DATABRICKS_MODEL_NAME": "databricks-claude-opus-4-6",
+})
+print("✅ Claude environment variables configured")
 
 print(f"\n📋 Environment variables:")
 for key, value in env_vars.items():

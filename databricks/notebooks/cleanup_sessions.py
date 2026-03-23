@@ -34,12 +34,12 @@
 
 # Session cleanup configuration
 CATALOG = "datascience_dev_bronze_sandbox"
-SCHEMA = "privasee"
-UC_VOLUME_PATH = f"/Volumes/{CATALOG}/{SCHEMA}/privasee_sessions"
+SCHEMA = "ds_document_deidentification"
+UC_VOLUME_PATH = f"/Volumes/{CATALOG}/{SCHEMA}/sessions"
 
 # Cleanup settings
 MAX_SESSION_AGE_HOURS = 24  # Delete sessions older than this
-DRY_RUN = True  # Set to False to actually delete files
+DRY_RUN = False  # Set to False to actually delete files
 
 # Endpoint configuration (for optional endpoint deletion)
 ENDPOINT_NAME = "privasee_document_intelligence"
