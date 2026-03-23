@@ -358,5 +358,147 @@ class TestEdgeCases(unittest.TestCase):
         doc.close()
 
 
+# ===========================================================================
+# Multi-page documents
+# ===========================================================================
+
+
+class TestMultiPage(unittest.TestCase):
+
+    def _two_page_pdf(self) -> bytes:
+        """Create a 2-page PDF: page 1 has 'Safe text page 1', page 2 has 'John Smith'."""
+        doc = fitz.open()
+        # Insert text immediately after creating each page to avoid stale page refs
+        doc.new_page(width=W, height=H)
+        doc[0].insert_text((50, 100), "Safe text page 1", fontsize=FS)
+        doc.new_page(width=W, height=H)
+        doc[1].insert_text((50, 100), "John Smith", fontsize=FS)
+        buf = io.BytesIO()
+        doc.save(buf)
+        doc.close()
+        return buf.getvalue()
+
+    def test_masks_entity_on_correct_page(self):
+        """An occurrence with page_number=2 must be redacted on page 2, not page 1."""
+        two_page_pdf = self._two_page_pdf()
+
+        entity = {
+            "entity_type": "Full Name",
+            "original_text": "John Smith",
+            "replacement_text": "",
+            "strategy": "Black Out",
+            "approved": True,
+            "occurrences": [
+                {
+                    "page_number": 2,
+                    "original_text": "John Smith",
+                    "bounding_boxes": [_bbox(50, 100, 90)],
+                }
+            ],
+        }
+
+        svc = MaskingService()
+        result_bytes = svc.apply_pdf_masks(two_page_pdf, [entity])
+        result = fitz.open(stream=result_bytes, filetype="pdf")
+
+        # Page 1 text must be untouched
+        self.assertIn("Safe text page 1", result[0].get_text())
+        # Page 2 text must be removed
+        self.assertNotIn("John Smith", result[1].get_text())
+        result.close()
+
+    def test_same_entity_on_multiple_pages(self):
+        """An entity with occurrences on both pages must be redacted on both."""
+        doc = fitz.open()
+        for i in range(2):
+            doc.new_page(width=W, height=H)
+            doc[i].insert_text((50, 100), "John Smith", fontsize=FS)
+        buf = io.BytesIO()
+        doc.save(buf)
+        doc.close()
+
+        entity = {
+            "entity_type": "Full Name",
+            "original_text": "John Smith",
+            "replacement_text": "",
+            "strategy": "Black Out",
+            "approved": True,
+            "occurrences": [
+                {"page_number": 1, "original_text": "John Smith", "bounding_boxes": [_bbox(50, 100, 90)]},
+                {"page_number": 2, "original_text": "John Smith", "bounding_boxes": [_bbox(50, 100, 90)]},
+            ],
+        }
+
+        svc = MaskingService()
+        result_bytes = svc.apply_pdf_masks(buf.getvalue(), [entity])
+        result = fitz.open(stream=result_bytes, filetype="pdf")
+        self.assertNotIn("John Smith", result[0].get_text())
+        self.assertNotIn("John Smith", result[1].get_text())
+        result.close()
+
+
+# ===========================================================================
+# Mixed strategies on the same page
+# ===========================================================================
+
+
+class TestMixedStrategies(unittest.TestCase):
+
+    def test_black_out_and_fake_data_on_same_page(self):
+        """Two entities with different strategies can coexist on the same page."""
+        entities = [
+            _entity("Full Name", "John Smith", 50, 100, 90,
+                    strategy="Fake Data", replacement_text="Jane Doe"),
+            _entity("Email", "john@example.com", 50, 200, 140,
+                    strategy="Black Out"),
+        ]
+        doc = _apply(
+            [("John Smith", 50, 100), ("john@example.com", 50, 200)],
+            entities,
+        )
+        text = doc[0].get_text()
+        doc.close()
+
+        self.assertNotIn("John Smith", text)
+        self.assertIn("Jane Doe", text)
+        self.assertNotIn("john@example.com", text)
+
+    def test_entity_label_and_black_out_on_same_page(self):
+        """Entity Label and Black Out can both be applied to the same page."""
+        entities = [
+            _entity("Full Name", "Alice Brown",       50, 100, 90, strategy="Entity Label"),
+            _entity("Email",     "alice@example.com", 50, 200, 150, strategy="Black Out"),
+        ]
+        doc = _apply(
+            [("Alice Brown", 50, 100), ("alice@example.com", 50, 200)],
+            entities,
+        )
+        text = doc[0].get_text()
+        doc.close()
+
+        # Entity Label must have inserted a label for Alice Brown
+        self.assertRegex(text, r"Full_Name_[A-Z\d]+")
+        # Black Out must have removed the email
+        self.assertNotIn("alice@example.com", text)
+
+    def test_unapproved_entity_not_masked_alongside_approved(self):
+        """An unapproved entity is left intact even when other entities are masked."""
+        entities = [
+            _entity("Full Name", "John Smith", 50, 100, 90,
+                    strategy="Black Out", approved=True),
+            _entity("Email", "john@example.com", 50, 200, 140,
+                    strategy="Black Out", approved=False),
+        ]
+        doc = _apply(
+            [("John Smith", 50, 100), ("john@example.com", 50, 200)],
+            entities,
+        )
+        text = doc[0].get_text()
+        doc.close()
+
+        self.assertNotIn("John Smith", text)
+        self.assertIn("john@example.com", text)
+
+
 if __name__ == "__main__":
     unittest.main()

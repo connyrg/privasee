@@ -150,3 +150,97 @@ def test_from_mlflow_response_preserves_occurrences():
     occ = result.entities[0].occurrences[0]
     assert occ.page_number == 1
     assert occ.bounding_boxes == [[0.1, 0.2, 0.3, 0.04], [0.5, 0.6, 0.3, 0.04]]
+
+
+# ===========================================================================
+# FieldDefinition validation
+# ===========================================================================
+
+
+@pytest.mark.unit
+def test_field_definition_rejects_empty_name():
+    """FieldDefinition must raise when name is empty or whitespace-only."""
+    from pydantic import ValidationError
+    from app.models import FieldDefinition
+    with pytest.raises(ValidationError):
+        FieldDefinition(name="", description="A description", strategy="Fake Data")
+
+
+@pytest.mark.unit
+def test_field_definition_rejects_whitespace_only_description():
+    """FieldDefinition must raise when description is blank."""
+    from pydantic import ValidationError
+    from app.models import FieldDefinition
+    with pytest.raises(ValidationError):
+        FieldDefinition(name="Full Name", description="   ", strategy="Fake Data")
+
+
+@pytest.mark.unit
+def test_field_definition_strips_name_whitespace():
+    """Leading/trailing whitespace in name is stripped, not rejected."""
+    from app.models import FieldDefinition
+    fd = FieldDefinition(name="  Full Name  ", description="A name", strategy="Fake Data")
+    assert fd.name == "Full Name"
+
+
+@pytest.mark.unit
+def test_field_definition_default_strategy_is_fake_data():
+    """Strategy defaults to Fake Data when omitted."""
+    from app.models import FieldDefinition
+    fd = FieldDefinition(name="Email", description="An email address")
+    assert fd.strategy.value == "Fake Data"
+
+
+# ===========================================================================
+# Entity confidence bounds
+# ===========================================================================
+
+
+@pytest.mark.unit
+def test_entity_confidence_out_of_range_raises():
+    """confidence must be 0.0–1.0; values outside that range must raise."""
+    from pydantic import ValidationError
+    from app.models import Entity
+    with pytest.raises(ValidationError):
+        Entity(id="e1", entity_type="Full Name", original_text="Alice", confidence=1.5)
+
+
+@pytest.mark.unit
+def test_entity_confidence_at_boundary_values():
+    """confidence=0.0 and confidence=1.0 are both valid."""
+    from app.models import Entity
+    e0 = Entity(id="e1", entity_type="Full Name", original_text="Alice", confidence=0.0)
+    e1 = Entity(id="e2", entity_type="Full Name", original_text="Bob",   confidence=1.0)
+    assert e0.confidence == 0.0
+    assert e1.confidence == 1.0
+
+
+# ===========================================================================
+# BoundingBox validation
+# ===========================================================================
+
+
+@pytest.mark.unit
+def test_bounding_box_rejects_values_outside_unit_range():
+    """BoundingBox coordinates must all be in [0, 1]."""
+    from pydantic import ValidationError
+    from app.models import BoundingBox
+    with pytest.raises(ValidationError):
+        BoundingBox(x=1.5, y=0.0, width=0.3, height=0.1)
+
+
+@pytest.mark.unit
+def test_bounding_box_from_list_requires_four_values():
+    """BoundingBox.from_list must raise for lists that are not length 4."""
+    from app.models import BoundingBox
+    with pytest.raises(ValueError):
+        BoundingBox.from_list([0.1, 0.2, 0.3])
+
+
+@pytest.mark.unit
+def test_bounding_box_to_list_round_trips():
+    """to_list and from_list must be inverses of each other."""
+    from app.models import BoundingBox
+    values = [0.1, 0.2, 0.3, 0.04]
+    bb = BoundingBox.from_list(values)
+    assert bb.to_list() == values

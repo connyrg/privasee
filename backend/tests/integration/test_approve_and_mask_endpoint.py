@@ -282,11 +282,33 @@ async def test_approve_and_mask_returns_400_when_no_approved_entities_match(
 
 
 @pytest.mark.integration
-async def test_approve_and_mask_update_session_failure_is_nonfatal(
+async def test_approve_and_mask_returns_503_when_masking_decisions_fail(
     client, override_databricks_dependency
 ):
-    """An update_session failure after masking must not prevent a 200 response —
-    the error is logged but the endpoint still returns successfully."""
+    """503 when save_masking_decisions raises — audit persistence failure is not silent."""
+    sm = override_databricks_dependency
+    sm.get_session.return_value = _make_session()
+    sm.get_file.return_value = b"fake image bytes"
+    sm.get_entities.return_value = [_ENTITY_1]
+    sm.save_masking_decisions.side_effect = Exception("Storage unavailable")
+
+    response = await client.post(
+        "/api/approve-and-mask",
+        json={
+            "session_id": "test-session-id",
+            "approved_entity_ids": ["entity-1"],
+        },
+    )
+
+    assert response.status_code == 503
+
+
+@pytest.mark.integration
+async def test_approve_and_mask_final_status_update_failure_is_nonfatal(
+    client, override_databricks_dependency
+):
+    """A failure of the final update_session('completed') call must not prevent a 200 —
+    masking already succeeded and masked.pdf is in UC, so the status update is best-effort."""
     sm = override_databricks_dependency
     sm.get_session.return_value = _make_session()
     sm.get_file.return_value = b"fake image bytes"

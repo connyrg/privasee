@@ -597,7 +597,11 @@ async def process_document(request: ProcessRequest, background_tasks: Background
     except NotImplementedError:
         pass
     except Exception as exc:
-        logger.warning("Could not update field_definitions for %s: %s", request.session_id, exc)
+        logger.error("Could not update session %s before processing: %s", request.session_id, exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to update session state in storage.",
+        )
 
     # --- Schedule background extraction and return immediately ---
     background_tasks.add_task(
@@ -738,8 +742,12 @@ async def approve_and_mask(request: ApprovalRequest):
     try:
         sm.save_masking_decisions(request.session_id, stored_entities, approved_ids)
     except Exception as exc:
-        logger.warning(
-            "Could not save masking decisions for %s: %s", request.session_id, exc
+        logger.error(
+            "Could not save masking decisions for %s: %s", request.session_id, exc, exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to persist masking decisions to storage.",
         )
 
     # --- Delegate masking to Databricks ---
@@ -1004,7 +1012,11 @@ async def get_session_info(session_id: str):
         except FileNotFoundError:
             logger.debug("entities.json not yet present for session %s — returning empty list", session_id)
         except Exception as exc:
-            logger.warning("Could not load entities for session %s: %s", session_id, exc)
+            logger.error("Could not load entities for session %s: %s", session_id, exc, exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Failed to load entities from storage.",
+            )
 
     return SessionInfo(
         session_id=session.session_id,

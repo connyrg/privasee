@@ -724,4 +724,4 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
 
         except Exception as e:
             logger.error(f"Error writing entities to UC volume: {e}")
-            # Don't fail the request if write fails — result is still returned to caller
+            raise

@@ -265,6 +265,21 @@ async def test_process_sets_session_error_when_databricks_response_cannot_be_par
 
 
 @pytest.mark.integration
+async def test_process_returns_503_when_initial_session_update_fails(
+    client, override_databricks_dependency
+):
+    """503 when the pre-task update_session (status=processing + field_definitions) fails.
+    Storage failure here means the whole workflow is broken — do not silently continue."""
+    sm = override_databricks_dependency
+    sm.update_session.side_effect = Exception("Storage unavailable")
+
+    response = await client.post("/api/process", json=VALID_PAYLOAD)
+
+    assert response.status_code == 503
+    assert "error" in response.json()
+
+
+@pytest.mark.integration
 async def test_process_rejects_empty_field_definitions(
     client, override_databricks_dependency
 ):
