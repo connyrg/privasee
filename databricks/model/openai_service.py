@@ -227,8 +227,8 @@ class OpenAIVisionService:
             return entities
 
         except Exception as e:
-            logger.error(f"Error extracting entities with Azure OpenAI: {str(e)}")
-            return []
+            logger.error(f"Error extracting entities with Azure OpenAI: {str(e)}", exc_info=True)
+            raise
 
     async def extract_entities_from_base64_async(
         self,
@@ -274,7 +274,7 @@ class OpenAIVisionService:
 
         except Exception as e:
             logger.error(f"Error extracting entities with Azure OpenAI (async, page {page_number}): {str(e)}", exc_info=True)
-            return []
+            raise
 
     def _build_extraction_prompt(
         self,
@@ -321,11 +321,12 @@ The document has been processed with OCR. Below is the extracted text and struct
    - If a full name ("Stephen Parrot") appears as a single contiguous entity, extract it as **one entity only** — do NOT additionally extract "Stephen" or "Parrot" from that same occurrence.
    - Only extract partial names ("Stephen") if they appear **separately elsewhere** in the document as their own independent occurrence.
    - Avoid duplicate or overlapping entities referring to the same text span.
+   - **Do NOT include standalone honorific/title prefixes (Mr, Mrs, Ms, Miss, Dr, Prof, etc.) as separate occurrences of a person's name.** When a name is split across form fields (e.g. Title="Mr", Surname="Potter", Given="Harry James"), only extract the surname and given name fields as occurrences — not the title field.
 
    **Examples:**
    - "Stephen Parrot" (single occurrence) → ✅ `"Stephen Parrot"` only
    - "Stephen Parrot" + later standalone "Parrot" → ✅ `"Stephen Parrot"` and `"Parrot"`
-   - "Mr Doe" → ✅ `"Mr Doe"` only (not also `"Doe"` unless it appears separately)
+   - Form fields Title="Mr", Surname="Doe", Given="John" → ✅ occurrences for `"Doe"` and `"John"` only, NOT `"Mr"`
 
 3. **Typo and Variation Grouping**
    - If the same entity appears multiple times with minor OCR typos or spelling variants (e.g. "Kranthi" and "Kranti"), group them under one top-level entity.
@@ -438,8 +439,7 @@ Begin analysis:"""
 
             raw_entities = json.loads(json_text)
             if not isinstance(raw_entities, list):
-                logger.error(f"Expected JSON array from Azure OpenAI, got {type(raw_entities).__name__}")
-                return []
+                raise ValueError(f"Expected JSON array from Azure OpenAI, got {type(raw_entities).__name__}")
 
             validated_entities = []
             for entity in raw_entities:
@@ -493,11 +493,11 @@ Begin analysis:"""
             logger.error(f"Full response text ({len(response_text)} chars): {response_text[:2000]}")
             if len(response_text) > 2000:
                 logger.error(f"... (response truncated, total length: {len(response_text)} chars)")
-            return []
+            raise
         except Exception as e:
             logger.error(f"Error parsing Azure OpenAI response: {e}")
             logger.error(f"Response text: {response_text[:500]}")
-            return []
+            raise
 
     def test_connection(self) -> bool:
         """

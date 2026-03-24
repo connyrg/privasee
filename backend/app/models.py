@@ -378,6 +378,13 @@ class DatabricksProcessResponse(BaseModel):
         else:
             record = raw  # bare dict fallback
 
+        # Surface errors returned by the Databricks model (e.g. ADI timeout,
+        # vision API failure) so the backend can mark the session as "error"
+        # instead of silently treating the result as 0 entities found.
+        if record.get("status") == "error":
+            msg = record.get("error_message") or "Entity extraction failed in the Databricks model."
+            raise RuntimeError(msg)
+
         # Prefer top-level "entities" (merged flat list written by the model)
         # over "pages" (per-page unmerged list). The model sets both; using
         # "entities" avoids overwriting the UC-merged result with unmerged data.

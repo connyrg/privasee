@@ -159,27 +159,46 @@ class MaskingService:
                 # the content stream, causing the original value to show
                 # through.  Updating the value in place avoids that while
                 # keeping the form field structure intact.
-                overlapping_widget = next(
-                    (wgt for wgt in page_widgets if not (wgt.rect & rect).is_empty),
-                    None,
-                )
-                if overlapping_widget is not None:
-                    # Form widgets render on top of the page content stream, so
-                    # a redact annotation underneath is invisible.  Substitute
-                    # only the sensitive substring within the field value to
-                    # preserve surrounding context (e.g. labels, other fields).
-                    current_val = overlapping_widget.field_value or ""
-                    target = occ_original_text.strip()
+                #
+                # An entity can span multiple form widgets (e.g. day/month/year
+                # date fields, or street/suburb address fields).  We collect
+                # ALL overlapping widgets and mask each one whose field value
+                # appears as a component of occ_original_text.
+                overlapping_widgets = [
+                    wgt for wgt in page_widgets if not (wgt.rect & rect).is_empty
+                ]
+                if overlapping_widgets:
                     sub = "[MASKED]" if strategy == "redact" else (replacement or "[MASKED]")
-                    if target:
-                        new_val = current_val.replace(target, sub)
-                        if new_val == current_val and target.lower() in current_val.lower():
-                            # Case-insensitive fallback
-                            new_val = re.sub(re.escape(target), sub, current_val, flags=re.IGNORECASE)
-                    else:
-                        new_val = sub
-                    overlapping_widget.field_value = new_val
-                    overlapping_widget.update()
+                    target = occ_original_text.strip()
+                    # Normalise whitespace for substring matching across widgets
+                    target_norm = re.sub(r"\s+", " ", target).lower()
+
+                    for overlapping_widget in overlapping_widgets:
+                        current_val = overlapping_widget.field_value or ""
+                        if not current_val.strip():
+                            continue
+
+                        # Try replacing the full occ_original_text within this
+                        # widget's value (handles the single-widget case).
+                        if target:
+                            new_val = current_val.replace(target, sub)
+                            if new_val == current_val and target.lower() in current_val.lower():
+                                new_val = re.sub(re.escape(target), sub, current_val, flags=re.IGNORECASE)
+                        else:
+                            new_val = sub
+
+                        if new_val == current_val:
+                            # Full target not in this widget — check whether
+                            # this widget's value is itself a component of the
+                            # occurrence text (multi-widget span, e.g. "31" in
+                            # "31 / 7 / 1980").  Mask the entire field value.
+                            val_norm = re.sub(r"\s+", " ", current_val.strip()).lower()
+                            if val_norm and val_norm in target_norm:
+                                new_val = sub
+
+                        if new_val != current_val:
+                            overlapping_widget.field_value = new_val
+                            overlapping_widget.update()
                 else:
                     page.add_redact_annot(rect, fill=fill_color)
                     if replacement:

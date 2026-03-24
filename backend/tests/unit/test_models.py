@@ -153,6 +153,49 @@ def test_from_mlflow_response_preserves_occurrences():
 
 
 # ===========================================================================
+# Error status handling
+# ===========================================================================
+
+
+@pytest.mark.unit
+def test_from_mlflow_response_raises_runtime_error_on_error_status():
+    """status='error' in the prediction record must raise RuntimeError with the error_message."""
+    raw = {
+        "predictions": [
+            {
+                "status": "error",
+                "error_message": "ADI timeout after 30s",
+            }
+        ]
+    }
+    with pytest.raises(RuntimeError, match="ADI timeout after 30s"):
+        DatabricksProcessResponse.from_mlflow_response(raw)
+
+
+@pytest.mark.unit
+def test_from_mlflow_response_error_status_uses_default_message_when_no_error_message():
+    """status='error' with no error_message uses a generic fallback RuntimeError message."""
+    raw = {"predictions": [{"status": "error"}]}
+    with pytest.raises(RuntimeError, match="Entity extraction failed"):
+        DatabricksProcessResponse.from_mlflow_response(raw)
+
+
+@pytest.mark.unit
+def test_from_mlflow_response_non_error_status_is_not_raised():
+    """status='complete' (not 'error') must not raise; entities are parsed normally."""
+    raw = {
+        "predictions": [
+            {
+                "status": "complete",
+                "entities": [_entity()],
+            }
+        ]
+    }
+    result = DatabricksProcessResponse.from_mlflow_response(raw)
+    assert len(result.entities) == 1
+
+
+# ===========================================================================
 # FieldDefinition validation
 # ===========================================================================
 

@@ -391,13 +391,16 @@ class TestParseOpenAIResponse(unittest.TestCase):
         entities = self.service._parse_openai_response("[]", self.ocr_data)
         self.assertEqual(entities, [])
 
-    def test_parse_invalid_json_returns_empty_list(self):
-        entities = self.service._parse_openai_response("not valid json {[}", self.ocr_data)
-        self.assertEqual(entities, [])
+    def test_parse_invalid_json_raises(self):
+        """Invalid JSON must raise json.JSONDecodeError (no longer silently returns [])."""
+        import json
+        with self.assertRaises(json.JSONDecodeError):
+            self.service._parse_openai_response("not valid json {[}", self.ocr_data)
 
-    def test_parse_non_array_json_returns_empty_list(self):
-        entities = self.service._parse_openai_response('{"entity_type": "Name"}', self.ocr_data)
-        self.assertEqual(entities, [])
+    def test_parse_non_array_json_raises(self):
+        """Non-array JSON must raise ValueError (no longer silently returns [])."""
+        with self.assertRaises(ValueError):
+            self.service._parse_openai_response('{"entity_type": "Name"}', self.ocr_data)
 
     def test_parse_entity_missing_entity_type_is_skipped(self):
         payload = [
@@ -603,23 +606,27 @@ class TestExtractEntitiesFromBase64Async(unittest.TestCase):
         self.assertIn("encoded_img", content[0]["image_url"]["url"])
         self.assertEqual(content[1]["type"], "text")
 
-    def test_returns_empty_list_on_api_error(self):
+    def test_raises_on_api_error(self):
+        """API errors must now propagate instead of returning [] silently."""
         self.mock_async_client.chat.completions.create = AsyncMock(side_effect=Exception("Quota exceeded"))
-        entities = asyncio.run(self.service.extract_entities_from_base64_async(
-            "img_b64", "png", {}, [], page_number=1
-        ))
-        self.assertEqual(entities, [])
+        with self.assertRaises(Exception) as ctx:
+            asyncio.run(self.service.extract_entities_from_base64_async(
+                "img_b64", "png", {}, [], page_number=1
+            ))
+        self.assertIn("Quota exceeded", str(ctx.exception))
 
-    def test_returns_empty_list_on_invalid_json_response(self):
+    def test_raises_on_invalid_json_response(self):
+        """Invalid JSON in the API response must propagate as JSONDecodeError."""
+        import json
         mock_choice = Mock()
         mock_choice.message.content = "not valid json"
         mock_response = Mock()
         mock_response.choices = [mock_choice]
         self.mock_async_client.chat.completions.create = AsyncMock(return_value=mock_response)
-        entities = asyncio.run(self.service.extract_entities_from_base64_async(
-            "img_b64", "png", {}, [], page_number=1
-        ))
-        self.assertEqual(entities, [])
+        with self.assertRaises(json.JSONDecodeError):
+            asyncio.run(self.service.extract_entities_from_base64_async(
+                "img_b64", "png", {}, [], page_number=1
+            ))
 
 
 # ---------------------------------------------------------------------------
