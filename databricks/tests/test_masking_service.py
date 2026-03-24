@@ -500,5 +500,247 @@ class TestMixedStrategies(unittest.TestCase):
         self.assertIn("john@example.com", text)
 
 
+# ===========================================================================
+# Form widget masking
+# ===========================================================================
+
+
+def _create_pdf_with_widgets(widgets_spec: list) -> tuple:
+    """
+    Create a PDF page with AcroForm text widgets.
+
+    widgets_spec: list of (field_name, field_value, rect_tuple)
+        rect_tuple: (x0, y0, x1, y1) in PDF points
+
+    Returns (pdf_bytes, widgets_rects) where widgets_rects maps
+    field_name -> fitz.Rect (so callers can build bboxes from them).
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=W, height=H)
+    widget_rects = {}
+    for field_name, field_value, (x0, y0, x1, y1) in widgets_spec:
+        wgt = fitz.Widget()
+        wgt.field_type = fitz.PDF_WIDGET_TYPE_TEXT
+        wgt.field_name = field_name
+        wgt.field_value = field_value
+        wgt.rect = fitz.Rect(x0, y0, x1, y1)
+        page.add_widget(wgt)
+        widget_rects[field_name] = fitz.Rect(x0, y0, x1, y1)
+    buf = io.BytesIO()
+    doc.save(buf)
+    doc.close()
+    return buf.getvalue(), widget_rects
+
+
+def _widget_values(result_bytes: bytes) -> dict:
+    """Return {field_name: field_value} from the first page of result_bytes."""
+    doc = fitz.open(stream=result_bytes, filetype="pdf")
+    vals = {}
+    for wgt in doc[0].widgets():
+        vals[wgt.field_name] = wgt.field_value or ""
+    doc.close()
+    return vals
+
+
+def _normalised_bbox(rect: fitz.Rect) -> list:
+    """Convert a fitz.Rect (PDF points) to a normalised [x, y, w, h] bbox."""
+    return [rect.x0 / W, rect.y0 / H, rect.width / W, rect.height / H]
+
+
+class TestFormWidgetMasking(unittest.TestCase):
+    """
+    Tests that form widget field values are masked in place, not just painted over.
+
+    Key invariant: when a bounding box from the LLM covers a form widget, the
+    widget's field_value must be updated directly.  A redact-annotation painted
+    on top of a widget is invisible because the widget renders above the content
+    stream layer.
+    """
+
+    # ------------------------------------------------------------------
+    # Single widget — bbox precisely covers widget rect (sanity check)
+    # ------------------------------------------------------------------
+
+    def test_widget_masked_via_exact_bbox_overlap_black_out(self):
+        """Black Out: widget value cleared when bbox exactly covers widget rect."""
+        spec = [("name_field", "John Smith", (50, 100, 200, 120))]
+        pdf_bytes, rects = _create_pdf_with_widgets(spec)
+
+        bbox = _normalised_bbox(rects["name_field"])
+        entity = {
+            "entity_type": "Full Name",
+            "original_text": "John Smith",
+            "replacement_text": "",
+            "strategy": "Black Out",
+            "approved": True,
+            "occurrences": [{"page_number": 1, "original_text": "John Smith",
+                             "bounding_boxes": [bbox]}],
+        }
+
+        svc = MaskingService()
+        result = svc.apply_pdf_masks(pdf_bytes, [entity])
+        vals = _widget_values(result)
+        self.assertNotEqual(vals.get("name_field", "John Smith"), "John Smith",
+                            "Widget value must be cleared by Black Out")
+
+    def test_widget_masked_via_exact_bbox_overlap_fake_data(self):
+        """Fake Data: widget value replaced when bbox exactly covers widget rect."""
+        spec = [("name_field", "John Smith", (50, 100, 200, 120))]
+        pdf_bytes, rects = _create_pdf_with_widgets(spec)
+
+        bbox = _normalised_bbox(rects["name_field"])
+        entity = {
+            "entity_type": "Full Name",
+            "original_text": "John Smith",
+            "replacement_text": "Jane Doe",
+            "strategy": "Fake Data",
+            "approved": True,
+            "occurrences": [{"page_number": 1, "original_text": "John Smith",
+                             "bounding_boxes": [bbox]}],
+        }
+
+        svc = MaskingService()
+        result = svc.apply_pdf_masks(pdf_bytes, [entity])
+        vals = _widget_values(result)
+        self.assertEqual(vals.get("name_field"), "Jane Doe",
+                         "Widget value must be replaced with fake data")
+
+    # ------------------------------------------------------------------
+    # Single widget — bbox is offset and misses the widget rect
+    # (value-based fallback required)
+    # ------------------------------------------------------------------
+
+    def test_widget_masked_via_value_fallback_when_bbox_misses(self):
+        """
+        When the LLM bbox does not intersect the widget rect the service must
+        fall back to matching by field value so the widget is still masked.
+
+        This test fails with the current code (no fallback) and passes once
+        the value-based fallback is in place.
+        """
+        spec = [("address_field", "80 Ann St", (50, 300, 300, 320))]
+        pdf_bytes, _ = _create_pdf_with_widgets(spec)
+
+        # bbox is positioned way above the widget (simulates LLM coordinate mismatch)
+        misplaced_bbox = [50 / W, 10 / H, 250 / W, 15 / H]  # top of page, not near widget
+
+        entity = {
+            "entity_type": "Address",
+            "original_text": "80 Ann St",
+            "replacement_text": "99 Fake Rd",
+            "strategy": "Fake Data",
+            "approved": True,
+            "occurrences": [{"page_number": 1, "original_text": "80 Ann St",
+                             "bounding_boxes": [misplaced_bbox]}],
+        }
+
+        svc = MaskingService()
+        result = svc.apply_pdf_masks(pdf_bytes, [entity])
+        vals = _widget_values(result)
+        self.assertNotEqual(vals.get("address_field"), "80 Ann St",
+                            "Widget value must be replaced even when bbox misses the widget rect")
+
+    def test_widget_not_masked_when_value_does_not_match(self):
+        """
+        Value-based fallback must NOT mask a widget whose value doesn't match
+        the occurrence text.  Unrelated fields must be left intact.
+        """
+        spec = [
+            ("address_field",  "80 Ann St",   (50, 300, 300, 320)),
+            ("unrelated_field", "Some Other",  (50, 350, 300, 370)),
+        ]
+        pdf_bytes, _ = _create_pdf_with_widgets(spec)
+
+        # bbox misses both widgets
+        misplaced_bbox = [50 / W, 10 / H, 250 / W, 15 / H]
+
+        entity = {
+            "entity_type": "Address",
+            "original_text": "80 Ann St",
+            "replacement_text": "99 Fake Rd",
+            "strategy": "Fake Data",
+            "approved": True,
+            "occurrences": [{"page_number": 1, "original_text": "80 Ann St",
+                             "bounding_boxes": [misplaced_bbox]}],
+        }
+
+        svc = MaskingService()
+        result = svc.apply_pdf_masks(pdf_bytes, [entity])
+        vals = _widget_values(result)
+        # Unrelated field must be untouched
+        self.assertEqual(vals.get("unrelated_field"), "Some Other",
+                         "Unrelated widget must not be affected by value-based fallback")
+
+    # ------------------------------------------------------------------
+    # Multi-widget span — occurrence bbox covers multiple widgets
+    # (e.g. day/month/year date fields)
+    # ------------------------------------------------------------------
+
+    def test_multi_widget_dob_all_fields_masked(self):
+        """
+        A date-of-birth split across day/month/year widgets is fully masked when
+        the occurrence bbox covers all three widgets.
+        """
+        spec = [
+            ("dob_day",   "31",   (50,  200, 100, 220)),
+            ("dob_month", "07",   (110, 200, 160, 220)),
+            ("dob_year",  "1980", (170, 200, 250, 220)),
+        ]
+        pdf_bytes, rects = _create_pdf_with_widgets(spec)
+
+        # Single bbox spanning all three widgets
+        combined = rects["dob_day"] | rects["dob_month"] | rects["dob_year"]
+        combined_bbox = _normalised_bbox(combined)
+
+        entity = {
+            "entity_type": "Date of Birth",
+            "original_text": "31 07 1980",
+            "replacement_text": "12 03 1980",
+            "strategy": "Fake Data",
+            "approved": True,
+            "occurrences": [{"page_number": 1, "original_text": "31 07 1980",
+                             "bounding_boxes": [combined_bbox]}],
+        }
+
+        svc = MaskingService()
+        result = svc.apply_pdf_masks(pdf_bytes, [entity])
+        vals = _widget_values(result)
+
+        self.assertNotEqual(vals.get("dob_day"),   "31",   "Day widget must be masked")
+        self.assertNotEqual(vals.get("dob_month"), "07",   "Month widget must be masked")
+        self.assertNotEqual(vals.get("dob_year"),  "1980", "Year widget must be masked")
+
+    def test_multi_widget_address_street_and_suburb_masked(self):
+        """
+        Address split across street and suburb widgets — both must be masked
+        when the occurrence text spans both field values.
+        """
+        spec = [
+            ("street",  "80 Ann St",  (50, 400, 300, 420)),
+            ("suburb",  "Brisbane",   (50, 430, 300, 450)),
+        ]
+        pdf_bytes, rects = _create_pdf_with_widgets(spec)
+
+        combined = rects["street"] | rects["suburb"]
+        combined_bbox = _normalised_bbox(combined)
+
+        entity = {
+            "entity_type": "Address",
+            "original_text": "80 Ann St Brisbane",
+            "replacement_text": "99 Fake Rd Sydney",
+            "strategy": "Fake Data",
+            "approved": True,
+            "occurrences": [{"page_number": 1, "original_text": "80 Ann St Brisbane",
+                             "bounding_boxes": [combined_bbox]}],
+        }
+
+        svc = MaskingService()
+        result = svc.apply_pdf_masks(pdf_bytes, [entity])
+        vals = _widget_values(result)
+
+        self.assertNotEqual(vals.get("street"),  "80 Ann St",  "Street widget must be masked")
+        self.assertNotEqual(vals.get("suburb"),  "Brisbane",   "Suburb widget must be masked")
+
+
 if __name__ == "__main__":
     unittest.main()

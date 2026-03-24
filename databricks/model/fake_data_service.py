@@ -135,12 +135,16 @@ class FakeDataService:
         if "username" in t or "user" in t:
             return self.faker.user_name()
 
-        # ---- Fallback based on original text pattern ---------------------
-        if original_text.strip().isdigit():
-            return self.faker.numerify("#" * len(original_text.strip()))
+        # ---- Fallback: preserve character structure ----------------------
+        # Handles any unrecognised type (IDs, reference numbers, etc.) by
+        # replacing each digit with a random digit and each letter with a
+        # random letter, keeping separators (spaces, hyphens, slashes) intact.
+        # E.g. "2123 45678 A 1" → "7654 12983 C 6" (Medicare)
+        #      "123 456 789"   → "987 321 654"    (TFN)
+        #      "N1234567"      → "K7865432"       (Passport)
         if "@" in original_text:
             return self.faker.email()
-        return self.faker.name()
+        return self._preserve_structure(original_text)
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -285,10 +289,12 @@ class FakeDataService:
         s = original.strip()
 
         # --- Locale detection ---
+        # Default to AU locale — this is an Australian application.
+        # Only override if we can positively identify a non-AU address
+        # (currently no such heuristic), so always use faker_au.
         au_state_m = _AU_STATE_RE.search(s)
         au_pc_m = _AU_POSTCODE_RE.search(s)
-        is_au = bool(au_state_m or au_pc_m)
-        loc = self.faker_au if is_au else self.faker
+        loc = self.faker_au
 
         # --- Separator ---
         sep = "\n" if "\n" in s else ", "
@@ -443,3 +449,26 @@ class FakeDataService:
         if gender == "male":
             return self.faker.name_male()
         return self.faker.name()
+
+    def _preserve_structure(self, original: str) -> str:
+        """
+        Generate a replacement that mirrors the character structure of *original*.
+
+        Each digit is replaced with a random digit (0–9), each letter with a
+        random letter (matching case), and all other characters (spaces, hyphens,
+        slashes, etc.) are kept verbatim.
+
+        Used as the generic fallback for unrecognised entity types such as
+        government IDs, reference numbers, and mixed alphanumeric codes.
+        """
+        result = []
+        for ch in original:
+            if ch.isdigit():
+                result.append(str(self.faker.random_int(0, 9)))
+            elif ch.isupper():
+                result.append(self.faker.random_letter().upper())
+            elif ch.islower():
+                result.append(self.faker.random_letter().lower())
+            else:
+                result.append(ch)
+        return "".join(result)

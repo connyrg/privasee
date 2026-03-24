@@ -167,6 +167,28 @@ class MaskingService:
                 overlapping_widgets = [
                     wgt for wgt in page_widgets if not (wgt.rect & rect).is_empty
                 ]
+                # Fallback: bbox from the vision model may not precisely land on
+                # the widget rect (e.g. tight text bbox vs larger widget area).
+                # Search by field-value match so we still mask the right widget
+                # even when the coordinate intersection test misses.
+                if not overlapping_widgets and occ_original_text.strip():
+                    target_norm_fb = re.sub(r"\s+", " ", occ_original_text.strip()).lower()
+                    for wgt in page_widgets:
+                        wval = wgt.field_value or ""
+                        if not wval.strip():
+                            continue
+                        wval_norm = re.sub(r"\s+", " ", wval.strip()).lower()
+                        # Match: widget value equals occurrence text, or widget
+                        # value is a component of a multi-widget occurrence span,
+                        # or occurrence text is fully contained in the widget value.
+                        if (wval_norm == target_norm_fb
+                                or wval_norm in target_norm_fb
+                                or target_norm_fb in wval_norm):
+                            overlapping_widgets.append(wgt)
+                            logger.debug(
+                                "widget value-match fallback: field=%r val=%r occ=%r",
+                                wgt.field_name, wval, occ_original_text,
+                            )
                 if overlapping_widgets:
                     sub = "[MASKED]" if strategy == "redact" else (replacement or "[MASKED]")
                     target = occ_original_text.strip()
