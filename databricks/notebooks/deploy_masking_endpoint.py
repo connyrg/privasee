@@ -40,6 +40,28 @@
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Input Widgets
+
+# COMMAND ----------
+
+# Add widgets for model name, model version, and endpoint name
+dbutils.widgets.text("model_name", "privasee_doc_masking", "Model Name")
+dbutils.widgets.text("model_version", "1", "Model Version")
+dbutils.widgets.text("endpoint_name", "privasee_doc_masking_endpoint_dev", "Endpoint Name")
+
+# Read widget values into variables
+MODEL_NAME = dbutils.widgets.get("model_name")
+MODEL_VERSION = dbutils.widgets.get("model_version")
+ENDPOINT_NAME = dbutils.widgets.get("endpoint_name")
+
+print(f"✅ Widget values loaded:")
+print(f"   Model Name: {MODEL_NAME}")
+print(f"   Model Version: {MODEL_VERSION}")
+print(f"   Endpoint Name: {ENDPOINT_NAME}")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Configuration
 # MAGIC Update these values to match your registered model
 
@@ -48,12 +70,9 @@
 # Model configuration - must match values from register_model.py
 CATALOG = "datascience_dev_bronze_sandbox"
 SCHEMA = "ds_document_deidentification"
-MODEL_NAME = "doc_masking"
 UC_MODEL_PATH = f"{CATALOG}.{SCHEMA}.{MODEL_NAME}"
 
 # Endpoint configuration
-ENDPOINT_NAME = "doc_masking"
-MODEL_VERSION = "20"  # Update to your registered model version
 WORKLOAD_SIZE = "Small"  # Options: Small, Medium, Large
 SCALE_TO_ZERO = True  # Enable scale-to-zero to save costs
 
@@ -94,46 +113,14 @@ print("✅ Workspace client initialized")
 # COMMAND ----------
 
 # Environment variables for the endpoint
-# These reference Databricks secrets - update scope and key names
-# OPENAI_SECRET_SCOPE = "openai_00010_1"  # Update to your secret scope
-# PROXY_SECRET_SCOPE = "nginx_proxy_sp"
 
 env_vars = {
-    # "VISION_SERVICE_PROVIDER": VISION_PROVIDER,
+    "ENABLE_MLFLOW_TRACING": True,
+    "MLFLOW_EXPERIMENT_ID": "2142914363372294",
     "UC_VOLUME_PATH": UC_VOLUME_PATH,
     "DATABRICKS_HOST": "https://suncorp-dev.cloud.databricks.com/",
     "DATABRICKS_TOKEN": f"{{{{secrets/Conny.GUNADI@suncorp.com.au/DATABRICKS_TOKEN_DEV}}}}",
-    # Azure Document Intelligence secrets
-    # # "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT": f"{{{{secrets/{SECRET_SCOPE}/adi_endpoint}}}}",
-    # # "AZURE_DOCUMENT_INTELLIGENCE_KEY": f"{{{{secrets/{SECRET_SCOPE}/adi_key}}}}",
-    # "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT": "dummy_endpoint",
-    # "AZURE_DOCUMENT_INTELLIGENCE_KEY": "dummy_key",
 }
-
-
-# Add OpenAI or Claude secrets based on provider
-# if VISION_PROVIDER == "openai":
-#     env_vars.update({
-#         "DATABRICKS_HOST": "https://suncorp-dev.cloud.databricks.com/",
-#         "DATABRICKS_TOKEN": f"{{{{secrets/Conny.GUNADI@suncorp.com.au/DATABRICKS_TOKEN_DEV}}}}",
-#         "AZURE_OPENAI_API_KEY": f"{{{{secrets/{OPENAI_SECRET_SCOPE}/apikey}}}}",
-#         "AZURE_OPENAI_ENDPOINT": "https://openai-00010-non-prod-1.openai.azure.com/",
-#         "AZURE_OPENAI_API_VERSION": "2024-02-15-preview",
-#         "AZURE_OPENAI_DEPLOYMENT_NAME": "gpt-5-global",
-#         "WORKSPACE_URL": "https://suncorp-dev.cloud.databricks.com/",
-#         "WORKSPACE_ID": "1238531023703058",
-#         "PROXY_CLUSTER_ID": "0503-061117-o2rl78n9",
-#         "PROXY_PORT": "8110",
-#         "PROXY_ROUTE": "openai-00010-1",
-#         "PROXY_CLIENT_ID": f"{{{{secrets/{PROXY_SECRET_SCOPE}/client_id}}}}",
-#         "PROXY_CLIENT_SECRET": f"{{{{secrets/{PROXY_SECRET_SCOPE}/client_secret}}}}",
-#     })
-#     print("✅ OpenAI environment variables configured")
-# elif VISION_PROVIDER == "claude":
-#     env_vars.update({
-#         "ANTHROPIC_API_KEY": "dummy_apikey",
-#     })
-#     print("✅ Claude environment variables configured")
 
 print(f"\n📋 Environment variables:")
 for key, value in env_vars.items():
@@ -141,42 +128,6 @@ for key, value in env_vars.items():
         print(f"   {key}: {value}")
     else:
         print(f"   {key}: {value}")
-
-# COMMAND ----------
-
-# DBTITLE 1,Cell 9
-# MAGIC %md
-# MAGIC ⚠️ **Important: Verify Secrets Exist**
-# MAGIC
-# MAGIC Before deploying, ensure these secrets exist in your Databricks workspace.
-# MAGIC
-# MAGIC **For Azure Document Intelligence:**
-# MAGIC * Note: Currently using dummy values in the code - update Cell 8 with real secret references if needed
-# MAGIC
-# MAGIC **For OpenAI (if VISION_PROVIDER = "openai"):**
-# MAGIC * `{SECRET_SCOPE}/apikey` - Azure OpenAI API key
-# MAGIC * `{SECRET_SCOPE}/client_id` - Proxy client ID
-# MAGIC * `{SECRET_SCOPE}/client_secret` - Proxy client secret
-# MAGIC * `{SECRET_SCOPE}/DATABRICKS_TOKEN_DEV` - Databricks token
-# MAGIC
-# MAGIC **For Claude (if VISION_PROVIDER = "claude"):**
-# MAGIC * Note: Currently using dummy value in the code - update Cell 8 with real secret reference if needed
-# MAGIC
-# MAGIC Run the cell below to verify secrets (optional):
-
-# COMMAND ----------
-
-# # Verify secrets exist (optional)
-# try:
-#     # Try to list secrets in the scope
-#     secrets = dbutils.secrets.list(SECRET_SCOPE)
-#     print(f"✅ Secret scope '{SECRET_SCOPE}' exists with {len(secrets)} secrets:")
-#     for secret in secrets:
-#         print(f"   - {secret.key}")
-# except Exception as e:
-#     print(f"⚠️  Warning: Could not access secret scope '{SECRET_SCOPE}'")
-#     print(f"   Error: {e}")
-#     print("   Make sure the secret scope exists and contains required secrets")
 
 # COMMAND ----------
 
@@ -321,22 +272,7 @@ test_payload = {
                 {
                     "entity_type": "Claimant Name",
                     "original_text": "Stephen Parrot",
-                    "bounding_box": [
-                        0.14965359893857966,
-                        0.16382730180575378,
-                        0.11323988798943743,
-                        0.01599838422713382
-                    ],
                     "confidence": 0.99,
-                    "page_number": 1,
-                    "bounding_boxes": [
-                        {
-                            "x": 0.14965359893857966,
-                            "y": 0.16382730180575378,
-                            "width": 0.11323988798943746,
-                            "height": 0.015998384227133816
-                        }
-                    ],
                     "id": "76673463-773e-4100-bf63-7d31f1b3c72d",
                     "approved": True,
                     "strategy": "Fake Data",
@@ -344,59 +280,48 @@ test_payload = {
                     "occurrences": [
                         {
                             "page_number": 1,
-                            "bounding_box": [
+                            "bounding_boxes": [[
                             0.14965359893857966,
                             0.16382730180575378,
                             0.11323988798943746,
                             0.015998384227133816
-                            ],
+                            ]],
                             "original_text": "Stephen Parrot"
                         },
                         {
                             "page_number": 1,
-                            "bounding_box": [
+                            "bounding_boxes": [[
                             0.12094335670594705,
                             0.20772694728975996,
                             0.062211488372183626,
                             0.015998384227133816
-                            ],
+                            ]],
                             "original_text": "Stephen"
                         }
                     ]
                 },
                 {
-                    "id": "test_e2",
                     "entity_type": "incident_date",
-                    "bounding_box": [
-                        0.6438296945689354,
-                        0.286119207615939,
-                        0.1270384139471667,
-                        0.01599838422713382
-                    ],
-                    "bounding_boxes": [
-                        {
-                            "x": 0.6438296945689354,
-                            "y": 0.286119207615939,
-                            "width": 0.1270384139471667,
-                            "height": 0.01599838422713382
-                        }
-                    ],
-                    "original_text": "12 January 2020,",
+                    "original_text": "12 January 2020",
+                    "confidence": 0.95,
                     "replacement_text": "incident_date_A",
-                    "strategy": "Entity Label",
-                    "approved": True,
-                    "occurences": [
+                    "occurrences": [
                         {
                             "page_number": 1,
-                            "bounding_box": [
+                            "original_text": "12 January 2020,",
+                            "bounding_boxes": [
+                                [
                                 0.6438296945689354,
                                 0.286119207615939,
-                                0.1270384139471667,
-                                0.01599838422713382
-                            ],
-                            "original_text": "12 January 2020,",
-                        },
-                    ]
+                                0.12703841394716664,
+                                0.015998384227133844
+                                ]
+                            ]
+                        }
+                    ],
+                    "id": "8418c928-1aff-4372-958c-be9461b408c1",
+                    "approved": True,
+                    "strategy": "Entity Label"
                 }
             ])
         }

@@ -40,6 +40,28 @@
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Input Widgets
+
+# COMMAND ----------
+
+# Add widgets for model name, model version, and endpoint name
+dbutils.widgets.text("model_name", "privasee_entity_extraction", "Model Name")
+dbutils.widgets.text("model_version", "1", "Model Version")
+dbutils.widgets.text("endpoint_name", "privasee_entity_extraction_endpoint_dev", "Endpoint Name")
+
+# Read widget values into variables
+MODEL_NAME = dbutils.widgets.get("model_name")
+MODEL_VERSION = dbutils.widgets.get("model_version")
+ENDPOINT_NAME = dbutils.widgets.get("endpoint_name")
+
+print(f"✅ Widget values loaded:")
+print(f"   Model Name: {MODEL_NAME}")
+print(f"   Model Version: {MODEL_VERSION}")
+print(f"   Endpoint Name: {ENDPOINT_NAME}")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Configuration
 # MAGIC Update these values to match your registered model
 
@@ -48,12 +70,9 @@
 # Model configuration - must match values from register_model.py
 CATALOG = "datascience_dev_bronze_sandbox"
 SCHEMA = "ds_document_deidentification"
-MODEL_NAME = "doc_deidentification"
 UC_MODEL_PATH = f"{CATALOG}.{SCHEMA}.{MODEL_NAME}"
 
 # Endpoint configuration
-ENDPOINT_NAME = "privasee_endpoint_local"
-MODEL_VERSION = "44"  # Update to your registered model version
 WORKLOAD_SIZE = "Small"  # Options: Small, Medium, Large
 SCALE_TO_ZERO = True  # Enable scale-to-zero to save costs
 
@@ -103,11 +122,7 @@ env_vars = {
     "MLFLOW_EXPERIMENT_ID": "2142914363372294",
     "VISION_SERVICE_PROVIDER": VISION_PROVIDER,
     "UC_VOLUME_PATH": UC_VOLUME_PATH,
-    # Azure Document Intelligence secrets
-    # "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT": f"{{{{secrets/{SECRET_SCOPE}/adi_endpoint}}}}",
-    # "AZURE_DOCUMENT_INTELLIGENCE_KEY": f"{{{{secrets/{SECRET_SCOPE}/adi_key}}}}",
-    "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT": "dummy_endpoint",
-    "AZURE_DOCUMENT_INTELLIGENCE_KEY": "dummy_key",
+    "PRIVASEE_DEBUG_INTERMEDIATE": False,
 }
 
 # Add OpenAI or Claude secrets based on provider
@@ -154,7 +169,7 @@ print("✅ Claude environment variables configured")
 env_vars.update({
     "DATABRICKS_MODEL_NAME": "databricks-claude-opus-4-6",
 })
-print("✅ Claude environment variables configured")
+print("✅ Databricks environment variables configured")
 
 print(f"\n📋 Environment variables:")
 for key, value in env_vars.items():
@@ -336,7 +351,7 @@ print("🧪 Testing endpoint availability...")
 test_payload = {
     "dataframe_records": [
         {
-            "session_id": "integration_test_002",
+            "session_id": "integration_test_001",
             "field_definitions": [
                 {
                     "name": "claimant_name",
