@@ -438,6 +438,7 @@ async def _process_background(
     UCSessionManager calls are wrapped in asyncio.to_thread so they don't
     stall the event loop.
     """
+    _t_start = time.monotonic()
     audit_logger.info("PROCESS_START session=%s fields=%d", session_id, len(field_definitions))
 
     if MOCK_DATABRICKS:
@@ -458,7 +459,8 @@ async def _process_background(
             session_id=session_id,
             field_definitions=field_definitions,
         )
-        logger.info("Calling Databricks for session %s", session_id)
+        logger.info("Calling Databricks endpoint for session %s", session_id)
+        _t_http = time.monotonic()
         try:
             async with httpx.AsyncClient(timeout=600.0) as client:
                 response = await client.post(
@@ -470,10 +472,15 @@ async def _process_background(
                     },
                 )
             response.raise_for_status()
+            _http_elapsed = time.monotonic() - _t_http
+            logger.info(
+                "Databricks HTTP call complete for session %s: %.1fs, response %d bytes",
+                session_id, _http_elapsed, len(response.content),
+            )
             raw: Dict[str, Any] = response.json()
         except httpx.TimeoutException as exc:
             err = "Entity extraction timed out. The document may be complex or the endpoint is under load."
-            logger.error("Databricks timed out for session %s: %s", session_id, exc)
+            logger.error("Databricks timed out for session %s after %.1fs: %s", session_id, time.monotonic() - _t_http, exc)
             audit_logger.error("PROCESS_FAILURE session=%s reason=timeout", session_id)
             try:
                 await asyncio.to_thread(sm.update_session, session_id, status="error", error_message=err)
@@ -482,7 +489,7 @@ async def _process_background(
             return
         except (httpx.HTTPStatusError, httpx.RequestError) as exc:
             err = f"Databricks request failed: {exc}"
-            logger.error("Databricks error for session %s: %s", session_id, exc)
+            logger.error("Databricks error for session %s after %.1fs: %s", session_id, time.monotonic() - _t_http, exc)
             audit_logger.error("PROCESS_FAILURE session=%s reason=%r", session_id, str(exc))
             try:
                 await asyncio.to_thread(sm.update_session, session_id, status="error", error_message=err)
@@ -491,10 +498,9 @@ async def _process_background(
             return
 
         logger.info(
-            "Databricks raw response keys for session %s: %s (first-level preview: %s)",
+            "Databricks raw response keys for session %s: %s",
             session_id,
             list(raw.keys()),
-            str(raw)[:500],
         )
 
         # Check directly for a model-level error in the raw response before
@@ -545,13 +551,15 @@ async def _process_background(
                 logger.error("Failed to mark session %s as error after entity save failure: %s", session_id, ue)
             return
 
+    _t_status = time.monotonic()
     try:
         await asyncio.to_thread(sm.update_session, session_id, status="awaiting_review")
+        logger.info("Session %s status update to awaiting_review took %.1fs", session_id, time.monotonic() - _t_status)
     except Exception as exc:
         logger.error(
-            "Could not update session %s to 'awaiting_review': %s — "
+            "Could not update session %s to 'awaiting_review' after %.1fs: %s — "
             "attempting to mark as error so the user is not left waiting.",
-            session_id, exc, exc_info=True,
+            session_id, time.monotonic() - _t_status, exc, exc_info=True,
         )
         audit_logger.error("PROCESS_FAILURE session=%s reason=status_update_failed", session_id)
         try:
@@ -567,9 +575,10 @@ async def _process_background(
             )
         return
 
+    _total = time.monotonic() - _t_start
     suffix = " (mock)" if MOCK_DATABRICKS else ""
-    logger.info("Background processing done for session %s — %d entities%s", session_id, len(entities), suffix)
-    audit_logger.info("PROCESS_COMPLETE session=%s entities=%d mock=%s", session_id, len(entities), MOCK_DATABRICKS)
+    logger.info("Background processing done for session %s — %d entities, total %.1fs%s", session_id, len(entities), _total, suffix)
+    audit_logger.info("PROCESS_COMPLETE session=%s entities=%d total_s=%.1f mock=%s", session_id, len(entities), _total, MOCK_DATABRICKS)
 
 
 @app.post("/api/process", response_model=ProcessAcceptedResponse, status_code=202)
