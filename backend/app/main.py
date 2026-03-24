@@ -496,12 +496,30 @@ async def _process_background(
             list(raw.keys()),
             str(raw)[:500],
         )
+
+        # Check directly for a model-level error in the raw response before
+        # attempting to parse entities.  This handles the case where the model's
+        # predict() outer try/except caught an internal error (e.g. vision API
+        # 504) and returned {"status": "error", "error_message": "..."} so the
+        # user sees the real message rather than a generic parse-failure string.
+        _predictions = raw.get("predictions") or raw.get("dataframe_records")
+        _record = _predictions[0] if isinstance(_predictions, list) and _predictions else raw
+        if isinstance(_record, dict) and _record.get("status") == "error":
+            err = _record.get("error_message") or "Entity extraction failed."
+            logger.error("Model reported error for session %s: %s", session_id, err)
+            audit_logger.error("PROCESS_FAILURE session=%s reason=model_error err=%r", session_id, err)
+            try:
+                await asyncio.to_thread(sm.update_session, session_id, status="error", error_message=err)
+            except Exception as ue:
+                logger.error("Failed to mark session %s as error after model error: %s", session_id, ue)
+            return
+
         try:
             db_response = DatabricksProcessResponse.from_mlflow_response(raw)
             entities = db_response.entities
             logger.info("Parsed %d entities for session %s", len(entities), session_id)
         except Exception as exc:
-            err = f"Could not parse entity list returned by Databricks: {exc}"
+            err = f"Entity extraction failed: {exc}"
             logger.error("Parse error for session %s: %s — raw: %s", session_id, exc, raw)
             audit_logger.error("PROCESS_FAILURE session=%s reason=parse_error err=%r", session_id, str(exc))
             try:

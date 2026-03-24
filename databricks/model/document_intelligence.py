@@ -536,12 +536,12 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
                 field_definitions=field_definitions,
                 page_number=page_number
             )
-            
+
             return entities
-            
+
         except Exception as e:
-            logger.error(f"Error extracting entities from page {page_number}: {e}")
-            return []
+            logger.error(f"Error extracting entities from page {page_number}: {e}", exc_info=True)
+            raise
 
     @staticmethod
     def _merge_entity_variants(entities: List[Dict]) -> List[Dict]:
