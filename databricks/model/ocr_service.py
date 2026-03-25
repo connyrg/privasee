@@ -197,7 +197,8 @@ class OCRService:
                 png_bytes = pix.tobytes("png")
                 png_w = page.rect.width * self.RENDER_ZOOM_FACTOR
                 png_h = page.rect.height * self.RENDER_ZOOM_FACTOR
-                page_image_b64 = base64.b64encode(png_bytes).decode("utf-8")
+                vision_bytes = self._scale_for_vision(Image.open(io.BytesIO(png_bytes)), png_bytes)
+                page_image_b64 = base64.b64encode(vision_bytes).decode("utf-8")
                 scanned_tasks.append(
                     (page_num, page_num + 1, png_bytes, png_w, png_h, page_image_b64)
                 )
@@ -285,7 +286,8 @@ class OCRService:
         mat = fitz.Matrix(self.RENDER_ZOOM_FACTOR, self.RENDER_ZOOM_FACTOR)
         pix = page.get_pixmap(matrix=mat)
         png_bytes = pix.tobytes("png")
-        page_image_b64 = base64.b64encode(png_bytes).decode('utf-8')
+        vision_bytes = self._scale_for_vision(Image.open(io.BytesIO(png_bytes)), png_bytes)
+        page_image_b64 = base64.b64encode(vision_bytes).decode('utf-8')
         
         return {
             "page_num": page_num,
@@ -331,7 +333,7 @@ class OCRService:
         Only used for the vision API call — ADI OCR always receives the original
         bytes to keep OCR coordinate offsets stable.
         """
-        MAX_VISION_PIXELS = 1500  # cap to avoid large payloads — downscale only
+        MAX_VISION_PIXELS = 1024  # cap to avoid large payloads — downscale only
 
         w, h = img.size
         longer = max(w, h)
