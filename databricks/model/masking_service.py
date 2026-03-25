@@ -232,7 +232,7 @@ class MaskingService:
                 # Use display rect height for font sizing (visually correct scale).
                 # Use raw PDF rect for position; rotate to counter page rotation so
                 # replacement text appears horizontal in the display view.
-                fontsize = max(6, min(10, int(rect_display.height * 0.7)))
+                fontsize = max(6, min(36, int(rect_display.height * 0.7)))
                 page.insert_text(
                     (rect.x0 + 2, rect.y1 - 2),
                     text,
