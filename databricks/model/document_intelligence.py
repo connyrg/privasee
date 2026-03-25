@@ -695,7 +695,6 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
                 "saved_at": datetime.now(timezone.utc).isoformat(),
                 "status": "awaiting_review",
                 "entities": flat_entities,
-                "intermediate_results": result.get("intermediate_results", {}),
             }
 
             _FILES_API = "/api/2.0/fs/files"
@@ -706,6 +705,24 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
             resp = _requests.put(entities_url, headers=headers, data=json.dumps(payload))
             resp.raise_for_status()
             logger.info(f"Wrote {len(flat_entities)} entities to UC volume for session {session_id}")
+
+            # Write intermediate_results to a separate file to keep entities.json small.
+            # The poll endpoint reads entities.json on every status check — a large file
+            # causes slow UC reads that push the response past the frontend timeout.
+            intermediate = result.get("intermediate_results")
+            if intermediate:
+                intermediate_payload = {
+                    "session_id": session_id,
+                    "saved_at": datetime.now(timezone.utc).isoformat(),
+                    "intermediate_results": intermediate,
+                }
+                intermediate_url = f"{self.databricks_host}{_FILES_API}{base_path}/debug_intermediate.json"
+                try:
+                    resp = _requests.put(intermediate_url, headers=headers, data=json.dumps(intermediate_payload))
+                    resp.raise_for_status()
+                    logger.info(f"Wrote intermediate_results to debug_intermediate.json for session {session_id}")
+                except Exception as e:
+                    logger.warning(f"Could not write debug_intermediate.json for session {session_id}: {e}")
 
             # Write ocr.json when debug mode is enabled (image_base64 stripped to keep size manageable)
             if ocr_pages and os.environ.get("PRIVASEE_DEBUG_INTERMEDIATE", "false").lower() == "true":

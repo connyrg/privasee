@@ -533,13 +533,13 @@ def test_delete_session_reads_metadata_then_deletes_files(session_manager_instan
     session_id = "abc-session-123"
     metadata = {"session_id": session_id, "original_filename": "report.pdf"}
 
-    responses = [_ok_response(metadata)] + [_ok_response() for _ in range(5)]
+    responses = [_ok_response(metadata)] + [_ok_response() for _ in range(6)]
 
     with patch("app.session_manager.requests.request") as mock_request:
         mock_request.side_effect = responses
         session_manager_instance.delete_session(session_id)
 
-    assert mock_request.call_count == 6  # 1 GET + 5 DELETEs
+    assert mock_request.call_count == 7  # 1 GET + 6 DELETEs
 
     get_call = mock_request.call_args_list[0]
     assert get_call.args[0] == "get"
@@ -555,7 +555,7 @@ def test_delete_session_uses_correct_extension_from_metadata(session_manager_ins
     session_id = "abc-session-123"
     metadata = {"session_id": session_id, "original_filename": "scan.png"}
 
-    responses = [_ok_response(metadata)] + [_ok_response() for _ in range(5)]
+    responses = [_ok_response(metadata)] + [_ok_response() for _ in range(6)]
 
     with patch("app.session_manager.requests.request") as mock_request:
         mock_request.side_effect = responses
@@ -572,7 +572,7 @@ def test_delete_session_ignores_404_on_missing_files(session_manager_instance):
     metadata = {"session_id": session_id, "original_filename": "report.pdf"}
 
     # metadata GET succeeds; all DELETEs return 404
-    responses = [_ok_response(metadata)] + [_not_found_response() for _ in range(5)]
+    responses = [_ok_response(metadata)] + [_not_found_response() for _ in range(6)]
 
     with patch("app.session_manager.requests.request") as mock_request:
         mock_request.side_effect = responses
@@ -591,7 +591,7 @@ def test_delete_session_falls_back_to_pdf_when_metadata_unreadable(session_manag
     # _request retries ConnectionError up to _MAX_RETRIES times, so we need
     # _MAX_RETRIES+1 ConnectionErrors to exhaust all attempts, then 5 DELETE ok responses.
     conn_errors = [ReqConnError("down")] * (sm_module._MAX_RETRIES + 1)
-    delete_responses = [_ok_response() for _ in range(5)]
+    delete_responses = [_ok_response() for _ in range(6)]
 
     with patch("app.session_manager.requests.request") as mock_request, \
          patch.object(sm_module, "_RETRY_DELAYS", (0, 0, 0)):

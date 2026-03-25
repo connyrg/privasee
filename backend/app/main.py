@@ -594,7 +594,7 @@ async def process_document(request: ProcessRequest, background_tasks: Background
 
     # --- Verify session exists ---
     try:
-        session = sm.get_session(request.session_id)
+        session = await asyncio.to_thread(sm.get_session, request.session_id)
     except NotImplementedError:
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
@@ -664,7 +664,7 @@ async def approve_and_mask(request: ApprovalRequest):
 
     # --- Load original file ---
     try:
-        session = sm.get_session(request.session_id)
+        session = await asyncio.to_thread(sm.get_session, request.session_id)
     except NotImplementedError:
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
@@ -689,7 +689,7 @@ async def approve_and_mask(request: ApprovalRequest):
     stored_original = f"original{original_ext}"
 
     try:
-        original_bytes = sm.get_file(request.session_id, stored_original)
+        original_bytes = await asyncio.to_thread(sm.get_file, request.session_id, stored_original)
     except NotImplementedError:
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
@@ -712,7 +712,7 @@ async def approve_and_mask(request: ApprovalRequest):
     # --- Load stored entities ---
     stored_entities: List[Dict[str, Any]] = []
     try:
-        stored_entities = sm.get_entities(request.session_id)
+        stored_entities = await asyncio.to_thread(sm.get_entities, request.session_id)
     except NotImplementedError:
         # Storage not implemented yet — fall back to updated_entities from request
         if request.updated_entities:
@@ -767,7 +767,7 @@ async def approve_and_mask(request: ApprovalRequest):
 
     # --- Persist audit record before masking (captured even if masking fails) ---
     try:
-        sm.save_masking_decisions(request.session_id, stored_entities, approved_ids)
+        await asyncio.to_thread(sm.save_masking_decisions, request.session_id, stored_entities, approved_ids)
     except Exception as exc:
         logger.error(
             "Could not save masking decisions for %s: %s", request.session_id, exc, exc_info=True
@@ -853,7 +853,7 @@ async def approve_and_mask(request: ApprovalRequest):
     # already in UC. Status being stuck at 'awaiting_review' has no visible
     # impact on the user (frontend uses the API response, not stored status).
     try:
-        sm.update_session(request.session_id, status="completed")
+        await asyncio.to_thread(sm.update_session, request.session_id, status="completed")
     except Exception as exc:
         logger.error(
             "Could not update session %s to 'completed' after successful masking: %s",
@@ -939,7 +939,7 @@ async def serve_file(folder: str, filename: str):
 
     # --- Look up session to determine original extension ---
     try:
-        session = sm.get_session(session_id)
+        session = await asyncio.to_thread(sm.get_session, session_id)
     except NotImplementedError:
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
@@ -969,7 +969,7 @@ async def serve_file(folder: str, filename: str):
 
     # --- Read file bytes from UC ---
     try:
-        file_bytes = sm.get_file(session_id, stored_name)
+        file_bytes = await asyncio.to_thread(sm.get_file, session_id, stored_name)
     except NotImplementedError:
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
@@ -1073,7 +1073,7 @@ async def delete_session(session_id: str):
     sm = _require_session_manager()
 
     try:
-        session = sm.get_session(session_id)
+        session = await asyncio.to_thread(sm.get_session, session_id)
     except Exception as exc:
         logger.error("get_session(%s) failed: %s", session_id, exc, exc_info=True)
         raise HTTPException(
@@ -1088,7 +1088,7 @@ async def delete_session(session_id: str):
         )
 
     try:
-        sm.delete_session(session_id)
+        await asyncio.to_thread(sm.delete_session, session_id)
     except Exception as exc:
         logger.error("delete_session(%s) failed: %s", session_id, exc, exc_info=True)
         raise HTTPException(
@@ -1119,7 +1119,7 @@ async def verify_session(session_id: str, request: VerifyRequest):
     sm = _require_session_manager()
 
     try:
-        pdf_bytes = sm.get_file(session_id, "masked.pdf")
+        pdf_bytes = await asyncio.to_thread(sm.get_file, session_id, "masked.pdf")
     except FileNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
