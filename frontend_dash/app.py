@@ -1267,7 +1267,7 @@ def poll_status(n_intervals: int, session: dict | None, interval_disabled: bool)
         resp = req.get(
             f"{API_BASE_URL}/api/sessions/{session_id}",
             headers=headers,
-            timeout=10,
+            timeout=30,
             verify=SSL_VERIFY,
         )
         resp.raise_for_status()

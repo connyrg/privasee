@@ -1010,7 +1010,7 @@ async def get_session_info(session_id: str):
     sm = _require_session_manager()
 
     try:
-        session = sm.get_session(session_id)
+        session = await asyncio.to_thread(sm.get_session, session_id)
     except NotImplementedError:
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
@@ -1034,7 +1034,7 @@ async def get_session_info(session_id: str):
     entities: List[Entity] = []
     if session.status in ("awaiting_review", "completed"):
         try:
-            raw_entities = sm.get_entities(session_id)
+            raw_entities = await asyncio.to_thread(sm.get_entities, session_id)
             entities = [Entity(**e) for e in raw_entities]
         except FileNotFoundError:
             logger.debug("entities.json not yet present for session %s — returning empty list", session_id)
