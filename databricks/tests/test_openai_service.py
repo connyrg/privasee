@@ -164,10 +164,13 @@ class TestBuildExtractionPrompt(unittest.TestCase):
 
     def test_prompt_includes_all_words(self):
         field_definitions = [{"name": "Name", "description": "Person name"}]
-        words = [{"text": f"word{i}", "bounding_box": {}} for i in range(100)]
+        words = [
+            {"text": f"word{i}", "confidence": 1.0, "bounding_box": {"x": 0.1, "y": 0.1, "width": 0.1, "height": 0.05}}
+            for i in range(100)
+        ]
         ocr_data = {"text": "A" * 5000, "words": words}
         prompt = self.service._build_extraction_prompt(field_definitions, ocr_data)
-        self.assertIn('"word_count": 100', prompt)
+        self.assertIn('"word_count":100', prompt)
         self.assertIn('"words":', prompt)
 
     def test_prompt_includes_occurrences_format(self):

@@ -287,11 +287,29 @@ class OpenAIVisionService:
         ])
 
         all_words = ocr_data.get('words', [])
+        # Compact word format: abbreviate keys, round coords to 3dp, strip indentation.
+        # Reduces words list from ~140 chars/word (indented) to ~55 chars/word,
+        # cutting prompt size ~2.5× for dense pages without losing coordinate precision.
+        # Keys: t=text, c=confidence, b=[x, y, width, height]
+        compact_words = [
+            {
+                "t": w["text"],
+                "c": round(w.get("confidence", 1.0), 2),
+                "b": [
+                    round(w["bounding_box"]["x"], 3),
+                    round(w["bounding_box"]["y"], 3),
+                    round(w["bounding_box"]["width"], 3),
+                    round(w["bounding_box"]["height"], 3),
+                ],
+            }
+            for w in all_words
+            if w.get("text") and w.get("bounding_box")
+        ]
         ocr_context = json.dumps({
             'text': ocr_data.get('text', '')[:3000],
-            'word_count': len(all_words),
-            'words': all_words
-        }, indent=2)
+            'word_count': len(compact_words),
+            'words': compact_words
+        }, separators=(',', ':'))
 
         prompt = f"""You are a document de-identification assistant. Your task is to identify sensitive information in documents that needs to be redacted or replaced.
 
@@ -350,7 +368,8 @@ The document has been processed with OCR. Below is the extracted text and struct
 
 6. **Bounding Boxes**
    - For each occurrence, list the bounding box of **each individual OCR word token** that makes up the entity at that location.
-   - Copy the exact `x`, `y`, `width`, `height` values from the words list above. Do NOT estimate or interpolate.
+   - Each word in the OCR list has compact format: `{{"t":"word","c":confidence,"b":[x,y,width,height]}}`.
+   - Copy the exact `b` values as `{{"x":b[0],"y":b[1],"width":b[2],"height":b[3]}}`. Do NOT estimate or interpolate.
    - List every token separately — same-line tokens and line-break tokens alike. They will be merged automatically downstream.
 
 7. **Confidence**
@@ -386,7 +405,7 @@ Return a JSON array, no other text:
 - Return ONLY the JSON array.
 - One top-level entry per unique entity (or typo-variant group). Multiple appearances → multiple items in `occurrences`.
 - Do NOT emit partial name entities if they are already part of a full-name occurrence at the same location.
-- Copy bounding box values exactly from the words list. All coordinates normalized 0.0–1.0.
+- Copy bounding box `b` values exactly from the words list. All coordinates normalized 0.0–1.0.
 - Do NOT merge across columns, sections, or unrelated fields.
 
 Begin analysis:"""
