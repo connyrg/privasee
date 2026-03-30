@@ -9,6 +9,7 @@ import json
 import logging
 import os
 from typing import List, Dict, Optional
+import datetime
 
 from ..utils.nginx_utils import http_client_factory
 
@@ -117,6 +118,7 @@ class OpenAIVisionService:
             prompt = self._build_extraction_prompt(field_definitions, ocr_data)
 
             # Call Azure OpenAI API with vision
+            logger.info(f"Start calling OpenAI for page {page_number}: {datetime.datetime.now().strftime('%d-%m-%Y %H:%M:%S')}")
             response = self.client.chat.completions.create(
                 model=self.deployment_name,
                 messages=[
@@ -136,8 +138,9 @@ class OpenAIVisionService:
                         ]
                     }
                 ],
-                max_tokens=20000
+                max_completion_tokens=10000,
             )
+            logger.info(f"End calling OpenAI for page {page_number}: {datetime.datetime.now().strftime('%d-%m-%Y %H:%M:%S')}")
 
             # Parse response
             response_text = response.choices[0].message.content
@@ -197,6 +200,7 @@ class OpenAIVisionService:
             prompt = self._build_extraction_prompt(field_definitions, ocr_data)
 
             # Call Azure OpenAI API with vision
+            logger.info(f"Start calling OpenAI for page {page_number}: {datetime.datetime.now().strftime('%d-%m-%Y %H:%M:%S')}")
             response = self.client.chat.completions.create(
                 model=self.deployment_name,
                 messages=[
@@ -216,8 +220,33 @@ class OpenAIVisionService:
                         ]
                     }
                 ],
-                max_completion_tokens=16000
+                max_completion_tokens=10000,
             )
+            # response_parts = []
+            # with self.client.chat.completions.create(
+            #     model=self.deployment_name,
+            #     messages=[
+            #         {
+            #             "role": "user",
+            #             "content": [
+            #                 {
+            #                     "type": "image_url",
+            #                     "image_url": {
+            #                         "url": f"data:image/{mimetype};base64,{image_b64}"
+            #                     }
+            #                 },
+            #                 {
+            #                     "type": "text",
+            #                     "text": prompt
+            #                 }
+            #             ]
+            #         }
+            #     ],
+            #     max_completion_tokens=10000,
+            #     stream=True
+            # ) as stream:
+            #     response_text = "".join(chunk.choices[0].delta.content or "" for chunk in stream if chunk.choices)
+            # logger.info(f"End calling OpenAI for page {page_number}: {datetime.datetime.now().strftime('%d-%m-%Y %H:%M:%S')}")
 
             # Parse response
             response_text = response.choices[0].message.content
@@ -244,6 +273,7 @@ class OpenAIVisionService:
 
             prompt = self._build_extraction_prompt(field_definitions, ocr_data)
 
+            logger.info(f"Start calling OpenAI for page {page_number}: {datetime.datetime.now().strftime('%d-%m-%Y %H:%M:%S')}")
             response = await self.async_client.chat.completions.create(
                 model=self.deployment_name,
                 messages=[
@@ -263,8 +293,9 @@ class OpenAIVisionService:
                         ]
                     }
                 ],
-                max_completion_tokens=16000
+                max_completion_tokens=10000,
             )
+            logger.info(f"End calling OpenAI for page {page_number}: {datetime.datetime.now().strftime('%d-%m-%Y %H:%M:%S')}")
 
             response_text = response.choices[0].message.content
             entities = self._parse_openai_response(response_text, ocr_data, page_number)
@@ -294,7 +325,7 @@ class OpenAIVisionService:
         compact_words = [
             {
                 "t": w["text"],
-                "c": round(w.get("confidence", 1.0), 2),
+                # "c": round(w.get("confidence", 1.0), 2),
                 "b": [
                     round(w["bounding_box"]["x"], 3),
                     round(w["bounding_box"]["y"], 3),

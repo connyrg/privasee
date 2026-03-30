@@ -53,7 +53,6 @@ logger = logging.getLogger(__name__)
 # Tune via env var to stay within Azure OpenAI / Anthropic rate limits.
 _MAX_CONCURRENT_PAGES: int = int(os.environ.get("VISION_MAX_CONCURRENT_PAGES", "5"))
 
-
 class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
     """
     MLflow model for document de-identification using vision AI and Azure DI.
@@ -77,6 +76,13 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
         Args:
             context: MLflow model context (unused but required by interface)
         """
+        log_level_str = os.environ.get("LOG_LEVEL", "WARNING").upper()
+        log_level = getattr(logging, log_level_str, logging.INFO)
+        root = logging.getLogger()
+        root.setLevel(log_level)
+        for handler in root.handlers:
+            handler.setLevel(log_level)
+
         logger.info("Initializing Document Intelligence Model")
 
         # Enable auto-tracing for OpenAI
@@ -501,7 +507,13 @@ class DocumentIntelligenceModel(mlflow.pyfunc.PythonModel):
         logger.info(f"{'='*80}\n")
         
         logger.info(f"Document processing complete for session {session_id}")
-        return result
+
+        output_payload = {
+            'session_id': result['session_id'],
+            'status': result['status'],
+            'entities': result['entities'],
+        }
+        return output_payload
 
     def _extract_entities_from_page(
         self,

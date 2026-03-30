@@ -256,7 +256,13 @@ def http_client_factory(workspace_url, openai_apikey=None, proxy_client_id=None,
     # Sync client uses the sync hook; async client uses the async hook.
     # httpx's AsyncClient awaits event hooks — passing a sync hook causes
     # "TypeError: object NoneType can't be used in 'await' expression".
-    custom_sync_client = httpx.Client(event_hooks={'request': [_nginx_request_hook]})
-    custom_async_client = httpx.AsyncClient(event_hooks={'request': [_nginx_async_request_hook]})
+    timeout = httpx.Timeout(
+        connect=10.0,
+        read=180.0,   # allow long LLM responses
+        write=30.0,
+        pool=10.0
+    )
+    custom_sync_client = httpx.Client(timeout=timeout, event_hooks={'request': [_nginx_request_hook]})
+    custom_async_client = httpx.AsyncClient(timeout=timeout, event_hooks={'request': [_nginx_async_request_hook]})
 
     return (custom_sync_client, custom_async_client)
