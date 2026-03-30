@@ -1527,6 +1527,7 @@ def toggle_masked(show: bool):
 @callback(
     Output("store-configs", "data"),
     Output("config-load-dropdown", "options"),
+    Output("config-status", "children"),
     Input("store-step", "data"),
 )
 def refresh_config_list(step: int):
@@ -1539,10 +1540,22 @@ def refresh_config_list(step: int):
         if r.ok:
             configs = r.json()
             options = [{"label": c["config_name"], "value": c["key"]} for c in configs]
-            return configs, options
+            return configs, options, None
+        logger.error("Failed to fetch config list: HTTP %d — %s", r.status_code, r.text[:200])
+        alert = dbc.Alert(
+            f"Could not load saved configs (server returned {r.status_code}). Try refreshing.",
+            color="warning",
+            dismissable=True,
+        )
+        return [], [], alert
     except Exception as exc:
         logger.error("Failed to fetch config list from API: %s", exc)
-    return [], []
+        alert = dbc.Alert(
+            "Could not reach the API to load saved configs. Check your connection and try refreshing.",
+            color="warning",
+            dismissable=True,
+        )
+        return [], [], alert
 
 
 @callback(
@@ -1555,7 +1568,7 @@ def toggle_load_btn(value):
 
 @callback(
     Output("store-fields", "data", allow_duplicate=True),
-    Output("config-status", "children"),
+    Output("config-status", "children", allow_duplicate=True),
     Input("config-load-btn", "n_clicks"),
     State("config-load-dropdown", "value"),
     running=[(Output("config-load-btn", "disabled"), True, False)],

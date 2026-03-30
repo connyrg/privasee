@@ -369,7 +369,7 @@ The document has been processed with OCR. Below is the extracted text and struct
 6. **Bounding Boxes**
    - For each occurrence, list the bounding box of **each individual OCR word token** that makes up the entity at that location.
    - Each word in the OCR list has compact format: `{{"t":"word","c":confidence,"b":[x,y,width,height]}}`.
-   - Copy the exact `b` values as `{{"x":b[0],"y":b[1],"width":b[2],"height":b[3]}}`. Do NOT estimate or interpolate.
+   - Copy the exact `b` values as `[b[0],b[1],b[2],b[3]]`. Do NOT estimate or interpolate.
    - List every token separately — same-line tokens and line-break tokens alike. They will be merged automatically downstream.
 
 7. **Confidence**
@@ -391,7 +391,7 @@ Return a JSON array, no other text:
       {{
         "original_text": "exact text as it appears at this location",
         "bounding_boxes": [
-          {{"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0}}
+          [0.0, 0.0, 0.0, 0.0]
         ]
       }}
     ]
@@ -480,9 +480,9 @@ Begin analysis:"""
                     occurrence_text = occurrence.get('original_text') or canonical_text
                     raw_bboxes = occurrence.get('bounding_boxes', [])
                     valid_bboxes = [
-                        {'x': float(b['x']), 'y': float(b['y']), 'width': float(b['width']), 'height': float(b['height'])}
+                        {'x': float(b[0]), 'y': float(b[1]), 'width': float(b[2]), 'height': float(b[3])}
                         for b in raw_bboxes
-                        if all(k in b for k in ('x', 'y', 'width', 'height'))
+                        if isinstance(b, (list, tuple)) and len(b) == 4
                     ]
                     if not valid_bboxes:
                         logger.warning(f"Occurrence of '{occurrence_text}' has no valid bounding boxes, skipping")

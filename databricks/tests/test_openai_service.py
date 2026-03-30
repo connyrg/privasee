@@ -33,6 +33,11 @@ from databricks.model.openai_service import OpenAIVisionService
 # ---------------------------------------------------------------------------
 
 def make_bbox(x, y, w, h):
+    return [x, y, w, h]
+
+
+def make_bbox_dict(x, y, w, h):
+    """Dict form used by _merge_same_line_bboxes tests (internal method takes dicts)."""
     return {"x": x, "y": y, "width": w, "height": h}
 
 
@@ -202,7 +207,7 @@ class TestMergeSameLineBboxes(unittest.TestCase):
         self.assertEqual(self.service._merge_same_line_bboxes([]), [])
 
     def test_single_bbox_returned_as_is(self):
-        bboxes = [make_bbox(0.1, 0.2, 0.05, 0.02)]
+        bboxes = [make_bbox_dict(0.1, 0.2, 0.05, 0.02)]
         result = self.service._merge_same_line_bboxes(bboxes)
         self.assertEqual(len(result), 1)
         self.assertAlmostEqual(result[0]['x'], 0.1)
@@ -213,8 +218,8 @@ class TestMergeSameLineBboxes(unittest.TestCase):
     def test_two_same_line_boxes_merged_into_one(self):
         # "John" and "Doe" on the same line
         bboxes = [
-            make_bbox(0.1, 0.20, 0.05, 0.02),
-            make_bbox(0.16, 0.20, 0.04, 0.02),
+            make_bbox_dict(0.1, 0.20, 0.05, 0.02),
+            make_bbox_dict(0.16, 0.20, 0.04, 0.02),
         ]
         result = self.service._merge_same_line_bboxes(bboxes)
         self.assertEqual(len(result), 1)
@@ -226,8 +231,8 @@ class TestMergeSameLineBboxes(unittest.TestCase):
     def test_two_different_lines_produce_two_rects(self):
         # "John" at end of line 1, "Doe" at start of line 2
         bboxes = [
-            make_bbox(0.8, 0.20, 0.05, 0.02),
-            make_bbox(0.1, 0.25, 0.04, 0.02),
+            make_bbox_dict(0.8, 0.20, 0.05, 0.02),
+            make_bbox_dict(0.1, 0.25, 0.04, 0.02),
         ]
         result = self.service._merge_same_line_bboxes(bboxes)
         self.assertEqual(len(result), 2)
@@ -235,11 +240,11 @@ class TestMergeSameLineBboxes(unittest.TestCase):
     def test_five_tokens_same_line_merged_into_one(self):
         # date: "15" "/" "03" "/" "1985" all on y=0.30
         bboxes = [
-            make_bbox(0.10, 0.30, 0.02, 0.02),
-            make_bbox(0.12, 0.30, 0.005, 0.02),
-            make_bbox(0.13, 0.30, 0.02, 0.02),
-            make_bbox(0.15, 0.30, 0.005, 0.02),
-            make_bbox(0.16, 0.30, 0.03, 0.02),
+            make_bbox_dict(0.10, 0.30, 0.02, 0.02),
+            make_bbox_dict(0.12, 0.30, 0.005, 0.02),
+            make_bbox_dict(0.13, 0.30, 0.02, 0.02),
+            make_bbox_dict(0.15, 0.30, 0.005, 0.02),
+            make_bbox_dict(0.16, 0.30, 0.03, 0.02),
         ]
         result = self.service._merge_same_line_bboxes(bboxes)
         self.assertEqual(len(result), 1)
@@ -249,8 +254,8 @@ class TestMergeSameLineBboxes(unittest.TestCase):
     def test_within_threshold_treated_as_same_line(self):
         # y values 0.200 and 0.208 — within default 0.01 threshold
         bboxes = [
-            make_bbox(0.1, 0.200, 0.05, 0.02),
-            make_bbox(0.2, 0.208, 0.05, 0.02),
+            make_bbox_dict(0.1, 0.200, 0.05, 0.02),
+            make_bbox_dict(0.2, 0.208, 0.05, 0.02),
         ]
         result = self.service._merge_same_line_bboxes(bboxes)
         self.assertEqual(len(result), 1)
@@ -258,8 +263,8 @@ class TestMergeSameLineBboxes(unittest.TestCase):
     def test_beyond_threshold_treated_as_different_lines(self):
         # y values 0.200 and 0.215 — beyond default 0.01 threshold
         bboxes = [
-            make_bbox(0.1, 0.200, 0.05, 0.02),
-            make_bbox(0.1, 0.215, 0.05, 0.02),
+            make_bbox_dict(0.1, 0.200, 0.05, 0.02),
+            make_bbox_dict(0.1, 0.215, 0.05, 0.02),
         ]
         result = self.service._merge_same_line_bboxes(bboxes)
         self.assertEqual(len(result), 2)
