@@ -931,5 +931,126 @@ class TestFormWidgetComponentReplacement(unittest.TestCase):
         self.assertEqual(vals.get("mc3"), "0",     "Group 3 must get aligned replacement")
 
 
+# ===========================================================================
+# Rotated pages — regression for replacement text displaced to the right
+# ===========================================================================
+
+
+def _create_pdf_with_rotation(rotation: int) -> bytes:
+    """
+    Create a single-page A4 PDF with the given page rotation (0/90/180/270).
+    Optionally embed a raster image to simulate a scanned document.
+    """
+    # For rotation 90/270 the raw page dimensions swap (landscape storage).
+    if rotation in (90, 270):
+        raw_w, raw_h = H, W  # landscape raw storage
+    else:
+        raw_w, raw_h = W, H
+    doc = fitz.open()
+    page = doc.new_page(width=raw_w, height=raw_h)
+    # Embed an image so this behaves like a scanned page.
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, int(raw_w), int(raw_h)), False)
+    pix.clear_with(255)
+    page.insert_image(page.rect, pixmap=pix)
+    page.set_rotation(rotation)
+    buf = io.BytesIO()
+    doc.save(buf)
+    doc.close()
+    return buf.getvalue()
+
+
+def _text_display_x(result_bytes: bytes) -> list:
+    """
+    Return the x0 values in DISPLAY space for all text spans on the first page.
+
+    get_text("dict") returns bboxes in raw PDF coordinates.  Multiplying by the
+    inverse derotation matrix (~derot) converts raw → display so the values can
+    be compared against display-space entity bbox ranges regardless of page rotation.
+    """
+    doc = fitz.open(stream=result_bytes, filetype="pdf")
+    page = doc[0]
+    inv_derot = ~page.derotation_matrix  # raw PDF → display
+    xs = []
+    for block in page.get_text("dict")["blocks"]:
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                if span["text"].strip():
+                    raw_rect = fitz.Rect(span["bbox"])
+                    display_rect = raw_rect * inv_derot
+                    xs.append(display_rect.x0)
+    doc.close()
+    return xs
+
+
+class TestRotatedPages(unittest.TestCase):
+    """
+    Regression: replacement text appeared to the RIGHT of the white box on pages
+    with rotation=180 or rotation=270 (common in scanned/image PDFs that were
+    captured upside-down or sideways).
+
+    Root cause: for rotation=180/270 the raw PDF rect.x0 corresponds to the
+    DISPLAY-RIGHT edge, so using rect.x0+2 as the text origin placed the
+    baseline at the right edge of the visible box — text then extended further
+    right, outside the box.  The fix uses rect.x1-2 (rotation=180) or
+    rect.y0+2 as raw_y (rotation=270) so the text always starts from the
+    display-left edge of the redaction rect.
+    """
+
+    def _mask_entity(self, rotation: int) -> bytes:
+        pdf_bytes = _create_pdf_with_rotation(rotation)
+        entity = _entity(
+            "Full Name", "X", 50, 100, 90,
+            strategy="Fake Data", replacement_text="Jane Doe",
+        )
+        return MaskingService().apply_pdf_masks(pdf_bytes, [entity])
+
+    def _assert_text_within_bbox_x(self, result_bytes: bytes, rotation: int):
+        """Assert that replacement text x-position is within the expected display bbox."""
+        # For the entity at normalised (50/W, ..., 90/W, ...) the display bbox
+        # x-range is [50, 140] for rotation=0/180; axes swap for 90/270 so the
+        # display x-range maps from the normalised y/h values instead.
+        if rotation in (90, 270):
+            # Display page is landscape (W_display=H, H_display=W).
+            # The entity normalisation (50/W, y/H, 90/W, h/H) maps to display coords:
+            # display_x = (50/W) * H to (50/W + 90/W) * H = 71 to 198 (roughly).
+            x_lo = 40.0
+            x_hi = 210.0
+        else:
+            x_lo = 40.0   # 50 - 10 tolerance
+            x_hi = 150.0  # 140 + 10 tolerance
+
+        xs = _text_display_x(result_bytes)
+        self.assertTrue(xs, "No text found in masked output")
+        in_range = [x for x in xs if x_lo <= x <= x_hi]
+        self.assertTrue(
+            in_range,
+            f"rotation={rotation}: replacement text x={xs} must be within "
+            f"[{x_lo}, {x_hi}] (the display bbox), not to the right of it",
+        )
+
+    def test_rotation_0_text_within_bbox(self):
+        result = self._mask_entity(0)
+        self._assert_text_within_bbox_x(result, 0)
+
+    def test_rotation_90_text_within_bbox(self):
+        result = self._mask_entity(90)
+        self._assert_text_within_bbox_x(result, 90)
+
+    def test_rotation_180_text_within_bbox(self):
+        result = self._mask_entity(180)
+        self._assert_text_within_bbox_x(result, 180)
+
+    def test_rotation_270_text_within_bbox(self):
+        result = self._mask_entity(270)
+        self._assert_text_within_bbox_x(result, 270)
+
+    def test_image_page_rotation_0_text_present(self):
+        """Replacement text must appear on an image-only page (no pre-existing text layer)."""
+        result = self._mask_entity(0)
+        doc = fitz.open(stream=result, filetype="pdf")
+        self.assertIn("Jane Doe", doc[0].get_text())
+        doc.close()
+
+
 if __name__ == "__main__":
     unittest.main()

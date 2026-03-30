@@ -30,18 +30,24 @@ Only affected interactive PDF form widgets — regular text bboxes were unaffect
 
 ---
 
-### 2. Masking text misaligned on image documents
-**Area:** Databricks model — masking service
-**Description:** When masking a scanned/image PDF, the white redaction box appears in the
-correct location but the replacement text renders to the right of the box instead of inside it.
-**Expected:** Replacement text should be centred within the white box.
-**Open questions:**
-- Does this also affect digital PDFs or only scanned/image PDFs?
-- Likely a coordinate system mismatch in `masking_service.py` when placing text on image pages.
+### ~~2. Masking text misaligned on image documents~~ ✅ Fixed
+
+**Area:** Databricks model — `masking_service.py`
+**Fixed in:** `feat/llm-bbox-extraction`
+
+**Root cause:** `insert_text` origin was always `(rect.x0 + 2, rect.y1 - 2)` in raw PDF
+coords.  For pages with `rotation=180` or `rotation=270` (common in scanned PDFs captured
+upside-down or sideways), `rect.x0` maps to the *display-right* edge of the box — so text
+started at the right edge and extended further right, landing outside the box.
+
+**Fix:** Rotation-aware origin selection in `apply_pdf_masks`:
+- `rotation=0/90`:  `(rect.x0 + 2, rect.y1 - 2)` — raw left = display left ✓
+- `rotation=180`:   `(rect.x1 - 2, rect.y1 - 2)` — raw right = display left ✓
+- `rotation=270`:   `(rect.x0 + 2, rect.y0 + 2)` — raw y₀ = display left ✓
 
 ---
 
-### 4. Masked output always PDF regardless of original format
+### 3. Masked output always PDF regardless of original format
 **Area:** Databricks model — `masking_model.py` / `masking_service.py`
 **Description:** When the original document is a PNG or JPG image, the masked output is
 always returned as a PDF (PIL wraps the masked image in a single-page PDF). The output
@@ -56,7 +62,7 @@ should produce a masked JPG at the same quality/resolution.
 
 ---
 
-### 3. Claude on Databricks hitting 429 rate limits
+### 4. Claude on Databricks hitting 429 rate limits
 **Area:** Databricks model — `databricks_service.py`
 **Description:** Databricks-hosted Claude has much lower rate limits than Azure OpenAI.
 Concurrent per-page calls frequently hit 429 errors.
@@ -66,4 +72,11 @@ Concurrent per-page calls frequently hit 429 errors.
 - Reduce `ThreadPoolExecutor` `max_workers` when provider is Claude
 - Token-bucket rate limiter to cap requests/sec
 **Open questions:**
-- What is the exact rate limit (RPM or TPM)?
+- What is the exact rate limit (RPM or TPM)? For Claude Haiku 4.6, the TPM limit is 200,000.
+
+---
+
+### 5. Improvement to Batch mode result table
+
+**Description:** Currently the result table only contains # of entities, # of entities masked, and accuracy percentage. We need to have # of entities, # of occurences, # of occurences masked, and accuracy percentage
+**Expected:** Output format and image quality mirror the original upload.

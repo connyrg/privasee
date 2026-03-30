@@ -236,11 +236,25 @@ class MaskingService:
 
             for rect, rect_display, text in inserts:
                 # Use display rect height for font sizing (visually correct scale).
-                # Use raw PDF rect for position; rotate to counter page rotation so
-                # replacement text appears horizontal in the display view.
                 fontsize = max(6, min(36, int(rect_display.height * 0.7)))
+                # The text origin must be the display-left edge of the rect, but
+                # "display-left" maps to different raw PDF coordinates depending on
+                # the page rotation:
+                #
+                #   rotation=0:   text goes right (+x raw); raw left  = rect.x0 ✓
+                #   rotation=90:  text goes up   (-y raw);  raw y₁ → display left ✓
+                #   rotation=180: text goes left (-x raw);  raw right = rect.x1
+                #                 (rect.x0 is the display-right edge — the bug on
+                #                  scanned pages stored upside-down)
+                #   rotation=270: text goes down (+y raw);  raw y₀ → display left
+                if rotation == 180:
+                    origin = (rect.x1 - 2, rect.y1 - 2)
+                elif rotation == 270:
+                    origin = (rect.x0 + 2, rect.y0 + 2)
+                else:  # 0 or 90
+                    origin = (rect.x0 + 2, rect.y1 - 2)
                 page.insert_text(
-                    (rect.x0 + 2, rect.y1 - 2),
+                    origin,
                     text,
                     fontsize=fontsize,
                     rotate=rotation,
