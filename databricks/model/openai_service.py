@@ -139,6 +139,7 @@ class OpenAIVisionService:
                     }
                 ],
                 max_completion_tokens=10000,
+                reasoning_effort="low",
             )
             logger.info(f"End calling OpenAI for page {page_number}: {datetime.datetime.now().strftime('%d-%m-%Y %H:%M:%S')}")
 
@@ -221,32 +222,8 @@ class OpenAIVisionService:
                     }
                 ],
                 max_completion_tokens=10000,
+                reasoning_effort="low",
             )
-            # response_parts = []
-            # with self.client.chat.completions.create(
-            #     model=self.deployment_name,
-            #     messages=[
-            #         {
-            #             "role": "user",
-            #             "content": [
-            #                 {
-            #                     "type": "image_url",
-            #                     "image_url": {
-            #                         "url": f"data:image/{mimetype};base64,{image_b64}"
-            #                     }
-            #                 },
-            #                 {
-            #                     "type": "text",
-            #                     "text": prompt
-            #                 }
-            #             ]
-            #         }
-            #     ],
-            #     max_completion_tokens=10000,
-            #     stream=True
-            # ) as stream:
-            #     response_text = "".join(chunk.choices[0].delta.content or "" for chunk in stream if chunk.choices)
-            # logger.info(f"End calling OpenAI for page {page_number}: {datetime.datetime.now().strftime('%d-%m-%Y %H:%M:%S')}")
 
             # Parse response
             response_text = response.choices[0].message.content
@@ -294,6 +271,7 @@ class OpenAIVisionService:
                     }
                 ],
                 max_completion_tokens=10000,
+                reasoning_effort="low",
             )
             logger.info(f"End calling OpenAI for page {page_number}: {datetime.datetime.now().strftime('%d-%m-%Y %H:%M:%S')}")
 
