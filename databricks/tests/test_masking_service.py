@@ -695,7 +695,7 @@ class TestFormWidgetMasking(unittest.TestCase):
         entity = {
             "entity_type": "Date of Birth",
             "original_text": "31 07 1980",
-            "replacement_text": "12 03 1980",
+            "replacement_text": "12 03 1990",  # different year so all three change
             "strategy": "Fake Data",
             "approved": True,
             "occurrences": [{"page_number": 1, "original_text": "31 07 1980",
@@ -740,6 +740,195 @@ class TestFormWidgetMasking(unittest.TestCase):
 
         self.assertNotEqual(vals.get("street"),  "80 Ann St",  "Street widget must be masked")
         self.assertNotEqual(vals.get("suburb"),  "Brisbane",   "Suburb widget must be masked")
+
+
+# ===========================================================================
+# _resolve_component_replacement — unit tests
+# ===========================================================================
+
+
+def _mock_widget(field_value: str, x0: float, y0: float = 100.0, width: float = 40.0):
+    """Minimal duck-type widget with .field_value and .rect for unit tests."""
+    class _W:
+        def __init__(self, fv, r):
+            self.field_value = fv
+            self.rect = r
+    return _W(field_value, fitz.Rect(x0, y0, x0 + width, y0 + 20))
+
+
+class TestResolveComponentReplacement(unittest.TestCase):
+    """Unit tests for MaskingService._resolve_component_replacement."""
+
+    # ------------------------------------------------------------------
+    # Separator-based — unambiguous
+    # ------------------------------------------------------------------
+
+    def test_slash_date_day(self):
+        widgets = [_mock_widget("15", 50), _mock_widget("03", 100), _mock_widget("1985", 150)]
+        result = MaskingService._resolve_component_replacement(
+            "15", "15/03/1985", "22/07/1985", fitz.Rect(50, 100, 90, 120), widgets
+        )
+        self.assertEqual(result, "22")
+
+    def test_slash_date_month(self):
+        widgets = [_mock_widget("15", 50), _mock_widget("03", 100), _mock_widget("1985", 150)]
+        result = MaskingService._resolve_component_replacement(
+            "03", "15/03/1985", "22/07/1985", fitz.Rect(100, 100, 140, 120), widgets
+        )
+        self.assertEqual(result, "07")
+
+    def test_slash_date_year(self):
+        widgets = [_mock_widget("15", 50), _mock_widget("03", 100), _mock_widget("1985", 150)]
+        result = MaskingService._resolve_component_replacement(
+            "1985", "15/03/1985", "22/07/1985", fitz.Rect(150, 100, 210, 120), widgets
+        )
+        self.assertEqual(result, "1985")
+
+    def test_space_sep_medicare_group1(self):
+        widgets = [_mock_widget("2023", 50), _mock_widget("45678", 140), _mock_widget("1", 250)]
+        result = MaskingService._resolve_component_replacement(
+            "2023", "2023 45678 1", "9876 54321 0", fitz.Rect(50, 100, 130, 120), widgets
+        )
+        self.assertEqual(result, "9876")
+
+    def test_space_sep_medicare_group2(self):
+        widgets = [_mock_widget("2023", 50), _mock_widget("45678", 140), _mock_widget("1", 250)]
+        result = MaskingService._resolve_component_replacement(
+            "45678", "2023 45678 1", "9876 54321 0", fitz.Rect(140, 100, 240, 120), widgets
+        )
+        self.assertEqual(result, "54321")
+
+    # ------------------------------------------------------------------
+    # Separator-based — ambiguous (DD==MM=="01"), resolved by x-position
+    # ------------------------------------------------------------------
+
+    def test_slash_ambiguous_day_resolved_by_position(self):
+        widgets = [
+            _mock_widget("01", 50),   # leftmost → DD → index 0
+            _mock_widget("01", 100),  # middle   → MM → index 1
+            _mock_widget("2025", 150),
+        ]
+        result = MaskingService._resolve_component_replacement(
+            "01", "01/01/2025", "05/03/2025", fitz.Rect(50, 100, 90, 120), widgets
+        )
+        self.assertEqual(result, "05")  # DD replacement
+
+    def test_slash_ambiguous_month_resolved_by_position(self):
+        widgets = [
+            _mock_widget("01", 50),
+            _mock_widget("01", 100),  # → MM → index 1
+            _mock_widget("2025", 150),
+        ]
+        result = MaskingService._resolve_component_replacement(
+            "01", "01/01/2025", "05/03/2025", fitz.Rect(100, 100, 140, 120), widgets
+        )
+        self.assertEqual(result, "03")  # MM replacement
+
+    # ------------------------------------------------------------------
+    # Character-level fallback (10 single-char widgets)
+    # ------------------------------------------------------------------
+
+    def test_char_level_first_char(self):
+        widgets = [_mock_widget(c, 50 + i * 20) for i, c in enumerate("2023456781")]
+        result = MaskingService._resolve_component_replacement(
+            "2", "2023456781", "9876543210", fitz.Rect(50, 100, 70, 120), widgets
+        )
+        self.assertEqual(result, "9")
+
+    def test_char_level_middle_char(self):
+        # Index 4 in "2023456781" is "4"; index 4 in "9876543210" is "5"
+        widgets = [_mock_widget(c, 50 + i * 20) for i, c in enumerate("2023456781")]
+        result = MaskingService._resolve_component_replacement(
+            "4", "2023456781", "9876543210", fitz.Rect(130, 100, 150, 120), widgets
+        )
+        self.assertEqual(result, "5")
+
+    def test_char_level_last_char(self):
+        # Index 9 in "2023456781" is "1"; index 9 in "9876543210" is "0"
+        widgets = [_mock_widget(c, 50 + i * 20) for i, c in enumerate("2023456781")]
+        result = MaskingService._resolve_component_replacement(
+            "1", "2023456781", "9876543210", fitz.Rect(230, 100, 250, 120), widgets
+        )
+        self.assertEqual(result, "0")
+
+    # ------------------------------------------------------------------
+    # Fallback — no split possible
+    # ------------------------------------------------------------------
+
+    def test_returns_full_replacement_when_part_counts_differ(self):
+        # original has 3 whitespace-tokens, replacement has 4 → no separator matches
+        result = MaskingService._resolve_component_replacement(
+            "Ann", "80 Ann St", "99 Fake Road North",
+            fitz.Rect(50, 100, 200, 120), []
+        )
+        self.assertEqual(result, "99 Fake Road North")
+
+
+# ===========================================================================
+# Form widget masking — aligned component replacement (integration)
+# ===========================================================================
+
+
+class TestFormWidgetComponentReplacement(unittest.TestCase):
+    """
+    Verifies that when Fake Data masks multi-widget occurrences (e.g. date split
+    across DD/MM/YYYY fields), each widget receives its aligned replacement
+    component — not the full replacement string.
+    """
+
+    def test_slash_date_each_widget_gets_aligned_component(self):
+        """DD/MM/YYYY widgets each get their own replacement component."""
+        spec = [
+            ("dob_day",   "15",   (50,  200, 90,  220)),
+            ("dob_month", "03",   (100, 200, 140, 220)),
+            ("dob_year",  "1985", (150, 200, 230, 220)),
+        ]
+        pdf_bytes, rects = _create_pdf_with_widgets(spec)
+        combined = rects["dob_day"] | rects["dob_month"] | rects["dob_year"]
+
+        entity = {
+            "entity_type": "Date of Birth",
+            "original_text": "15/03/1985",
+            "replacement_text": "22/07/1985",
+            "strategy": "Fake Data",
+            "approved": True,
+            "occurrences": [{"page_number": 1, "original_text": "15/03/1985",
+                             "bounding_boxes": [_normalised_bbox(combined)]}],
+        }
+
+        svc = MaskingService()
+        vals = _widget_values(svc.apply_pdf_masks(pdf_bytes, [entity]))
+
+        self.assertEqual(vals.get("dob_day"),   "22",   "Day must get replacement day")
+        self.assertEqual(vals.get("dob_month"), "07",   "Month must get replacement month")
+        self.assertEqual(vals.get("dob_year"),  "1985", "Year must get replacement year")
+
+    def test_space_sep_medicare_grouped_gets_aligned_components(self):
+        """Medicare in 3 grouped widgets (5+4+1) gets per-group replacement."""
+        spec = [
+            ("mc1", "2023",  (50,  300, 130, 320)),
+            ("mc2", "45678", (140, 300, 240, 320)),
+            ("mc3", "1",     (250, 300, 280, 320)),
+        ]
+        pdf_bytes, rects = _create_pdf_with_widgets(spec)
+        combined = rects["mc1"] | rects["mc2"] | rects["mc3"]
+
+        entity = {
+            "entity_type": "Medicare Number",
+            "original_text": "2023 45678 1",
+            "replacement_text": "9876 54321 0",
+            "strategy": "Fake Data",
+            "approved": True,
+            "occurrences": [{"page_number": 1, "original_text": "2023 45678 1",
+                             "bounding_boxes": [_normalised_bbox(combined)]}],
+        }
+
+        svc = MaskingService()
+        vals = _widget_values(svc.apply_pdf_masks(pdf_bytes, [entity]))
+
+        self.assertEqual(vals.get("mc1"), "9876",  "Group 1 must get aligned replacement")
+        self.assertEqual(vals.get("mc2"), "54321", "Group 2 must get aligned replacement")
+        self.assertEqual(vals.get("mc3"), "0",     "Group 3 must get aligned replacement")
 
 
 if __name__ == "__main__":

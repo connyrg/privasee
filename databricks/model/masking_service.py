@@ -213,10 +213,16 @@ class MaskingService:
                             # Full target not in this widget — check whether
                             # this widget's value is itself a component of the
                             # occurrence text (multi-widget span, e.g. "31" in
-                            # "31 / 7 / 1980").  Mask the entire field value.
+                            # "31 / 7 / 1980").  Replace with aligned slice.
                             val_norm = re.sub(r"\s+", " ", current_val.strip()).lower()
                             if val_norm and val_norm in target_norm:
-                                new_val = sub
+                                if strategy == "fake_name":
+                                    new_val = MaskingService._resolve_component_replacement(
+                                        current_val, target, sub,
+                                        overlapping_widget.rect, page_widgets,
+                                    )
+                                else:
+                                    new_val = sub
 
                         if new_val != current_val:
                             overlapping_widget.field_value = new_val
@@ -313,6 +319,116 @@ class MaskingService:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_component_replacement(
+        current_val: str,
+        original_text: str,
+        replacement_text: str,
+        widget_rect,
+        page_widgets: list,
+    ) -> str:
+        """
+        Return the replacement slice for a widget whose value is a component
+        of a multi-widget occurrence span (e.g. "15" within "15/03/1985").
+
+        Strategy
+        --------
+        1. Separator split — try /, -, ., then whitespace.  If original and
+           replacement split into the same number of non-empty parts and
+           current_val matches exactly one part → return the aligned part.
+           When multiple parts match (e.g. DD==MM=="01") use widget x-position
+           to rank among sibling widgets and pick the correct index.
+
+        2. Character-level fallback — strip separators from both sides and
+           align by character position, ranked by (y, x) widget reading order.
+           Handles 10-widget single-character Medicare numbers etc.
+
+        Falls back to returning replacement_text unchanged on any failure
+        (no regression vs. current behaviour).
+        """
+        current = current_val.strip()
+        orig = original_text.strip()
+        repl = replacement_text.strip()
+
+        if not current or not orig or not repl:
+            return replacement_text
+
+        # --- 1. Separator-based ---
+        _sep_candidates: List[Optional[str]] = ['/', '-', '.', None]
+        for sep in _sep_candidates:
+            if sep is None:
+                orig_parts = orig.split()
+                repl_parts = repl.split()
+            else:
+                orig_parts = [p.strip() for p in orig.split(sep) if p.strip()]
+                repl_parts = [p.strip() for p in repl.split(sep) if p.strip()]
+
+            if len(orig_parts) < 2 or len(orig_parts) != len(repl_parts):
+                continue
+
+            matching = [i for i, p in enumerate(orig_parts) if p.lower() == current.lower()]
+            if not matching:
+                continue
+
+            if len(matching) == 1:
+                return repl_parts[matching[0]]
+
+            # Ambiguous: same value appears in multiple parts.
+            # Rank sibling widgets (those whose values match any orig part)
+            # left-to-right by x-position and assign parts greedily.
+            used: set = set()
+            x_to_part: dict = {}
+            for wgt in sorted(page_widgets, key=lambda w: w.rect.x0):
+                wval = (wgt.field_value or "").strip()
+                for i, part in enumerate(orig_parts):
+                    if i not in used and wval.lower() == part.lower():
+                        x_to_part[round(wgt.rect.x0, 1)] = i
+                        used.add(i)
+                        break
+
+            wx = round(widget_rect.x0, 1)
+            if wx in x_to_part:
+                idx = x_to_part[wx]
+                if idx < len(repl_parts):
+                    return repl_parts[idx]
+
+            # Positional lookup failed — return first matched part
+            return repl_parts[matching[0]]
+
+        # --- 2. Character-level fallback ---
+        _sep_re = re.compile(r'[\s/\-\.\,]')
+        orig_chars = _sep_re.sub('', orig)
+        repl_chars = _sep_re.sub('', repl)
+        curr_chars = _sep_re.sub('', current)
+
+        if (0 < len(curr_chars) <= 3
+                and len(orig_chars) == len(repl_chars)
+                and len(orig_chars) > len(curr_chars)):
+            # Collect component widgets: those whose stripped values fit within
+            # orig_chars, sorted by (y, x) reading order.
+            comp_widgets = [
+                wgt for wgt in page_widgets
+                if 0 < len(_sep_re.sub('', (wgt.field_value or "").strip())) <= 3
+                and _sep_re.sub('', (wgt.field_value or "").strip()).lower()
+                    in orig_chars.lower()
+            ]
+            comp_widgets.sort(key=lambda w: (round(w.rect.y0), round(w.rect.x0)))
+
+            # Walk through widgets in order, tracking char position.
+            char_pos = 0
+            for wgt in comp_widgets:
+                wval_stripped = _sep_re.sub('', (wgt.field_value or "").strip())
+                wrect = wgt.rect
+                if (abs(wrect.x0 - widget_rect.x0) < 2
+                        and abs(wrect.y0 - widget_rect.y0) < 2):
+                    end = char_pos + len(curr_chars)
+                    if end <= len(repl_chars):
+                        return repl_chars[char_pos:end]
+                    break
+                char_pos += len(wval_stripped)
+
+        return replacement_text
 
     @staticmethod
     def _resolve_occurrence_replacement(
