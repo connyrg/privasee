@@ -71,6 +71,7 @@ Environment Variables:
   DATABRICKS_HOST      Workspace URL
   DATABRICKS_TOKEN     PAT with Files API read/write access
   UC_VOLUME_PATH       UC volume base path, e.g. /Volumes/catalog/schema/sessions
+  LOG_LEVEL            Root logging level (DEBUG/INFO/WARNING/ERROR). Default: WARNING.
 
   Verification (ADI re-OCR for scanned pages):
   ADI_TENANT_ID, ADI_CLIENT_ID, ADI_CLIENT_SECRET, ADI_ENDPOINT,
@@ -83,6 +84,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 from typing import Any, Dict, List, Tuple
 
 import mlflow.pyfunc
@@ -113,7 +115,14 @@ class MaskingModel(mlflow.pyfunc.PythonModel):
         if not self.databricks_host or not self.databricks_token:
             raise ValueError("DATABRICKS_HOST and DATABRICKS_TOKEN must be set")
 
-        logger.info("MaskingModel ready")
+        log_level_str = os.environ.get("LOG_LEVEL", "WARNING").upper()
+        log_level = getattr(logging, log_level_str, logging.WARNING)
+        root = logging.getLogger()
+        root.setLevel(log_level)
+        for handler in root.handlers:
+            handler.setLevel(log_level)
+
+        logger.info("MaskingModel ready (log_level=%s)", log_level_str)
 
     def predict(self, context, model_input: pd.DataFrame) -> pd.DataFrame:
         """MLflow PyFunc entry point. Masks one session per input row.
@@ -159,13 +168,34 @@ class MaskingModel(mlflow.pyfunc.PythonModel):
         if isinstance(entities_to_mask, str):
             entities_to_mask = json.loads(entities_to_mask)
 
-        logger.info("Masking %d entities for session %s", len(entities_to_mask), session_id)
+        strategy_counts: Dict[str, int] = {}
+        for e in entities_to_mask:
+            s = e.get("strategy", "Unknown")
+            strategy_counts[s] = strategy_counts.get(s, 0) + 1
+        strategy_summary = ", ".join(f"{s}: {n}" for s, n in sorted(strategy_counts.items()))
 
+        logger.info(
+            "Step 0: Masking session %s — %d entities (%s), run_verification=%s",
+            session_id, len(entities_to_mask), strategy_summary or "none", run_verification,
+        )
+
+        t_overall = time.monotonic()
+
+        t0 = time.monotonic()
         file_bytes, filename = self._fetch_original_file(session_id)
+        fetch_time = time.monotonic() - t0
         ext = "." + filename.split(".")[-1].lower()
+        logger.info("Step 1: File fetch — %s (%.1f KB) in %.2fs", filename, len(file_bytes) / 1024, fetch_time)
 
+        t0 = time.monotonic()
         masked_bytes = self._apply_masking(file_bytes, ext, entities_to_mask)
+        mask_time = time.monotonic() - t0
+        logger.info("Step 2: Masking applied — %.1f KB output in %.2fs", len(masked_bytes) / 1024, mask_time)
+
+        t0 = time.monotonic()
         self._write_masked_file(session_id, masked_bytes)
+        write_time = time.monotonic() - t0
+        logger.info("Step 3: Wrote masked.pdf to UC (%.1f KB) in %.2fs", len(masked_bytes) / 1024, write_time)
 
         result: Dict[str, Any] = {
             "session_id": session_id,
@@ -173,9 +203,36 @@ class MaskingModel(mlflow.pyfunc.PythonModel):
             "entities_masked": len(entities_to_mask),
         }
 
+        verify_time = 0.0
         if run_verification:
+            t0 = time.monotonic()
             verify = self._verify_masking(file_bytes, ext, masked_bytes, entities_to_mask)
+            verify_time = time.monotonic() - t0
             result.update(verify)
+            logger.info(
+                "Step 4: Verification — %d/%d occurrences masked, score=%.1f%% in %.2fs",
+                verify.get("occurrences_masked", 0),
+                verify.get("occurrences_total", 0),
+                verify.get("score", 0.0),
+                verify_time,
+            )
+
+        overall_time = time.monotonic() - t_overall
+        logger.info(
+            "\n%s\n⏱️  TIMING SUMMARY for session %s:\n"
+            "  - File fetch:   %6.2fs (%5.1f%%)\n"
+            "  - Masking:      %6.2fs (%5.1f%%)\n"
+            "  - UC write:     %6.2fs (%5.1f%%)\n"
+            "%s"
+            "  - TOTAL:        %6.2fs\n%s",
+            "=" * 60, session_id,
+            fetch_time, fetch_time / overall_time * 100,
+            mask_time,  mask_time  / overall_time * 100,
+            write_time, write_time / overall_time * 100,
+            f"  - Verification: {verify_time:6.2f}s ({verify_time / overall_time * 100:5.1f}%)\n" if run_verification else "",
+            overall_time,
+            "=" * 60,
+        )
 
         logger.info("Masking complete for session %s", session_id)
         return result
@@ -222,9 +279,12 @@ class MaskingModel(mlflow.pyfunc.PythonModel):
                     all_occurrences.append((page_num, text))
 
         if not all_occurrences:
+            logger.info("Verification: no occurrences to check — score=100.0%")
             return {"occurrences_total": 0, "occurrences_masked": 0, "score": 100.0}
 
         occurrences_total = len(all_occurrences)
+        logger.info("Verification: checking %d occurrence(s) across %d entity/ies",
+                    occurrences_total, len(entities))
 
         # --- Classify pages from the original (not the masked output) ---
         is_digital: Dict[int, bool] = {}  # page_num (1-indexed) → True = digital
@@ -241,6 +301,11 @@ class MaskingModel(mlflow.pyfunc.PythonModel):
         # --- Determine which pages need text extraction ---
         needed_pages = {page_num for page_num, _ in all_occurrences}
         scanned_pages = {p for p in needed_pages if not is_digital.get(p, False)}
+        digital_pages = needed_pages - scanned_pages
+        logger.info(
+            "Verification: page classification — %d digital, %d scanned (of %d needed page(s))",
+            len(digital_pages), len(scanned_pages), len(needed_pages),
+        )
 
         if scanned_pages and not self.ocr_service.adi_available:
             logger.warning(
@@ -289,6 +354,7 @@ class MaskingModel(mlflow.pyfunc.PythonModel):
         if scanned_tasks:
             import concurrent.futures  # noqa: PLC0415
 
+            logger.info("Verification: running ADI re-OCR on %d scanned page(s)", len(scanned_tasks))
             try:
                 adi_token = self.ocr_service._get_adi_token()
             except Exception as exc:
@@ -325,8 +391,20 @@ class MaskingModel(mlflow.pyfunc.PythonModel):
             1 for page_num, text in all_occurrences
             if text not in page_texts.get(page_num, "")
         )
+        occurrences_remaining = occurrences_total - occurrences_masked
 
         score = round(occurrences_masked / occurrences_total * 100, 1)
+        logger.info(
+            "Verification result: %d/%d occurrences masked, %d remaining, score=%.1f%%",
+            occurrences_masked, occurrences_total, occurrences_remaining, score,
+        )
+        if occurrences_remaining > 0:
+            still_found = [
+                f"p{page_num}:{text!r}"
+                for page_num, text in all_occurrences
+                if text in page_texts.get(page_num, "")
+            ]
+            logger.warning("Verification: unmasked occurrences detected — %s", ", ".join(still_found))
         return {
             "occurrences_total": occurrences_total,
             "occurrences_masked": occurrences_masked,
@@ -399,4 +477,3 @@ class MaskingModel(mlflow.pyfunc.PythonModel):
 
         resp = _requests.put(url, headers=headers, data=masked_bytes)
         resp.raise_for_status()
-        logger.info("Wrote masked.pdf to UC for session %s", session_id)

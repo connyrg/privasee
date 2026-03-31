@@ -123,6 +123,8 @@ env_vars = {
     "VISION_SERVICE_PROVIDER": VISION_PROVIDER,
     "UC_VOLUME_PATH": UC_VOLUME_PATH,
     "PRIVASEE_DEBUG_INTERMEDIATE": False,
+    # Logging level: DEBUG/INFO/WARNING/ERROR
+    "LOG_LEVEL": "INFO",
 }
 
 # Add OpenAI or Claude secrets based on provider

@@ -136,6 +136,8 @@ env_vars = {
     "ENABLE_MLFLOW_TRACING": True,
     "MLFLOW_EXPERIMENT_ID": "2142914363372294",
     "UC_VOLUME_PATH": UC_VOLUME_PATH,
+    # Logging level: DEBUG/INFO/WARNING/ERROR
+    "LOG_LEVEL": "INFO",
     "DATABRICKS_HOST": "https://suncorp-dev.cloud.databricks.com/",
     "DATABRICKS_TOKEN": f"{{{{secrets/Conny.GUNADI@suncorp.com.au/DATABRICKS_TOKEN_DEV}}}}",
     # Azure Document Intelligence — required for scanned PDF verification
