@@ -19,9 +19,10 @@ verify that the endpoint orchestrates its dependencies correctly — status code
 response shapes, call ordering, error propagation — without any live services.
 
 **Contract tests** (`tests/contracts/`, `@pytest.mark.contract`)
-Verify that `_mock_entities()` (the in-process Databricks stand-in) produces
+Verify that `MockDatabricksClient` (the in-process Databricks stand-in) produces
 responses that conform to the schema the real Databricks endpoint is expected
-to return. A mismatch here means integration tests are giving false confidence:
+to return (`DATABRICKS_RESPONSE_SCHEMA`, schema version 3.0.0).
+A mismatch here means integration tests are giving false confidence:
 the mock passes but the real endpoint would fail.
 
 ---
@@ -57,7 +58,7 @@ lines are untested.
 
 Contract tests must be run in two situations:
 
-1. **MockDatabricksClient is updated** — if `_mock_entities()` in `app/main.py`
+1. **MockDatabricksClient is updated** — if `tests/contracts/mock_databricks_client.py`
    changes its output shape (new fields, renamed fields, different types), the
    contract tests will catch mismatches before they reach production.
 
@@ -86,7 +87,7 @@ Practical examples:
 - New endpoint `POST /api/export` → integration tests in `tests/integration/test_export_endpoint.py`
 - New field added to the Databricks response → contract test update in `tests/contracts/`
 - New field added to the masking payload → integration test update in `tests/integration/test_approve_and_mask_endpoint.py`
-- New endpoint `POST /api/sessions/{id}/verify` → integration tests in `tests/integration/test_verify_endpoint.py` (not yet written — should cover: 200 with text extraction, 404 on missing masked.pdf, empty entity list edge case)
+- New field added to `ApprovalResponse` → update `tests/integration/test_approve_and_mask_endpoint.py`
 
 Every test must carry one of `@pytest.mark.unit`, `@pytest.mark.integration`,
 or `@pytest.mark.contract` so the Makefile targets select the right subset.
@@ -107,7 +108,9 @@ Databricks Model Serving endpoint. This means integration tests cannot catch:
 These are caught by the end-to-end test script (`backend/scripts/e2e_upload_test.py`),
 which must be run against a live environment with real Databricks credentials.
 
-**`POST /api/sessions/{id}/verify` reports score = 100 for scanned PDFs.** The endpoint
-extracts text using PyMuPDF's text layer. Image-only (scanned) PDFs have no text layer,
-so every entity appears "masked" even if no redaction was applied. This is a known
-limitation documented in the endpoint's docstring and surfaced as a tooltip in the UI.
+**Masking verification uses hybrid OCR inside the Databricks model.** When `run_verification=True`
+is passed to `POST /api/approve-and-mask`, the masking model re-OCRs the masked output to
+compute occurrence-level masking scores. Backend integration tests run in mock mode
+(`MOCK_DATABRICKS=True`) so `run_verification` results (`occurrences_total`, `occurrences_masked`,
+`verify_score`) are always `None` in integration tests — they are covered by the Databricks
+unit tests in `databricks/tests/test_masking_model.py`.

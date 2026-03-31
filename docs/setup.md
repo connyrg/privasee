@@ -111,8 +111,8 @@ Required environment variables on the endpoint:
 
 ### Masking Model Serving endpoint
 
-1. Run `databricks/notebooks/register_model.py` (selecting `MaskingModel`) to register it in Unity Catalog
-2. Run `databricks/notebooks/deploy_endpoint.py` to create a separate masking endpoint
+1. Run `databricks/notebooks/register_masking_model.ipynb` to register `MaskingModel` in Unity Catalog
+2. Run `databricks/notebooks/deploy_masking_endpoint.py` to create a separate masking endpoint
 3. Note the invocation URL and set it as `DATABRICKS_MASKING_ENDPOINT` in the backend env
 
 Required environment variables on the endpoint:

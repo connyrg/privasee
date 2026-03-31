@@ -7,10 +7,7 @@ from databricks_openai import DatabricksOpenAI, AsyncDatabricksOpenAI
 import base64
 import json
 import logging
-import os
-from typing import List, Dict, Optional
-
-from ..utils.nginx_utils import http_client_factory
+from typing import List, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -53,14 +50,19 @@ class DatabricksVisionService:
             page_number: Page number this image corresponds to (1-indexed)
 
         Returns:
-            List of extracted entities with bounding boxes:
+            List of extracted entities in canonical occurrences format:
             [
                 {
                     "entity_type": "Full Name",
                     "original_text": "John Doe",
-                    "bounding_box": [x, y, width, height],
                     "confidence": 0.95,
-                    "page_number": 1
+                    "occurrences": [
+                        {
+                            "page_number": 1,
+                            "original_text": "John Doe",
+                            "bounding_boxes": [[x, y, width, height]]
+                        }
+                    ]
                 }
             ]
 
@@ -75,7 +77,7 @@ class DatabricksVisionService:
             with open(image_path, "rb") as f:
                 image_data = base64.b64encode(f.read()).decode("utf-8")
 
-            # Build prompt for OpenAI
+            # Build prompt for Databricks
             prompt = self._build_extraction_prompt(field_definitions, ocr_data)
 
             # Call Databricks API with vision
@@ -98,7 +100,7 @@ class DatabricksVisionService:
                         ]
                     }
                 ],
-                max_tokens=20000
+                max_completion_tokens=16000
             )
 
             # Parse response
@@ -138,14 +140,19 @@ class DatabricksVisionService:
             page_number: Page number this image corresponds to (1-indexed)
 
         Returns:
-            List of extracted entities with bounding boxes:
+            List of extracted entities in canonical occurrences format:
             [
                 {
                     "entity_type": "Full Name",
                     "original_text": "John Doe",
-                    "bounding_box": [x, y, width, height],
                     "confidence": 0.95,
-                    "page_number": 1
+                    "occurrences": [
+                        {
+                            "page_number": 1,
+                            "original_text": "John Doe",
+                            "bounding_boxes": [[x, y, width, height]]
+                        }
+                    ]
                 }
             ]
 
@@ -155,7 +162,7 @@ class DatabricksVisionService:
         try:
             logger.info(f"Extracting entities using Databricks Vision for {len(field_definitions)} field types (page {page_number})")
 
-            # Build prompt for OpenAI
+            # Build prompt for Databricks
             prompt = self._build_extraction_prompt(field_definitions, ocr_data)
 
             # Call Databricks API with vision
@@ -178,7 +185,7 @@ class DatabricksVisionService:
                         ]
                     }
                 ],
-                max_completion_tokens=4096
+                max_completion_tokens=16000
             )
 
             # Parse response
@@ -189,8 +196,8 @@ class DatabricksVisionService:
             return entities
 
         except Exception as e:
-            logger.error(f"Error extracting entities with Databricks: {str(e)}")
-            return []
+            logger.error(f"Error extracting entities with Databricks: {str(e)}", exc_info=True)
+            raise
 
     async def extract_entities_from_base64_async(
         self,
@@ -225,7 +232,7 @@ class DatabricksVisionService:
                         ]
                     }
                 ],
-                max_completion_tokens=4096
+                max_completion_tokens=16000
             )
 
             response_text = response.choices[0].message.content
@@ -236,7 +243,7 @@ class DatabricksVisionService:
 
         except Exception as e:
             logger.error(f"Error extracting entities with Databricks (async, page {page_number}): {str(e)}", exc_info=True)
-            return []
+            raise
 
     def _build_extraction_prompt(
         self,
@@ -273,7 +280,7 @@ class DatabricksVisionService:
 **Document Context:**
 The document has been processed with OCR. Below is the extracted text and structural information:
 
-```json id="9hf3lt"
+```json
 {ocr_context}
 ```
 
@@ -282,215 +289,198 @@ The document has been processed with OCR. Below is the extracted text and struct
 
 ---
 
-### **Instructions:**
+### Instructions
 
 1. **Comprehensive Analysis**
+   - Analyze both the document image and the OCR word list together.
+   - Use positional relationships (adjacency, alignment) only when they are strong and unambiguous.
 
-   * Analyze both textual content and spatial layout from OCR data.
-   * Use positional relationships (adjacency, alignment) only when they are strong and unambiguous.
+2. **Entity Detection — Names (Deduplication Logic)**
+   - Identify ALL instances of the specified field types, including full names, partial names, and title-based names.
 
-2. **Entity Detection (Names — Deduplication Logic)**
-
-   * Identify ALL instances of the specified field types, including:
-
-     * Full names (e.g., "John Doe")
-     * Partial names (e.g., "John", "Doe")
-     * Title-based names (e.g., "Mr Doe", "Dr Smith")
-
-   **Critical Rules:**
-
-   * Extract each occurrence independently based on what is actually present in the document.
-   * If a full name (e.g., "John Doe") appears as a single contiguous entity:
-
-     * Extract it as **one entity only**
-     * Do NOT additionally extract "John" or "Doe" from the same occurrence
-   * Only extract partial names ("John", "Doe") if they appear **separately elsewhere** in the document as their own occurrences
-   * Avoid duplicate or overlapping entities referring to the same exact text span
+   **Critical rules:**
+   - Extract each occurrence independently based on what actually appears in the document.
+   - If a full name ("Stephen Parrot") appears as a single contiguous entity, extract it as **one entity only** — do NOT additionally extract "Stephen" or "Parrot" from that same occurrence.
+   - Only extract partial names ("Stephen") if they appear **separately elsewhere** in the document as their own independent occurrence.
+   - Avoid duplicate or overlapping entities referring to the same text span.
+   - **Do NOT include standalone honorific/title prefixes (Mr, Mrs, Ms, Miss, Dr, Prof, etc.) as separate occurrences of a person's name.** When a name is split across form fields (e.g. Title="Mr", Surname="Potter", Given="Harry James"), only extract the surname and given name fields as occurrences — not the title field.
 
    **Examples:**
+   - "Stephen Parrot" (single occurrence) → ✅ `"Stephen Parrot"` only
+   - "Stephen Parrot" + later standalone "Parrot" → ✅ `"Stephen Parrot"` and `"Parrot"`
+   - Form fields Title="Mr", Surname="Doe", Given="John" → ✅ occurrences for `"Doe"` and `"John"` only, NOT `"Mr"`
 
-   * "John Doe" (single occurrence) → ✅ `"John Doe"` only
-   * "John Doe" + later "Doe" → ✅ `"John Doe"` and `"Doe"`
-   * "Mr Doe" → ✅ `"Mr Doe"` (not `"Doe"` unless it appears separately)
+3. **Typo and Variation Grouping**
+   - If the same entity appears multiple times with minor OCR typos or spelling variants (e.g. "Kranthi" and "Kranti"), group them under one top-level entity.
+   - Use the most likely correct spelling as the top-level `original_text`.
+   - Record the exact text as it appears at each location in the occurrence's `original_text`.
 
-3. **Variation Handling**
+4. **What Counts as One Occurrence**
+   A set of OCR words forms a single occurrence when they are in a continuous reading sequence with strong spatial evidence:
+   - **Horizontal:** tokens are side-by-side with minimal gap on the same line.
+   - **Line-break continuation:** tokens appear on consecutive lines, horizontally aligned or near-aligned, with a vertical gap consistent with a normal line break and no unrelated tokens between them.
 
-   * Handle typos, abbreviations, and semantic equivalents.
+   Do NOT group words into one occurrence when:
+   - There is noticeable vertical separation beyond a typical line break.
+   - Alignment is weak or inconsistent.
+   - Tokens belong to separate labeled fields or columns.
+   - There is ambiguity in grouping.
 
-4. **Strict Multi-Box Entity Reconstruction (Controlled Adjacency)**
+5. **Address Extraction (Strict)**
+   - Only extract addresses that can pinpoint a specific location (must include street/number at minimum).
+   - Do NOT extract postcodes, states, countries, or cities in isolation.
 
-   * Merge tokens only when they form a **continuous reading sequence** with strong spatial evidence.
+6. **Bounding Boxes**
+   - For each occurrence, list the bounding box of **each individual OCR word token** that makes up the entity at that location.
+   - Copy the exact `b` values as `[b[0],b[1],b[2],b[3]]`. Do NOT estimate or interpolate.
+   - List every token separately — same-line tokens and line-break tokens alike. They will be merged automatically downstream.
 
-   **Allowed Merging Scenarios:**
-
-   * Horizontal concatenation (adjacent boxes)
-   * Line-break continuation with:
-
-     * Strong horizontal alignment
-     * Minimal vertical gap
-     * No intervening unrelated tokens
-
-   **Applies to:**
-
-   * Structured fields (dates, IDs, phone numbers)
-   * Names (e.g., "John" + "Doe", including across line breaks if clearly continuous)
-
-   **Rules:**
-
-   * Concatenate with natural spacing
-   * Compute a **minimum enclosing bounding box**
-   * Do NOT merge if ambiguous
-
-5. **Address Extraction Rules (Strict)**
-
-   * Only extract addresses that can pinpoint a specific location.
-   * Merge only when forming a clear, continuous address (single line or tight multi-line block)
-
-   **Do NOT extract:**
-
-   * Postcode alone
-   * State/region alone
-   * Country alone
-   * City alone
-   * Incomplete fragments
-
-6. **Bounding Box Assignment**
-
-   * Use OCR word-level bounding boxes when possible.
-   * For merged entities:
-
-     * Return a single bounding box enclosing all contributing boxes.
-   * Ensure normalized coordinates (0.0–1.0).
-
-7. **Confidence Scoring**
-
-   * Assign a confidence score (0.0–1.0).
-   * Lower confidence when merging across lines or uncertain grouping.
+7. **Confidence**
+   - Score 0.0–1.0. Lower confidence when grouping across line breaks, merging typo variants, or uncertain grouping.
 
 ---
 
-### **Output Format:**
+### Output Format
 
-Return a JSON array with this exact structure (no additional text):
+Return a JSON array, no other text:
 
-```json id="3vu8ye"
+```json
 [
   {{
     "entity_type": "field name from definitions",
-    "original_text": "exact text (merged only if valid continuous entity)",
-    "bounding_box": [x, y, width, height],
-    "confidence": 0.0-1.0
+    "original_text": "canonical spelling of this entity",
+    "confidence": 0.0-1.0,
+    "occurrences": [
+      {{
+        "original_text": "exact text as it appears at this location",
+        "bounding_boxes": [
+          [0.0, 0.0, 0.0, 0.0]
+        ]
+      }}
+    ]
   }}
 ]
 ```
 
 ---
 
-### **Important Constraints:**
+### Constraints
+- Return ONLY the JSON array.
+- One top-level entry per unique entity (or typo-variant group). Multiple appearances → multiple items in `occurrences`.
+- Do NOT emit partial name entities if they are already part of a full-name occurrence at the same location.
+- Copy bounding box values exactly from the words list. All coordinates normalized 0.0–1.0.
+- Do NOT merge across columns, sections, or unrelated fields.
 
-* Return ONLY the JSON array
-* Do NOT include explanations
-* Include all valid instances, but avoid duplicates from the same text span
-* Do NOT emit partial name entities if they are already part of a single extracted full-name occurrence
-* Only include partial names if they appear independently elsewhere
-* Merge tokens only when forming a clear continuous entity (including valid line-break continuation)
-* Ignore incomplete or non-specific address fragments
-
----
-
-**Begin analysis:**
-"""
+Begin analysis:"""
 
         return prompt
+
+    def _merge_same_line_bboxes(self, bboxes: List[Dict], y_threshold: float = 0.01) -> List[Dict]:
+        """Group word-level bboxes by line, merging each line into one rectangle."""
+        if not bboxes:
+            return []
+
+        sorted_boxes = sorted(bboxes, key=lambda b: (b['y'], b['x']))
+
+        lines = []
+        current_line = [sorted_boxes[0]]
+        for box in sorted_boxes[1:]:
+            if abs(box['y'] - current_line[0]['y']) <= y_threshold:
+                current_line.append(box)
+            else:
+                lines.append(current_line)
+                current_line = [box]
+        lines.append(current_line)
+
+        merged = []
+        for line in lines:
+            x0 = min(b['x'] for b in line)
+            y0 = min(b['y'] for b in line)
+            x1 = max(b['x'] + b['width'] for b in line)
+            y1 = max(b['y'] + b['height'] for b in line)
+            merged.append({'x': x0, 'y': y0, 'width': x1 - x0, 'height': y1 - y0})
+
+        return merged
 
     def _parse_openai_response(
         self,
         response_text: str,
-        ocr_data: Dict,
+        ocr_data: Dict,  # noqa: ARG002 — kept for API compatibility
         page_number: int = 1
     ) -> List[Dict]:
-        """
-        Parse Databricks's JSON response into entity list.
-
-        Args:
-            response_text: Raw response from Databricks
-            ocr_data: Original OCR data for validation
-            page_number: Page number for entities
-
-        Returns:
-            List of validated entity dictionaries
-        """
+        """Parse Databricks JSON response into canonical occurrences-format entity list."""
         try:
-            # Extract JSON from response (handle markdown code blocks)
             json_text = response_text.strip()
 
             if "```json" in json_text:
-                # Extract from code block
                 start = json_text.find("```json") + 7
                 end = json_text.find("```", start)
                 json_text = json_text[start:end].strip()
             elif "```" in json_text:
-                # Generic code block
                 start = json_text.find("```") + 3
                 end = json_text.find("```", start)
                 json_text = json_text[start:end].strip()
 
-            # Parse JSON
-            entities = json.loads(json_text)
+            raw_entities = json.loads(json_text)
+            if not isinstance(raw_entities, list):
+                raise ValueError(f"Expected JSON array from Databricks, got {type(raw_entities).__name__}")
 
-            # Validate and normalize
             validated_entities = []
-            for entity in entities:
-                if self._validate_entity(entity):
-                    # Ensure bounding box is in correct format
-                    bbox = entity.get('bounding_box', [0, 0, 0, 0])
-                    if len(bbox) == 4:
-                        validated_entities.append({
-                            'entity_type': entity['entity_type'],
-                            'original_text': entity['original_text'],
-                            'bounding_box': [float(x) for x in bbox],
-                            'confidence': float(entity.get('confidence', 0.9)),
-                            'page_number': page_number
-                        })
+            for entity in raw_entities:
+                entity_type = entity.get('entity_type')
+                canonical_text = entity.get('original_text')
+                confidence = float(entity.get('confidence', 0.9))
+                raw_occurrences = entity.get('occurrences', [])
+
+                if not entity_type or not canonical_text:
+                    logger.warning(f"Entity missing entity_type or original_text: {entity}")
+                    continue
+
+                if not raw_occurrences:
+                    logger.warning(f"Entity '{canonical_text}' has no occurrences, skipping")
+                    continue
+
+                parsed_occurrences = []
+                for occurrence in raw_occurrences:
+                    occurrence_text = occurrence.get('original_text') or canonical_text
+                    raw_bboxes = occurrence.get('bounding_boxes', [])
+                    valid_bboxes = [
+                        {'x': float(b[0]), 'y': float(b[1]), 'width': float(b[2]), 'height': float(b[3])}
+                        for b in raw_bboxes
+                        if isinstance(b, (list, tuple)) and len(b) == 4
+                    ]
+                    if not valid_bboxes:
+                        logger.warning(f"Occurrence of '{occurrence_text}' has no valid bounding boxes, skipping")
+                        continue
+
+                    merged = self._merge_same_line_bboxes(valid_bboxes)
+                    bboxes_flat = [[b['x'], b['y'], b['width'], b['height']] for b in merged]
+                    parsed_occurrences.append({
+                        'page_number': page_number,
+                        'original_text': occurrence_text,
+                        'bounding_boxes': bboxes_flat,
+                    })
+
+                if parsed_occurrences:
+                    validated_entities.append({
+                        'entity_type': entity_type,
+                        'original_text': canonical_text,
+                        'confidence': confidence,
+                        'occurrences': parsed_occurrences,
+                    })
 
             return validated_entities
 
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse Databricks response as JSON: {e}")
-            # IMPROVED: Log full response for debugging (up to 2000 chars)
             logger.error(f"Full response text ({len(response_text)} chars): {response_text[:2000]}")
             if len(response_text) > 2000:
                 logger.error(f"... (response truncated, total length: {len(response_text)} chars)")
-            # Return empty list rather than failing completely
-            return []
+            raise
         except Exception as e:
             logger.error(f"Error parsing Databricks response: {e}")
             logger.error(f"Response text: {response_text[:500]}")
-            return []
-
-    def _validate_entity(self, entity: Dict) -> bool:
-        """
-        Validate entity has required fields.
-
-        Args:
-            entity: Entity dictionary to validate
-
-        Returns:
-            True if valid, False otherwise
-        """
-        required_fields = ['entity_type', 'original_text', 'bounding_box']
-
-        for field in required_fields:
-            if field not in entity:
-                logger.warning(f"Entity missing required field: {field}")
-                return False
-
-        bbox = entity.get('bounding_box')
-        if not isinstance(bbox, list) or len(bbox) != 4:
-            logger.warning(f"Invalid bounding box format: {bbox}")
-            return False
-
-        return True
+            raise
 
     def test_connection(self) -> bool:
         """

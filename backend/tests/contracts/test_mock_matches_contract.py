@@ -52,15 +52,18 @@ def test_mock_success_response_matches_schema(sample_field_definitions):
             f"entity_type '{entity['entity_type']}' not in field definitions {field_names}"
         )
 
-    # Every bounding box has numeric x, y, width, height
+    # Every entity has at least one occurrence with bounding_boxes
     for entity in all_entities:
-        assert entity["bounding_boxes"], (
-            f"Entity '{entity['id']}' has no bounding boxes"
+        assert entity.get("occurrences"), (
+            f"Entity '{entity['id']}' has no occurrences"
         )
-        for bbox in entity["bounding_boxes"]:
-            for key in ("x", "y", "width", "height"):
-                assert isinstance(bbox[key], (int, float)), (
-                    f"bounding_box.{key} is not numeric for entity '{entity['id']}'"
+        for occ in entity["occurrences"]:
+            assert occ.get("bounding_boxes"), (
+                f"Occurrence of '{entity['id']}' has no bounding_boxes"
+            )
+            for bbox in occ["bounding_boxes"]:
+                assert len(bbox) == 4 and all(isinstance(v, (int, float)) for v in bbox), (
+                    f"bounding_box {bbox} is not a valid [x,y,w,h] list for entity '{entity['id']}'"
                 )
 
     # All confidence values are in [0, 1]

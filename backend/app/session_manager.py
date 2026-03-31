@@ -407,6 +407,7 @@ class UCSessionManager:
         candidates = [
             "metadata.json",
             "entities.json",
+            "debug_intermediate.json",
             "masking_decisions.json",
             f"original{original_ext}",
             "masked.pdf",

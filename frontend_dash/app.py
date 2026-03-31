@@ -1267,7 +1267,7 @@ def poll_status(n_intervals: int, session: dict | None, interval_disabled: bool)
         resp = req.get(
             f"{API_BASE_URL}/api/sessions/{session_id}",
             headers=headers,
-            timeout=10,
+            timeout=30,
             verify=SSL_VERIFY,
         )
         resp.raise_for_status()
@@ -1314,7 +1314,13 @@ def populate_entity_table(entities: list | None, step: int):
             pages = [e.get("page_number", 1)]
         return ", ".join(str(p) for p in pages)
 
-    rows = sorted(entities, key=lambda e: (e.get("page_number", 0), e.get("entity_type", "")))
+    def _first_page(e: dict) -> int:
+        occs = e.get("occurrences")
+        if occs:
+            return min((o.get("page_number", 1) for o in occs), default=1)
+        return e.get("page_number", 0)
+
+    rows = sorted(entities, key=lambda e: (_first_page(e), e.get("entity_type", "")))
     table_data = [
         {
             "id": e.get("id", ""),
@@ -1521,6 +1527,7 @@ def toggle_masked(show: bool):
 @callback(
     Output("store-configs", "data"),
     Output("config-load-dropdown", "options"),
+    Output("config-status", "children"),
     Input("store-step", "data"),
 )
 def refresh_config_list(step: int):
@@ -1533,10 +1540,22 @@ def refresh_config_list(step: int):
         if r.ok:
             configs = r.json()
             options = [{"label": c["config_name"], "value": c["key"]} for c in configs]
-            return configs, options
+            return configs, options, None
+        logger.error("Failed to fetch config list: HTTP %d — %s", r.status_code, r.text[:200])
+        alert = dbc.Alert(
+            f"Could not load saved configs (server returned {r.status_code}). Try refreshing.",
+            color="warning",
+            dismissable=True,
+        )
+        return [], [], alert
     except Exception as exc:
         logger.error("Failed to fetch config list from API: %s", exc)
-    return [], []
+        alert = dbc.Alert(
+            "Could not reach the API to load saved configs. Check your connection and try refreshing.",
+            color="warning",
+            dismissable=True,
+        )
+        return [], [], alert
 
 
 @callback(
@@ -1549,7 +1568,7 @@ def toggle_load_btn(value):
 
 @callback(
     Output("store-fields", "data", allow_duplicate=True),
-    Output("config-status", "children"),
+    Output("config-status", "children", allow_duplicate=True),
     Input("config-load-btn", "n_clicks"),
     State("config-load-dropdown", "value"),
     running=[(Output("config-load-btn", "disabled"), True, False)],
@@ -2034,6 +2053,10 @@ def batch_do_blocking(phase, cursor, session_id, current_entities, files, result
     The interval is disabled before this fires (set by batch_tick's gate returns)
     so there is no risk of concurrent duplicate invocations.
     Re-enables the interval on completion (or disables permanently when done).
+
+    masking_run phase sends run_verification=True so the Databricks masking model
+    re-OCRs the masked output and returns occurrence-level counts inline — no
+    separate /verify call is made.
     """
     if phase not in ("uploading", "masking_run") or not files:
         raise PreventUpdate
@@ -2092,7 +2115,8 @@ def batch_do_blocking(phase, cursor, session_id, current_entities, files, result
             new_session_id = resp.json()["session_id"]
         except Exception as exc:
             new_results = results + [{"filename": filename, "session_id": None, "entities_found": 0,
-                                      "entities_masked": 0, "score": None, "verdict": "Upload failed", "error": str(exc)}]
+                                      "occurrences_total": 0, "occurrences_masked": 0, "score": None,
+                                      "verdict": "Upload failed", "error": str(exc)}]
             return _advance(new_results)
         try:
             resp = req.post(
@@ -2105,13 +2129,14 @@ def batch_do_blocking(phase, cursor, session_id, current_entities, files, result
             resp.raise_for_status()
         except Exception as exc:
             new_results = results + [{"filename": filename, "session_id": new_session_id, "entities_found": 0,
-                                      "entities_masked": 0, "score": None, "verdict": "Processing failed", "error": str(exc)}]
+                                      "occurrences_total": 0, "occurrences_masked": 0, "score": None,
+                                      "verdict": "Processing failed", "error": str(exc)}]
             return _advance(new_results)
         # Re-enable the interval to begin polling
         return cursor, "polling", new_session_id, 0, [], no_update, False, no_update, _progress("Extracting entities...")
 
     # ------------------------------------------------------------------
-    # Mask + verify
+    # Mask + verify (verification runs inside the Databricks masking model)
     # ------------------------------------------------------------------
     if phase == "masking_run":
         entities = current_entities or []
@@ -2120,45 +2145,49 @@ def batch_do_blocking(phase, cursor, session_id, current_entities, files, result
             resp = req.post(
                 f"{API_BASE_URL}/api/approve-and-mask",
                 headers=headers,
-                json={"session_id": session_id, "approved_entity_ids": approved_ids},
+                json={
+                    "session_id": session_id,
+                    "approved_entity_ids": approved_ids,
+                    "run_verification": True,
+                },
                 timeout=300,
                 verify=SSL_VERIFY,
             )
             resp.raise_for_status()
+            mask_data = resp.json()
         except Exception as exc:
-            new_results = results + [{"filename": filename, "session_id": session_id, "entities_found": len(entities),
-                                      "entities_masked": 0, "score": None, "verdict": "Masking failed", "error": str(exc)}]
+            new_results = results + [{
+                "filename": filename,
+                "session_id": session_id,
+                "entities_found": len(entities),
+                "occurrences_total": 0,
+                "occurrences_masked": 0,
+                "score": None,
+                "verdict": "Masking failed",
+                "error": str(exc),
+            }]
             return _advance(new_results)
-        score = None
-        verdict = "Verify failed"
-        error = None
-        try:
-            resp = req.post(
-                f"{API_BASE_URL}/api/sessions/{session_id}/verify",
-                headers=headers,
-                json={"entities": entities},
-                timeout=60,
-                verify=SSL_VERIFY,
-            )
-            resp.raise_for_status()
-            verify_data = resp.json()
-            score = verify_data["score"]
-            if score >= 90:
-                verdict = "Excellent"
-            elif score >= 70:
-                verdict = "Review recommended"
-            else:
-                verdict = "Masking incomplete"
-        except Exception as exc:
-            error = str(exc)
+
+        score = mask_data.get("verify_score")
+        occurrences_total = mask_data.get("occurrences_total", 0) or 0
+        occurrences_masked = mask_data.get("occurrences_masked", 0) or 0
+        if score is None:
+            verdict = "Verify unavailable"
+        elif score >= 90:
+            verdict = "Excellent"
+        elif score >= 70:
+            verdict = "Review recommended"
+        else:
+            verdict = "Masking incomplete"
         new_results = results + [{
             "filename": filename,
             "session_id": session_id,
             "entities_found": len(entities),
-            "entities_masked": len(entities),
+            "occurrences_total": occurrences_total,
+            "occurrences_masked": occurrences_masked,
             "score": score,
             "verdict": verdict,
-            "error": error,
+            "error": None,
         }]
         return _advance(new_results)
 
@@ -2174,6 +2203,7 @@ def batch_do_blocking(phase, cursor, session_id, current_entities, files, result
     prevent_initial_call=True,
 )
 def render_batch_results(results: list, step: int, mode: str):
+    """Render the batch completion summary: banner + table with per-file occurrence-level masking scores."""
     if mode != "batch" or step != 2 or not results:
         raise PreventUpdate
 
@@ -2249,7 +2279,8 @@ def render_batch_results(results: list, step: int, mode: str):
             html.Tr([
                 file_cell,
                 html.Td(str(r.get("entities_found", 0))),
-                html.Td(str(r.get("entities_masked", 0))),
+                html.Td(str(r.get("occurrences_total", 0))),
+                html.Td(str(r.get("occurrences_masked", 0))),
                 html.Td(score_str),
                 html.Td(verdict_badge),
                 html.Td(download_cell),
@@ -2259,8 +2290,9 @@ def render_batch_results(results: list, step: int, mode: str):
     table = dbc.Table(
         [
             html.Thead(html.Tr([
-                html.Th("File"), html.Th("Entities Found"),
-                html.Th("Entities Masked"), html.Th("Score"), html.Th("Status"),
+                html.Th("File"), html.Th("Entities"),
+                html.Th("Occurrences Found"), html.Th("Occurrences Masked"),
+                html.Th("Score"), html.Th("Status"),
                 html.Th("Download"),
             ])),
             html.Tbody(rows),

@@ -89,6 +89,11 @@ class ConfigManager:
     def list_configs(self) -> List[Dict[str, Any]]:
         """Return summary metadata (config_name, key, saved_at) for all saved configs.
 
+        Uses only the directory listing (one request) — individual config files
+        are not read here.  The display name is derived from the sanitised key
+        stored in the filename; the exact original config_name is returned by
+        get_config() when the user selects and loads a specific config.
+
         Returns [] if the configs directory does not yet exist.
         Raises requests.HTTPError on unexpected storage errors.
         """
@@ -96,27 +101,25 @@ class ConfigManager:
         dirs_url = f"{self.host}/api/2.0/fs/directories{self.configs_path}"
         r = requests.get(dirs_url, headers=self._headers())
         if r.status_code in (400, 404):
-            # 404 = directory doesn't exist yet; Databricks Files API may also
-            # return 400 for a path that has never been written to.
             logger.debug("Configs directory not yet created (status %d)", r.status_code)
             return []
         r.raise_for_status()
 
         summaries = []
         for entry in r.json().get("contents", []):
-            # The Files API returns the full path; derive the filename from it.
-            # e.g. "/Volumes/catalog/schema/configs/patient_record.json" → "patient_record.json"
             full_path = entry.get("path", "") or entry.get("name", "")
             filename = full_path.rstrip("/").split("/")[-1]
             if not filename.endswith(".json"):
                 continue
-            config = self.get_config(filename[:-5])  # strip .json to get key
-            if config:
-                summaries.append({
-                    "config_name": config["config_name"],
-                    "key": config["key"],
-                    "saved_at": config["saved_at"],
-                })
+            key = filename[:-5]  # strip .json
+            # Derive a human-readable display name from the key without reading the file.
+            # e.g. "patient_record" → "Patient Record"
+            display_name = key.replace("-", " ").replace("_", " ").title()
+            summaries.append({
+                "config_name": display_name,
+                "key": key,
+                "saved_at": "",
+            })
         logger.info("Listed %d config(s) from UC", len(summaries))
         return summaries
 

@@ -55,28 +55,33 @@ POST /invocations  (session_id, field_definitions)
     │   ├─ DOCX: python-docx paragraph extraction
     │   └─ Image (PNG/JPG): Azure Document Intelligence
     │
-    ├─ (per page) VisionService.extract_entities_from_base64()
+    ├─ (per page, async) VisionService.extract_entities_from_base64_async()
     │   ├─ Azure OpenAI (default): GPT-4o with vision
     │   └─ Claude (alternative): Claude Vision
-    │   Note: digital PDF pages without a rendered image are skipped silently
+    │   Output: [{entity_type, original_text, confidence, occurrences: [{page_number,
+    │            original_text, bounding_boxes: [[x,y,w,h]...]}]}]
+    │   Note: each occurrence carries word-level bboxes merged by line
     │
-    ├─ BBoxMatcher.match_entities_to_words()
-    │   └─ Aligns entity text spans to OCR word-level bounding boxes
-    │
-    ├─ Pre-generate replacement_text for user review
-    │   ├─ "Fake Data"     → realistic fake value (consistent per original_text)
-    │   └─ "Entity Label"  → sequential label, e.g. Full_Name_A, Full_Name_B
+    ├─ Enrich entities
+    │   ├─ Assign stable UUID id per entity
+    │   └─ Pre-generate replacement_text for user review:
+    │       "Fake Data"    → realistic fake value (consistent per original_text)
+    │       "Entity Label" → sequential label e.g. Full_Name_A, Full_Name_B
     │                        (letters A–Z, then integers 27, 28, … per type)
     │
-    ├─ Write entities.json to UC volume via Files REST API
+    ├─ _merge_entity_variants()
+    │   └─ Merge partial-name references (e.g. "John" → occurrence of "John Doe")
+    │      and cross-page duplicates into a single entity with combined occurrences
     │
-    └─ Return {session_id, status, pages: [{page_num, entities}]}
+    ├─ Write entities.json to UC volume (includes intermediate_results for debugging)
+    │
+    └─ Return {session_id, status, entities: [...], pages: [{page_num, entities}]}
 ```
 
 ### Masking
 
 ```
-POST /invocations  (session_id, entities_to_mask)
+POST /invocations  (session_id, entities_to_mask, run_verification)
     │
     ├─ Fetch original{ext} from UC volume via Files REST API
     │
@@ -86,7 +91,22 @@ POST /invocations  (session_id, entities_to_mask)
     │
     ├─ Write masked.pdf to UC volume via Files REST API
     │
-    └─ Return {session_id, status: "complete", entities_masked: N}
+    ├─ [run_verification=true only] Verify masking quality via re-OCR
+    │   ├─ Classify pages from ORIGINAL PDF text layer (not masked output —
+    │   │   avoids false-positive "digital" from replacement text written by
+    │   │   Fake Data / Entity Label strategies on scanned pages)
+    │   │
+    │   ├─ Digital pages (text layer ≥ 50 chars): PyMuPDF text extraction
+    │   │   on masked page, check occurrence text absent
+    │   │
+    │   └─ Scanned pages / image originals:
+    │       ├─ ADI available → render masked page to PNG → ADI re-OCR →
+    │       │   check occurrence text absent in OCR result
+    │       └─ ADI unavailable → treat page as masked (score = 100% for
+    │           that page; set ADI vars on endpoint to enable real verify)
+    │
+    └─ Return {session_id, status, entities_masked
+               [, occurrences_total, occurrences_masked, score]}
 ```
 
 ## MLflow Interface
@@ -114,6 +134,9 @@ The model fetches the document from:
 
 #### Output (MLflow predictions format)
 
+All positional data lives inside `occurrences`. No entity-level `bounding_box`,
+`bounding_boxes`, or `page_number` fields.
+
 ```json
 {
   "predictions": [
@@ -129,11 +152,16 @@ The model fetches the document from:
               "entity_type": "Full Name",
               "original_text": "John Doe",
               "replacement_text": "Jane Smith",
-              "bounding_box": [0.1, 0.2, 0.3, 0.05],
               "confidence": 0.95,
               "approved": true,
-              "page_number": 1,
-              "strategy": "Fake Data"
+              "strategy": "Fake Data",
+              "occurrences": [
+                {
+                  "page_number": 1,
+                  "original_text": "John Doe",
+                  "bounding_boxes": [[0.1, 0.2, 0.3, 0.05]]
+                }
+              ]
             }
           ]
         }
@@ -142,6 +170,12 @@ The model fetches the document from:
   ]
 }
 ```
+
+An entity with multiple appearances (e.g. full name on page 1 and first name only on
+page 3) carries multiple `occurrences` entries.  Each occurrence's `original_text` may
+differ from the entity's canonical `original_text` when the text was merged as a
+partial-name variant.  The masking service uses token-alignment to derive the correct
+replacement slice for each occurrence.
 
 ### Masking
 
@@ -152,7 +186,8 @@ The model fetches the document from:
   "dataframe_records": [
     {
       "session_id": "uuid-string",
-      "entities_to_mask": "[{\"id\": \"entity-uuid\", \"entity_type\": \"Full Name\", \"original_text\": \"John Doe\", \"replacement_text\": \"Jane Smith\", \"bounding_box\": [0.1, 0.2, 0.3, 0.05], \"strategy\": \"Fake Data\", \"approved\": true, \"page_number\": 1}]"
+      "entities_to_mask": "[{\"id\": \"entity-uuid\", \"entity_type\": \"Full Name\", \"original_text\": \"John Doe\", \"replacement_text\": \"Jane Smith\", \"strategy\": \"Fake Data\", \"approved\": true, \"occurrences\": [{\"page_number\": 1, \"original_text\": \"John Doe\", \"bounding_boxes\": [[0.1, 0.2, 0.3, 0.05]]}]}]",
+      "run_verification": false
     }
   ]
 }
@@ -161,7 +196,13 @@ The model fetches the document from:
 `entities_to_mask` is a **JSON string** (not a nested object) containing the list of
 approved entities. Only entities with `approved: true` are redacted.
 
+`run_verification` (optional, default `false`) — when `true`, the model re-OCRs the
+masked output and returns occurrence-level masking counts. Set to `true` by the backend
+for batch mode; `false` for single-file mode to avoid the extra ADI latency.
+
 #### Output (MLflow predictions format)
+
+Without verification (`run_verification=false`):
 
 ```json
 {
@@ -174,6 +215,27 @@ approved entities. Only entities with `approved: true` are redacted.
   ]
 }
 ```
+
+With verification (`run_verification=true`):
+
+```json
+{
+  "predictions": [
+    {
+      "session_id": "uuid-string",
+      "status": "complete",
+      "entities_masked": 5,
+      "occurrences_total": 8,
+      "occurrences_masked": 7,
+      "score": 87.5
+    }
+  ]
+}
+```
+
+`score` is `occurrences_masked / occurrences_total * 100`. Scanned pages without ADI
+credentials count all their occurrences as masked, so `score` may be optimistic when
+ADI env vars are not set on the endpoint.
 
 ## Environment Variables
 
@@ -219,11 +281,21 @@ approved entities. Only entities with `approved: true` are redacted.
 
 ### Masking endpoint
 
-| Variable | Description |
-|---|---|
-| `DATABRICKS_HOST` | Workspace URL |
-| `DATABRICKS_TOKEN` | Service principal token with Files API read/write access |
-| `UC_VOLUME_PATH` | UC volume base path (must match Document Intelligence endpoint) |
+| Variable | Required | Description |
+|---|---|---|
+| `DATABRICKS_HOST` | Yes | Workspace URL |
+| `DATABRICKS_TOKEN` | Yes | Service principal token with Files API read/write access |
+| `UC_VOLUME_PATH` | Yes | UC volume base path (must match Document Intelligence endpoint) |
+| `ADI_TENANT_ID` | For scanned PDFs | Azure tenant ID for ADI OAuth |
+| `ADI_CLIENT_ID` | For scanned PDFs | OAuth client ID for Azure Document Intelligence |
+| `ADI_CLIENT_SECRET` | For scanned PDFs | OAuth client secret for Azure Document Intelligence |
+| `ADI_ENDPOINT` | For scanned PDFs | APIM endpoint URL for Azure Document Intelligence |
+| `ADI_APPSPACE_ID` | For scanned PDFs | AppSpace ID (default: `A-007100`) |
+| `ADI_MODEL_ID` | For scanned PDFs | Document Intelligence model ID (default: `prebuilt-layout`; deployed as `prebuilt-read`) |
+
+The ADI variables are only required for batch-mode verification on scanned PDFs
+(`run_verification=true`). Without them, scanned pages are treated as masked (safe
+fallback) but `score` will be artificially 100% for those pages.
 
 ## UC Volume Layout
 
@@ -244,9 +316,33 @@ The models read and write files under `{UC_VOLUME_PATH}/{session_id}/`:
   "session_id": "...",
   "saved_at": "2025-01-01T00:00:00+00:00",
   "status": "awaiting_review",
-  "entities": [ ... ]
+  "entities": [
+    {
+      "id": "uuid",
+      "entity_type": "Full Name",
+      "original_text": "John Doe",
+      "replacement_text": "Jane Smith",
+      "confidence": 0.95,
+      "approved": true,
+      "strategy": "Fake Data",
+      "occurrences": [
+        {
+          "page_number": 1,
+          "original_text": "John Doe",
+          "bounding_boxes": [[0.1, 0.2, 0.3, 0.05]]
+        }
+      ]
+    }
+  ],
+  "intermediate_results": {
+    "vision_raw": { "1": [ ... ] },
+    "pre_merge":  [ ... ]
+  }
 }
 ```
+
+`intermediate_results` is stored for debugging only and is not read by the backend
+or masking endpoint.
 
 ## Deployment
 
@@ -303,6 +399,6 @@ Add them in the Databricks UI: Serving → your endpoint → Edit endpoint → E
 
 ### Low OCR confidence on scanned pages
 
-- Increase `RENDER_ZOOM_FACTOR` in `ocr_service.py` to `3.0` for higher DPI rendering
 - Verify the original document was scanned at ≥200 DPI
 - Azure Document Intelligence performs best with `prebuilt-read` model (the default)
+- The vision service downscales images to 1500px on the longer side before calling the LLM (downscale-only; smaller images are left at original size to avoid payload issues)

@@ -7,13 +7,19 @@ Two public entry points:
 
 ``apply_pdf_masks(pdf_bytes, entities) -> bytes``
     PDF-native redaction via PyMuPDF.  Bounding boxes are normalised [0, 1].
-    Handles form widgets (updates field values in place).  Accepts both the
-    new ``occurrences`` entity format and the old ``bounding_box`` /
-    ``bounding_boxes`` format.
+    Handles form widgets (updates field values in place).
 
 ``apply_masks(image_path, entities, output_path) -> str``
     Image-based masking via PIL.  Used for PNG/JPG originals; output is saved
     as a PNG.  The caller (MaskingModel) wraps the result in a PDF.
+
+Entity format
+-------------
+Each entity must have an ``occurrences`` list.  Each occurrence has:
+- ``page_number`` (int, 1-indexed)
+- ``original_text`` (str, exact text at this location)
+- ``bounding_boxes`` (list of [x, y, width, height] — one per line of text,
+  normalised 0.0–1.0 relative to page/image dimensions)
 
 Masking strategies
 ------------------
@@ -97,46 +103,16 @@ class MaskingService:
 
         approved = [e for e in entities if e.get("approved", True)]
 
-        # ------------------------------------------------------------------
-        # Build per-page work items.
-        #
-        # New format: entity has "occurrences" — iterate them directly,
-        # deriving replacement_text per occurrence via token alignment.
-        #
-        # Old format (no occurrences): fall back to bounding_box /
-        # bounding_boxes + page_number, using the consistency_map path.
-        # ------------------------------------------------------------------
         # page_idx → list of (entity, bbox, occurrence_original_text)
         by_page: Dict[int, List[tuple]] = {}
 
-        old_format: List[Dict[str, Any]] = []
         for entity in approved:
-            if entity.get("occurrences"):
-                for occ in entity["occurrences"]:
-                    page_idx = occ.get("page_number", 1) - 1
-                    bbox = occ.get("bounding_box", [])
+            for occ in entity.get("occurrences", []):
+                page_idx = occ.get("page_number", 1) - 1
+                occ_text = occ.get("original_text", entity.get("original_text", ""))
+                for bbox in occ.get("bounding_boxes", []):
                     if len(bbox) == 4:
-                        by_page.setdefault(page_idx, []).append(
-                            (entity, bbox, occ.get("original_text", entity.get("original_text", "")))
-                        )
-            else:
-                old_format.append(entity)
-
-        # Old-format entities: seed consistency map and group by page
-        if old_format:
-            self._seed_consistency_map(old_format, consistency_map)
-            old_by_page: Dict[int, List[Dict[str, Any]]] = {}
-            for entity in old_format:
-                page_idx = entity.get("page_number", 1) - 1
-                old_by_page.setdefault(page_idx, []).append(entity)
-            for page_idx in old_by_page:
-                old_by_page[page_idx] = self._remove_contained_entities(old_by_page[page_idx])
-            for page_idx, ents in old_by_page.items():
-                for entity in ents:
-                    for bbox in self._resolve_bboxes(entity):
-                        by_page.setdefault(page_idx, []).append(
-                            (entity, bbox, entity.get("original_text", ""))
-                        )
+                        by_page.setdefault(page_idx, []).append((entity, bbox, occ_text))
 
         for page_idx, page_items in sorted(by_page.items()):
             if page_idx >= len(doc):
@@ -183,27 +159,74 @@ class MaskingService:
                 # the content stream, causing the original value to show
                 # through.  Updating the value in place avoids that while
                 # keeping the form field structure intact.
-                overlapping_widget = next(
-                    (wgt for wgt in page_widgets if not (wgt.rect & rect).is_empty),
-                    None,
-                )
-                if overlapping_widget is not None:
-                    # Form widgets render on top of the page content stream, so
-                    # a redact annotation underneath is invisible.  Substitute
-                    # only the sensitive substring within the field value to
-                    # preserve surrounding context (e.g. labels, other fields).
-                    current_val = overlapping_widget.field_value or ""
-                    target = occ_original_text.strip()
+                #
+                # An entity can span multiple form widgets (e.g. day/month/year
+                # date fields, or street/suburb address fields).  We collect
+                # ALL overlapping widgets and mask each one whose field value
+                # appears as a component of occ_original_text.
+                overlapping_widgets = [
+                    wgt for wgt in page_widgets if not (wgt.rect & rect).is_empty
+                ]
+                # Fallback: bbox from the vision model may not precisely land on
+                # the widget rect (e.g. tight text bbox vs larger widget area).
+                # Search by field-value match so we still mask the right widget
+                # even when the coordinate intersection test misses.
+                if not overlapping_widgets and occ_original_text.strip():
+                    target_norm_fb = re.sub(r"\s+", " ", occ_original_text.strip()).lower()
+                    for wgt in page_widgets:
+                        wval = wgt.field_value or ""
+                        if not wval.strip():
+                            continue
+                        wval_norm = re.sub(r"\s+", " ", wval.strip()).lower()
+                        # Match: widget value equals occurrence text, or widget
+                        # value is a component of a multi-widget occurrence span,
+                        # or occurrence text is fully contained in the widget value.
+                        if (wval_norm == target_norm_fb
+                                or wval_norm in target_norm_fb
+                                or target_norm_fb in wval_norm):
+                            overlapping_widgets.append(wgt)
+                            logger.debug(
+                                "widget value-match fallback: field=%r val=%r occ=%r",
+                                wgt.field_name, wval, occ_original_text,
+                            )
+                if overlapping_widgets:
                     sub = "[MASKED]" if strategy == "redact" else (replacement or "[MASKED]")
-                    if target:
-                        new_val = current_val.replace(target, sub)
-                        if new_val == current_val and target.lower() in current_val.lower():
-                            # Case-insensitive fallback
-                            new_val = re.sub(re.escape(target), sub, current_val, flags=re.IGNORECASE)
-                    else:
-                        new_val = sub
-                    overlapping_widget.field_value = new_val
-                    overlapping_widget.update()
+                    target = occ_original_text.strip()
+                    # Normalise whitespace for substring matching across widgets
+                    target_norm = re.sub(r"\s+", " ", target).lower()
+
+                    for overlapping_widget in overlapping_widgets:
+                        current_val = overlapping_widget.field_value or ""
+                        if not current_val.strip():
+                            continue
+
+                        # Try replacing the full occ_original_text within this
+                        # widget's value (handles the single-widget case).
+                        if target:
+                            new_val = current_val.replace(target, sub)
+                            if new_val == current_val and target.lower() in current_val.lower():
+                                new_val = re.sub(re.escape(target), sub, current_val, flags=re.IGNORECASE)
+                        else:
+                            new_val = sub
+
+                        if new_val == current_val:
+                            # Full target not in this widget — check whether
+                            # this widget's value is itself a component of the
+                            # occurrence text (multi-widget span, e.g. "31" in
+                            # "31 / 7 / 1980").  Replace with aligned slice.
+                            val_norm = re.sub(r"\s+", " ", current_val.strip()).lower()
+                            if val_norm and val_norm in target_norm:
+                                if strategy == "fake_name":
+                                    new_val = MaskingService._resolve_component_replacement(
+                                        current_val, target, sub,
+                                        overlapping_widget.rect, page_widgets,
+                                    )
+                                else:
+                                    new_val = sub
+
+                        if new_val != current_val:
+                            overlapping_widget.field_value = new_val
+                            overlapping_widget.update()
                 else:
                     page.add_redact_annot(rect, fill=fill_color)
                     if replacement:
@@ -213,11 +236,25 @@ class MaskingService:
 
             for rect, rect_display, text in inserts:
                 # Use display rect height for font sizing (visually correct scale).
-                # Use raw PDF rect for position; rotate to counter page rotation so
-                # replacement text appears horizontal in the display view.
-                fontsize = max(6, min(10, int(rect_display.height * 0.7)))
+                fontsize = max(6, min(36, int(rect_display.height * 0.7)))
+                # The text origin must be the display-left edge of the rect, but
+                # "display-left" maps to different raw PDF coordinates depending on
+                # the page rotation:
+                #
+                #   rotation=0:   text goes right (+x raw); raw left  = rect.x0 ✓
+                #   rotation=90:  text goes up   (-y raw);  raw y₁ → display left ✓
+                #   rotation=180: text goes left (-x raw);  raw right = rect.x1
+                #                 (rect.x0 is the display-right edge — the bug on
+                #                  scanned pages stored upside-down)
+                #   rotation=270: text goes down (+y raw);  raw y₀ → display left
+                if rotation == 180:
+                    origin = (rect.x1 - 2, rect.y1 - 2)
+                elif rotation == 270:
+                    origin = (rect.x0 + 2, rect.y0 + 2)
+                else:  # 0 or 90
+                    origin = (rect.x0 + 2, rect.y1 - 2)
                 page.insert_text(
-                    (rect.x0 + 2, rect.y1 - 2),
+                    origin,
                     text,
                     fontsize=fontsize,
                     rotate=rotation,
@@ -264,46 +301,17 @@ class MaskingService:
 
         approved = [e for e in entities if e.get("approved", True)]
 
-        # Seed consistency map from old-format entities so partial name variants
-        # inherit their replacement from the corresponding full-name entity.
-        old_format = [e for e in approved if not e.get("occurrences")]
-        if old_format:
-            self._seed_consistency_map(old_format, consistency_map)
-
         for entity in approved:
             raw_strategy = entity.get("strategy", "")
             strategy = self._STRATEGY_MAP.get(raw_strategy, "redact")
             fill = (0, 0, 0) if strategy == "redact" else mask_color
 
-            if entity.get("occurrences"):
-                # New format: resolve replacement per occurrence so that partial
-                # name variants (e.g. "Stephen" inside "Stephen Parrot") receive
-                # the aligned replacement token slice, matching apply_pdf_masks.
-                for occ in entity["occurrences"]:
-                    bbox = occ.get("bounding_box", [])
-                    if len(bbox) != 4:
-                        continue
-                    occ_original_text = occ.get("original_text", entity.get("original_text", ""))
-                    replacement = self._resolve_occurrence_replacement(
-                        entity, occ_original_text, strategy, label_counters, consistency_map
-                    )
-                    x, y, width, height = self._normalize_bbox(bbox, img_width, img_height)
-                    if width <= 0 or height <= 0:
-                        continue
-                    draw.rectangle(
-                        [x, y, x + width, y + height],
-                        fill=fill,
-                        outline=border_color,
-                        width=1,
-                    )
-                    if strategy != "redact" and replacement:
-                        self._draw_text(draw, replacement, x, y, width, height, text_color)
-            else:
-                # Old format: single replacement for all bounding boxes.
-                replacement = self._resolve_replacement(
-                    entity, strategy, label_counters, consistency_map
+            for occ in entity.get("occurrences", []):
+                occ_original_text = occ.get("original_text", entity.get("original_text", ""))
+                replacement = self._resolve_occurrence_replacement(
+                    entity, occ_original_text, strategy, label_counters, consistency_map
                 )
-                for bbox in self._resolve_bboxes(entity):
+                for bbox in occ.get("bounding_boxes", []):
                     if len(bbox) != 4:
                         continue
                     x, y, width, height = self._normalize_bbox(bbox, img_width, img_height)
@@ -327,20 +335,114 @@ class MaskingService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _resolve_bboxes(entity: Dict[str, Any]) -> List[List[float]]:
-        multi = entity.get("bounding_boxes")
-        if multi:
-            result = []
-            for b in multi:
-                if isinstance(b, (list, tuple)) and len(b) == 4:
-                    result.append(list(b))
-                elif isinstance(b, dict) and all(k in b for k in ("x", "y", "width", "height")):
-                    result.append([b["x"], b["y"], b["width"], b["height"]])
-            return result
-        single = entity.get("bounding_box")
-        if single and len(single) == 4:
-            return [list(single)]
-        return []
+    def _resolve_component_replacement(
+        current_val: str,
+        original_text: str,
+        replacement_text: str,
+        widget_rect,
+        page_widgets: list,
+    ) -> str:
+        """
+        Return the replacement slice for a widget whose value is a component
+        of a multi-widget occurrence span (e.g. "15" within "15/03/1985").
+
+        Strategy
+        --------
+        1. Separator split — try /, -, ., then whitespace.  If original and
+           replacement split into the same number of non-empty parts and
+           current_val matches exactly one part → return the aligned part.
+           When multiple parts match (e.g. DD==MM=="01") use widget x-position
+           to rank among sibling widgets and pick the correct index.
+
+        2. Character-level fallback — strip separators from both sides and
+           align by character position, ranked by (y, x) widget reading order.
+           Handles 10-widget single-character Medicare numbers etc.
+
+        Falls back to returning replacement_text unchanged on any failure
+        (no regression vs. current behaviour).
+        """
+        current = current_val.strip()
+        orig = original_text.strip()
+        repl = replacement_text.strip()
+
+        if not current or not orig or not repl:
+            return replacement_text
+
+        # --- 1. Separator-based ---
+        _sep_candidates: List[Optional[str]] = ['/', '-', '.', None]
+        for sep in _sep_candidates:
+            if sep is None:
+                orig_parts = orig.split()
+                repl_parts = repl.split()
+            else:
+                orig_parts = [p.strip() for p in orig.split(sep) if p.strip()]
+                repl_parts = [p.strip() for p in repl.split(sep) if p.strip()]
+
+            if len(orig_parts) < 2 or len(orig_parts) != len(repl_parts):
+                continue
+
+            matching = [i for i, p in enumerate(orig_parts) if p.lower() == current.lower()]
+            if not matching:
+                continue
+
+            if len(matching) == 1:
+                return repl_parts[matching[0]]
+
+            # Ambiguous: same value appears in multiple parts.
+            # Rank sibling widgets (those whose values match any orig part)
+            # left-to-right by x-position and assign parts greedily.
+            used: set = set()
+            x_to_part: dict = {}
+            for wgt in sorted(page_widgets, key=lambda w: w.rect.x0):
+                wval = (wgt.field_value or "").strip()
+                for i, part in enumerate(orig_parts):
+                    if i not in used and wval.lower() == part.lower():
+                        x_to_part[round(wgt.rect.x0, 1)] = i
+                        used.add(i)
+                        break
+
+            wx = round(widget_rect.x0, 1)
+            if wx in x_to_part:
+                idx = x_to_part[wx]
+                if idx < len(repl_parts):
+                    return repl_parts[idx]
+
+            # Positional lookup failed — return first matched part
+            return repl_parts[matching[0]]
+
+        # --- 2. Character-level fallback ---
+        _sep_re = re.compile(r'[\s/\-\.\,]')
+        orig_chars = _sep_re.sub('', orig)
+        repl_chars = _sep_re.sub('', repl)
+        curr_chars = _sep_re.sub('', current)
+
+        if (0 < len(curr_chars) <= 3
+                and len(orig_chars) == len(repl_chars)
+                and len(orig_chars) > len(curr_chars)):
+            # Collect component widgets: those whose stripped values fit within
+            # orig_chars, sorted by (y, x) reading order.
+            comp_widgets = [
+                wgt for wgt in page_widgets
+                if 0 < len(_sep_re.sub('', (wgt.field_value or "").strip())) <= 3
+                and _sep_re.sub('', (wgt.field_value or "").strip()).lower()
+                    in orig_chars.lower()
+            ]
+            comp_widgets.sort(key=lambda w: (round(w.rect.y0), round(w.rect.x0)))
+
+            # Walk through widgets in order, tracking char position.
+            char_pos = 0
+            for wgt in comp_widgets:
+                wval_stripped = _sep_re.sub('', (wgt.field_value or "").strip())
+                wrect = wgt.rect
+                if (abs(wrect.x0 - widget_rect.x0) < 2
+                        and abs(wrect.y0 - widget_rect.y0) < 2):
+                    end = char_pos + len(curr_chars)
+                    if end <= len(repl_chars):
+                        return repl_chars[char_pos:end]
+                    break
+                char_pos += len(wval_stripped)
+
+        return replacement_text
 
     @staticmethod
     def _resolve_occurrence_replacement(
@@ -480,121 +582,6 @@ class MaskingService:
         text_x = x + (box_width - text_width) // 2
         text_y = y + (box_height - text_height) // 2
         draw.text((text_x, text_y), text, fill=text_color, font=font)
-
-    def _seed_consistency_map(
-        self,
-        entities: List[Dict[str, Any]],
-        consistency_map: Dict[str, str],
-    ) -> None:
-        """
-        Pre-populate consistency_map so that partial name variants inherit
-        their replacement from the corresponding full-name entity.
-
-        Process longest original_text first so that full names are mapped
-        before their subsets are encountered.  For each shorter entity,
-        find a contiguous token window in a longer mapped entry and take
-        the aligned replacement tokens.
-
-        Examples:
-            "John Michael Smith" → "Jane Alice Doe"
-            "John"               → "Jane"       (token 0)
-            "Michael"            → "Alice"      (token 1)
-            "John Michael"       → "Jane Alice" (tokens 0–1)
-            "Michael Smith"      → "Alice Doe"  (tokens 1–2)
-            "John Smith"         → own replacement (not contiguous — safe fallback)
-        """
-        fake_entities = [
-            e for e in entities
-            if self._STRATEGY_MAP.get(e.get("strategy", ""), "") == "fake_name"
-            and e.get("replacement_text")
-            and e.get("original_text")
-        ]
-        # Sort longest-first so full names seed the map before subsets
-        fake_entities.sort(key=lambda e: len(e["original_text"]), reverse=True)
-
-        for entity in fake_entities:
-            key = entity["original_text"].lower().strip()
-            if key not in consistency_map:
-                consistency_map[key] = entity["replacement_text"]
-
-        # Second pass: resolve subsets against already-mapped full names.
-        # For each entity, look for a longer entry whose tokens contain the
-        # entity's tokens as a contiguous slice, then take the aligned
-        # replacement tokens.  Falls back to the entity's own replacement
-        # if no contiguous match is found.
-        full_name_entries = list(consistency_map.items())  # snapshot
-        for entity in fake_entities:
-            key = entity["original_text"].lower().strip()
-            orig_tokens = key.split()
-            n = len(orig_tokens)
-            for full_key, full_replacement in full_name_entries:
-                if full_key == key:
-                    continue  # skip self-match
-                full_tokens = full_key.split()
-                if len(full_tokens) <= n:
-                    continue  # not longer — can't be a superset
-                repl_tokens = full_replacement.split()
-                if len(repl_tokens) < len(full_tokens):
-                    continue  # replacement token count mismatch — skip to avoid misalignment
-                # Find contiguous window match
-                for i in range(len(full_tokens) - n + 1):
-                    if full_tokens[i:i + n] == orig_tokens:
-                        consistency_map[key] = " ".join(repl_tokens[i:i + n])
-                        break
-                else:
-                    continue  # no window matched — try next full-name entry
-                break  # matched — stop searching
-
-    @staticmethod
-    def _remove_contained_entities(
-        entities: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """
-        Remove entities whose first bounding box is substantially contained
-        within a larger entity's bounding box on the same page.
-
-        An entity is considered contained if its bbox overlaps ≥80 % of its
-        own area with a larger entity's bbox.
-        """
-        def _first_bbox(e):
-            bboxes = MaskingService._resolve_bboxes(e)
-            return bboxes[0] if bboxes else None
-
-        def _area(bbox):
-            return bbox[2] * bbox[3]
-
-        def _intersection_area(a, b):
-            ax, ay, aw, ah = a
-            bx, by, bw, bh = b
-            ix = max(ax, bx)
-            iy = max(ay, by)
-            iw = min(ax + aw, bx + bw) - ix
-            ih = min(ay + ah, by + bh) - iy
-            if iw <= 0 or ih <= 0:
-                return 0.0
-            return iw * ih
-
-        # Sort by area descending so larger entities come first
-        indexed = [(e, _first_bbox(e)) for e in entities]
-        indexed.sort(key=lambda t: _area(t[1]) if t[1] else 0, reverse=True)
-
-        kept = []
-        kept_bboxes = []
-        for entity, bbox in indexed:
-            if bbox is None:
-                kept.append(entity)
-                continue
-            entity_area = _area(bbox)
-            contained = any(
-                entity_area > 0
-                and _intersection_area(bbox, kb) / entity_area >= 0.80
-                and _area(kb) > entity_area
-                for kb in kept_bboxes
-            )
-            if not contained:
-                kept.append(entity)
-                kept_bboxes.append(bbox)
-        return kept
 
     def _get_font(self, height: int) -> ImageFont.ImageFont:
         font_size = max(8, int(height * 0.7))

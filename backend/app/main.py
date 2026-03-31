@@ -46,7 +46,7 @@ from app.models import (
     DatabricksProcessRequest,
     DatabricksProcessResponse,
     Entity,
-    EntityVerifyResult,
+    Occurrence,
     ErrorResponse,
     FieldDefinition,
     HealthResponse,
@@ -58,8 +58,6 @@ from app.models import (
     SystemTemplateDetail,
     SystemTemplateSummary,
     UploadResponse,
-    VerifyRequest,
-    VerifyResponse,
 )
 from app.session_manager import UCSessionManager
 
@@ -279,12 +277,17 @@ def _mock_entities(session_id: str, field_definitions: list) -> List[Entity]:
                 entity_type=name,
                 original_text=original,
                 replacement_text=replacement,
-                # Distribute boxes vertically so they don't overlap in the preview
-                bounding_box=[0.05, 0.08 + i * 0.07, 0.45, 0.025],
                 confidence=0.95,
                 approved=True,
-                page_number=1,
                 strategy=field_strategy,
+                occurrences=[
+                    Occurrence(
+                        page_number=1,
+                        original_text=original,
+                        # Distribute boxes vertically so they don't overlap in the preview
+                        bounding_boxes=[[0.05, 0.08 + i * 0.07, 0.45, 0.025]],
+                    )
+                ],
             )
         )
     return entities
@@ -432,6 +435,7 @@ async def _process_background(
     UCSessionManager calls are wrapped in asyncio.to_thread so they don't
     stall the event loop.
     """
+    _t_start = time.monotonic()
     audit_logger.info("PROCESS_START session=%s fields=%d", session_id, len(field_definitions))
 
     if MOCK_DATABRICKS:
@@ -452,7 +456,8 @@ async def _process_background(
             session_id=session_id,
             field_definitions=field_definitions,
         )
-        logger.info("Calling Databricks for session %s", session_id)
+        logger.info("Calling Databricks endpoint for session %s", session_id)
+        _t_http = time.monotonic()
         try:
             async with httpx.AsyncClient(timeout=600.0) as client:
                 response = await client.post(
@@ -464,10 +469,15 @@ async def _process_background(
                     },
                 )
             response.raise_for_status()
+            _http_elapsed = time.monotonic() - _t_http
+            logger.info(
+                "Databricks HTTP call complete for session %s: %.1fs, response %d bytes",
+                session_id, _http_elapsed, len(response.content),
+            )
             raw: Dict[str, Any] = response.json()
         except httpx.TimeoutException as exc:
             err = "Entity extraction timed out. The document may be complex or the endpoint is under load."
-            logger.error("Databricks timed out for session %s: %s", session_id, exc)
+            logger.error("Databricks timed out for session %s after %.1fs: %s", session_id, time.monotonic() - _t_http, exc)
             audit_logger.error("PROCESS_FAILURE session=%s reason=timeout", session_id)
             try:
                 await asyncio.to_thread(sm.update_session, session_id, status="error", error_message=err)
@@ -476,7 +486,7 @@ async def _process_background(
             return
         except (httpx.HTTPStatusError, httpx.RequestError) as exc:
             err = f"Databricks request failed: {exc}"
-            logger.error("Databricks error for session %s: %s", session_id, exc)
+            logger.error("Databricks error for session %s after %.1fs: %s", session_id, time.monotonic() - _t_http, exc)
             audit_logger.error("PROCESS_FAILURE session=%s reason=%r", session_id, str(exc))
             try:
                 await asyncio.to_thread(sm.update_session, session_id, status="error", error_message=err)
@@ -485,17 +495,34 @@ async def _process_background(
             return
 
         logger.info(
-            "Databricks raw response keys for session %s: %s (first-level preview: %s)",
+            "Databricks raw response keys for session %s: %s",
             session_id,
             list(raw.keys()),
-            str(raw)[:500],
         )
+
+        # Check directly for a model-level error in the raw response before
+        # attempting to parse entities.  This handles the case where the model's
+        # predict() outer try/except caught an internal error (e.g. vision API
+        # 504) and returned {"status": "error", "error_message": "..."} so the
+        # user sees the real message rather than a generic parse-failure string.
+        _predictions = raw.get("predictions") or raw.get("dataframe_records")
+        _record = _predictions[0] if isinstance(_predictions, list) and _predictions else raw
+        if isinstance(_record, dict) and _record.get("status") == "error":
+            err = _record.get("error_message") or "Entity extraction failed."
+            logger.error("Model reported error for session %s: %s", session_id, err)
+            audit_logger.error("PROCESS_FAILURE session=%s reason=model_error err=%r", session_id, err)
+            try:
+                await asyncio.to_thread(sm.update_session, session_id, status="error", error_message=err)
+            except Exception as ue:
+                logger.error("Failed to mark session %s as error after model error: %s", session_id, ue)
+            return
+
         try:
             db_response = DatabricksProcessResponse.from_mlflow_response(raw)
             entities = db_response.entities
             logger.info("Parsed %d entities for session %s", len(entities), session_id)
         except Exception as exc:
-            err = f"Could not parse entity list returned by Databricks: {exc}"
+            err = f"Entity extraction failed: {exc}"
             logger.error("Parse error for session %s: %s — raw: %s", session_id, exc, raw)
             audit_logger.error("PROCESS_FAILURE session=%s reason=parse_error err=%r", session_id, str(exc))
             try:
@@ -521,13 +548,15 @@ async def _process_background(
                 logger.error("Failed to mark session %s as error after entity save failure: %s", session_id, ue)
             return
 
+    _t_status = time.monotonic()
     try:
         await asyncio.to_thread(sm.update_session, session_id, status="awaiting_review")
+        logger.info("Session %s status update to awaiting_review took %.1fs", session_id, time.monotonic() - _t_status)
     except Exception as exc:
         logger.error(
-            "Could not update session %s to 'awaiting_review': %s — "
+            "Could not update session %s to 'awaiting_review' after %.1fs: %s — "
             "attempting to mark as error so the user is not left waiting.",
-            session_id, exc, exc_info=True,
+            session_id, time.monotonic() - _t_status, exc, exc_info=True,
         )
         audit_logger.error("PROCESS_FAILURE session=%s reason=status_update_failed", session_id)
         try:
@@ -543,9 +572,10 @@ async def _process_background(
             )
         return
 
+    _total = time.monotonic() - _t_start
     suffix = " (mock)" if MOCK_DATABRICKS else ""
-    logger.info("Background processing done for session %s — %d entities%s", session_id, len(entities), suffix)
-    audit_logger.info("PROCESS_COMPLETE session=%s entities=%d mock=%s", session_id, len(entities), MOCK_DATABRICKS)
+    logger.info("Background processing done for session %s — %d entities, total %.1fs%s", session_id, len(entities), _total, suffix)
+    audit_logger.info("PROCESS_COMPLETE session=%s entities=%d total_s=%.1f mock=%s", session_id, len(entities), _total, MOCK_DATABRICKS)
 
 
 @app.post("/api/process", response_model=ProcessAcceptedResponse, status_code=202)
@@ -561,7 +591,7 @@ async def process_document(request: ProcessRequest, background_tasks: Background
 
     # --- Verify session exists ---
     try:
-        session = sm.get_session(request.session_id)
+        session = await asyncio.to_thread(sm.get_session, request.session_id)
     except NotImplementedError:
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
@@ -591,7 +621,11 @@ async def process_document(request: ProcessRequest, background_tasks: Background
     except NotImplementedError:
         pass
     except Exception as exc:
-        logger.warning("Could not update field_definitions for %s: %s", request.session_id, exc)
+        logger.error("Could not update session %s before processing: %s", request.session_id, exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to update session state in storage.",
+        )
 
     # --- Schedule background extraction and return immediately ---
     background_tasks.add_task(
@@ -620,14 +654,16 @@ async def approve_and_mask(request: ApprovalRequest):
     4. Applies any replacement-text overrides the user made in the ReviewTable.
     5. Delegates masking to the Databricks MaskingModel endpoint, which writes
        masked.pdf back to UC directly.
-    6. Updates the session status to "completed".
+    6. When request.run_verification is True, the Masking model also re-OCRs
+       the masked output and returns occurrences_total, occurrences_masked, score.
+    7. Updates the session status to "completed".
     """
     sm = _require_session_manager()
     t0 = time.monotonic()
 
     # --- Load original file ---
     try:
-        session = sm.get_session(request.session_id)
+        session = await asyncio.to_thread(sm.get_session, request.session_id)
     except NotImplementedError:
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
@@ -652,7 +688,7 @@ async def approve_and_mask(request: ApprovalRequest):
     stored_original = f"original{original_ext}"
 
     try:
-        original_bytes = sm.get_file(request.session_id, stored_original)
+        original_bytes = await asyncio.to_thread(sm.get_file, request.session_id, stored_original)
     except NotImplementedError:
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
@@ -675,7 +711,7 @@ async def approve_and_mask(request: ApprovalRequest):
     # --- Load stored entities ---
     stored_entities: List[Dict[str, Any]] = []
     try:
-        stored_entities = sm.get_entities(request.session_id)
+        stored_entities = await asyncio.to_thread(sm.get_entities, request.session_id)
     except NotImplementedError:
         # Storage not implemented yet — fall back to updated_entities from request
         if request.updated_entities:
@@ -730,10 +766,14 @@ async def approve_and_mask(request: ApprovalRequest):
 
     # --- Persist audit record before masking (captured even if masking fails) ---
     try:
-        sm.save_masking_decisions(request.session_id, stored_entities, approved_ids)
+        await asyncio.to_thread(sm.save_masking_decisions, request.session_id, stored_entities, approved_ids)
     except Exception as exc:
-        logger.warning(
-            "Could not save masking decisions for %s: %s", request.session_id, exc
+        logger.error(
+            "Could not save masking decisions for %s: %s", request.session_id, exc, exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to persist masking decisions to storage.",
         )
 
     # --- Delegate masking to Databricks ---
@@ -752,6 +792,8 @@ async def approve_and_mask(request: ApprovalRequest):
             ),
         )
 
+    masking_result: Dict[str, Any] = {}
+
     if MOCK_DATABRICKS and not DATABRICKS_MASKING_ENDPOINT:
         # Local dev / test mode: skip real masking, just update status.
         logger.info("Mock mode: skipping masking for session %s", request.session_id)
@@ -764,6 +806,7 @@ async def approve_and_mask(request: ApprovalRequest):
                 {
                     "session_id": request.session_id,
                     "entities_to_mask": json.dumps(entities_to_mask),
+                    "run_verification": request.run_verification,
                 }
             ]
         }
@@ -778,6 +821,10 @@ async def approve_and_mask(request: ApprovalRequest):
                     },
                 )
                 resp.raise_for_status()
+                raw = resp.json()
+                predictions = raw.get("predictions")
+                record = predictions[0] if (predictions and isinstance(predictions, list)) else raw
+                masking_result = record if isinstance(record, dict) else {}
         except httpx.TimeoutException:
             audit_logger.error("MASK_FAILURE session=%s reason=timeout", request.session_id)
             raise HTTPException(
@@ -812,7 +859,7 @@ async def approve_and_mask(request: ApprovalRequest):
     # already in UC. Status being stuck at 'awaiting_review' has no visible
     # impact on the user (frontend uses the API response, not stored status).
     try:
-        sm.update_session(request.session_id, status="completed")
+        await asyncio.to_thread(sm.update_session, request.session_id, status="completed")
     except Exception as exc:
         logger.error(
             "Could not update session %s to 'completed' after successful masking: %s",
@@ -839,6 +886,9 @@ async def approve_and_mask(request: ApprovalRequest):
         original_pdf_url=f"/api/files/uploads/{request.session_id}{original_ext}",
         masked_pdf_url=f"/api/files/output/{request.session_id}_masked.pdf",
         entities_masked=len(entities_to_mask),
+        occurrences_total=masking_result.get("occurrences_total") if masking_result else None,
+        occurrences_masked=masking_result.get("occurrences_masked") if masking_result else None,
+        verify_score=masking_result.get("score") if masking_result else None,
         message="Masked PDF generated successfully",
     )
 
@@ -898,7 +948,7 @@ async def serve_file(folder: str, filename: str):
 
     # --- Look up session to determine original extension ---
     try:
-        session = sm.get_session(session_id)
+        session = await asyncio.to_thread(sm.get_session, session_id)
     except NotImplementedError:
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
@@ -928,7 +978,7 @@ async def serve_file(folder: str, filename: str):
 
     # --- Read file bytes from UC ---
     try:
-        file_bytes = sm.get_file(session_id, stored_name)
+        file_bytes = await asyncio.to_thread(sm.get_file, session_id, stored_name)
     except NotImplementedError:
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
@@ -969,7 +1019,7 @@ async def get_session_info(session_id: str):
     sm = _require_session_manager()
 
     try:
-        session = sm.get_session(session_id)
+        session = await asyncio.to_thread(sm.get_session, session_id)
     except NotImplementedError:
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
@@ -993,12 +1043,16 @@ async def get_session_info(session_id: str):
     entities: List[Entity] = []
     if session.status in ("awaiting_review", "completed"):
         try:
-            raw_entities = sm.get_entities(session_id)
+            raw_entities = await asyncio.to_thread(sm.get_entities, session_id)
             entities = [Entity(**e) for e in raw_entities]
         except FileNotFoundError:
             logger.debug("entities.json not yet present for session %s — returning empty list", session_id)
         except Exception as exc:
-            logger.warning("Could not load entities for session %s: %s", session_id, exc)
+            logger.error("Could not load entities for session %s: %s", session_id, exc, exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Failed to load entities from storage.",
+            )
 
     return SessionInfo(
         session_id=session.session_id,
@@ -1028,7 +1082,7 @@ async def delete_session(session_id: str):
     sm = _require_session_manager()
 
     try:
-        session = sm.get_session(session_id)
+        session = await asyncio.to_thread(sm.get_session, session_id)
     except Exception as exc:
         logger.error("get_session(%s) failed: %s", session_id, exc, exc_info=True)
         raise HTTPException(
@@ -1043,7 +1097,7 @@ async def delete_session(session_id: str):
         )
 
     try:
-        sm.delete_session(session_id)
+        await asyncio.to_thread(sm.delete_session, session_id)
     except Exception as exc:
         logger.error("delete_session(%s) failed: %s", session_id, exc, exc_info=True)
         raise HTTPException(
@@ -1053,80 +1107,6 @@ async def delete_session(session_id: str):
 
     logger.info("Deleted session %s", session_id)
     audit_logger.info("DELETE session=%s", session_id)
-
-
-# ---------------------------------------------------------------------------
-# Verify masking
-# ---------------------------------------------------------------------------
-
-@app.post("/api/sessions/{session_id}/verify", response_model=VerifyResponse)
-async def verify_session(session_id: str, request: VerifyRequest):
-    """
-    Verify that entities were successfully masked in the output PDF.
-
-    Retrieves masked.pdf from UC storage, extracts its text layer using
-    PyMuPDF, and checks case-insensitively whether each entity's
-    original_text still appears in the extracted text.
-
-    Note: image-only (scanned) PDFs have no text layer, so all entities
-    will appear as masked regardless of actual redaction quality.
-    """
-    sm = _require_session_manager()
-
-    try:
-        pdf_bytes = sm.get_file(session_id, "masked.pdf")
-    except FileNotFoundError:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Masked PDF not found for session: {session_id}",
-        )
-    except Exception as exc:
-        logger.error("get_file(%s, masked.pdf) failed: %s", session_id, exc, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Failed to retrieve masked PDF from storage.",
-        )
-
-    import fitz  # noqa: PLC0415 — deferred to avoid top-level cost
-    try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        extracted_text = "".join(page.get_text() for page in doc)
-        doc.close()
-    except Exception as exc:
-        logger.error("Text extraction failed for session %s: %s", session_id, exc, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to extract text from masked PDF.",
-        )
-
-    extracted_lower = extracted_text.lower()
-    results: List[EntityVerifyResult] = []
-    for entity in request.entities:
-        texts_to_check = {entity.original_text.lower()}
-        if entity.occurrences:
-            for occ in entity.occurrences:
-                if occ.original_text:
-                    texts_to_check.add(occ.original_text.lower())
-        masked = not any(t in extracted_lower for t in texts_to_check)
-        results.append(EntityVerifyResult(
-            id=entity.id,
-            original_text=entity.original_text,
-            masked=masked,
-        ))
-
-    total = len(results)
-    masked_count = sum(1 for r in results if r.masked)
-    score = round((masked_count / total * 100) if total > 0 else 100.0, 1)
-
-    logger.info("Verify session %s: %d/%d masked (score=%.1f)", session_id, masked_count, total, score)
-
-    return VerifyResponse(
-        session_id=session_id,
-        score=score,
-        masked_count=masked_count,
-        total=total,
-        entities=results,
-    )
 
 
 # ---------------------------------------------------------------------------

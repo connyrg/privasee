@@ -41,7 +41,7 @@ dbutils.library.restartPython()
 # Model registration configuration
 CATALOG = "datascience_dev_bronze_sandbox"
 SCHEMA = "ds_document_deidentification"
-MODEL_NAME = "doc_deidentification"
+MODEL_NAME = "privasee_entity_extraction"
 UC_MODEL_PATH = f"{CATALOG}.{SCHEMA}.{MODEL_NAME}"
 
 # UC Volume for session storage (will be used by deployed model)
@@ -194,7 +194,7 @@ print(f"📋 Registering model to Unity Catalog: {UC_MODEL_PATH}")
 registered_model = mlflow.register_model(
     model_uri=model_info.model_uri,
     name=UC_MODEL_PATH,
-    tags={"project": "privasee", "type": "document_intelligence"}
+    tags={"project": "privasee", "type": "entity_extraction", "AppSpace":"A-007100"}
 )
 
 print(f"✅ Model registered successfully!")

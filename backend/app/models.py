@@ -77,15 +77,11 @@ class Occurrence(BaseModel):
     """
 
     page_number: int = Field(default=1, ge=1)
-    bounding_box: List[float] = Field(..., description="Normalised [x, y, w, h]")
     original_text: str = Field(default="", description="Exact text at this location")
-
-    @field_validator("bounding_box")
-    @classmethod
-    def validate_bbox(cls, v: List[float]) -> List[float]:
-        if len(v) != 4:
-            raise ValueError("bounding_box must have exactly 4 values [x, y, w, h]")
-        return v
+    bounding_boxes: List[List[float]] = Field(
+        default_factory=list,
+        description="Line-level bboxes [[x, y, w, h], ...], normalised 0–1",
+    )
 
 
 class Entity(BaseModel):
@@ -95,32 +91,16 @@ class Entity(BaseModel):
     entity_type: str = Field(..., description="Type of entity (field name)")
     original_text: str = Field(..., description="Original text found in the document")
     replacement_text: str = Field(default="", description="Text to replace it with")
-    bounding_box: List[float] = Field(
-        ..., description="Normalised [x, y, width, height] — first occurrence, used for preview"
-    )
-    bounding_boxes: Optional[List[Any]] = Field(
-        default=None,
-        description="All occurrences in the document: list of [x,y,w,h] or {x,y,width,height}. "
-                    "Passed through to the masking model so every appearance is redacted.",
-    )
     confidence: float = Field(default=0.9, ge=0.0, le=1.0)
     approved: bool = Field(default=True)
-    page_number: int = Field(default=1, ge=1)
     strategy: Optional[str] = Field(
         default=None, description="Masking strategy: 'Fake Data', 'Black Out', 'Entity Label'"
     )
     occurrences: Optional[List[Occurrence]] = Field(
         default=None,
-        description="All occurrences across pages after name-variant merging. "
-                    "When present, masking iterates these instead of bounding_box/bounding_boxes.",
+        description="All positional appearances across pages. Each occurrence carries "
+                    "page_number, original_text (exact), and bounding_boxes ([[x,y,w,h]...]).",
     )
-
-    @field_validator("bounding_box")
-    @classmethod
-    def validate_bbox(cls, v: List[float]) -> List[float]:
-        if len(v) != 4:
-            raise ValueError("bounding_box must have exactly 4 values [x, y, w, h]")
-        return v
 
 
 class OCRData(BaseModel):
@@ -218,6 +198,10 @@ class ApprovalRequest(BaseModel):
     approved_entity_ids: List[str]
     # Optional entities with user-edited replacement_text
     updated_entities: Optional[List[EntityUpdate]] = None
+    # When True the Databricks masking model re-OCRs the masked output and
+    # returns occurrence-level masking counts.  Batch mode sets this to True;
+    # single-file mode leaves it False to avoid the extra ADI latency.
+    run_verification: bool = False
 
 
 class ApprovalResponse(BaseModel):
@@ -228,6 +212,10 @@ class ApprovalResponse(BaseModel):
     masked_pdf_url: str
     masked_image_url: Optional[str] = None
     entities_masked: int
+    # Populated only when run_verification=True was requested
+    occurrences_total: Optional[int] = None
+    occurrences_masked: Optional[int] = None
+    verify_score: Optional[float] = None
     message: str = "Masked PDF generated successfully"
 
 
@@ -303,31 +291,6 @@ class SystemTemplateDetail(SystemTemplateSummary):
 
 
 # ---------------------------------------------------------------------------
-# Verify
-# ---------------------------------------------------------------------------
-
-class EntityVerifyResult(BaseModel):
-    """Verification result for a single entity."""
-    id: str
-    original_text: str
-    masked: bool
-
-
-class VerifyRequest(BaseModel):
-    """Request body for POST /api/sessions/{session_id}/verify."""
-    entities: List[Entity]
-
-
-class VerifyResponse(BaseModel):
-    """Response from POST /api/sessions/{session_id}/verify."""
-    session_id: str
-    score: float = Field(..., ge=0.0, le=100.0, description="Masking score 0–100")
-    masked_count: int
-    total: int
-    entities: List[EntityVerifyResult]
-
-
-# ---------------------------------------------------------------------------
 # Error
 # ---------------------------------------------------------------------------
 
@@ -398,6 +361,13 @@ class DatabricksProcessResponse(BaseModel):
         else:
             record = raw  # bare dict fallback
 
+        # Surface errors returned by the Databricks model (e.g. ADI timeout,
+        # vision API failure) so the backend can mark the session as "error"
+        # instead of silently treating the result as 0 entities found.
+        if record.get("status") == "error":
+            msg = record.get("error_message") or "Entity extraction failed in the Databricks model."
+            raise RuntimeError(msg)
+
         # Prefer top-level "entities" (merged flat list written by the model)
         # over "pages" (per-page unmerged list). The model sets both; using
         # "entities" avoids overwriting the UC-merged result with unmerged data.
@@ -406,9 +376,7 @@ class DatabricksProcessResponse(BaseModel):
         elif record.get("pages") and isinstance(record["pages"], list):
             raw_entities = []
             for page in record["pages"]:
-                page_num = page.get("page_num", 1)
                 for entity in page.get("entities", []):
-                    entity.setdefault("page_number", page_num)
                     raw_entities.append(entity)
         else:
             raw_entities = []
