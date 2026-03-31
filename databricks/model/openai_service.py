@@ -290,6 +290,12 @@ class OpenAIVisionService:
         field_definitions: List[Dict],
         ocr_data: Dict
     ) -> str:
+        """Build the vision LLM prompt for entity extraction on a single page.
+
+        Words are serialised in compact format (keys t/b, coords rounded to 3dp)
+        to reduce prompt size ~2.5× vs verbose JSON — critical for staying under
+        the Databricks nginx 60s timeout on dense pages.
+        """
         fields_text = "\n".join([
             f"- **{field['name']}**: {field['description']}"
             for field in field_definitions
@@ -454,6 +460,13 @@ Begin analysis:"""
         ocr_data: Dict,  # noqa: ARG002 — kept for API compatibility
         page_number: int = 1
     ) -> List[Dict]:
+        """Parse LLM JSON response into canonical occurrences-format entity list.
+
+        Strips optional code fences, validates required fields, converts compact
+        bbox arrays [[x,y,w,h]] to dicts via _merge_same_line_bboxes, and
+        discards any occurrence with no valid bounding boxes.
+        `ocr_data` is unused but kept so all vision services share the same signature.
+        """
         try:
             json_text = response_text.strip()
             if "```json" in json_text:

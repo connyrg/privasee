@@ -78,8 +78,20 @@ python -m pytest tests/ -v
 - `VALID_STATUSES = ["uploaded", "processing", "awaiting_review", "completed"]`
 
 ### Databricks models
-- Entity bounding boxes use **compact array format** `[x, y, w, h]` (not dicts) in both prompt output and JSON — parser converts to dicts internally before merging
-- All three call sites in `openai_service.py` use `reasoning_effort="low"` (GPT-5 default is medium — reduces latency significantly with acceptable quality)
+
+**Model files (`databricks/model/`):**
+- `document_intelligence.py` — main MLflow PyFunc model
+- `openai_service.py` — GPT-5 vision calls (primary provider)
+- `claude_service.py` — Databricks-hosted Claude (secondary provider; lower rate limits)
+- `databricks_service.py` — provider routing / Databricks Foundation Model API
+- `masking_model.py`, `masking_service.py` — masking MLflow model
+- `fake_data_service.py`, `ocr_service.py`, `bbox_matcher.py` — supporting services
+
+**Entity format:** Occurrences-based. Each `Entity` has `occurrences: List[Occurrence]`; each `Occurrence` carries `bounding_boxes: List[BoundingBox]` for one positional appearance in the document. LLM outputs compact array `[x, y, w, h]`; parser converts to `BoundingBox` dicts before merging.
+
+**Performance conventions:**
+- Compact bbox array format `[x, y, w, h]` in LLM prompt output (not dicts) — reduces token usage
+- All call sites in `openai_service.py` use `reasoning_effort="low"` (GPT-5 default is medium — reduces latency with acceptable quality)
 - OCR word list uses compact keys `{"t": text, "b": [x,y,w,h]}` (confidence field dropped)
 - Per-page processing via `ThreadPoolExecutor` — one Vision API call per page concurrently
 
@@ -98,6 +110,7 @@ python -m pytest tests/ -v
 - PDF display uses `data:application/pdf;base64,...` URIs fetched server-side
 - Download links use `download="filename.pdf"` attribute, no `target="_blank"`
 - Multiple callbacks write to `config-status` — `refresh_config_list` is the primary owner (no `allow_duplicate`); all others use `allow_duplicate=True` with `prevent_initial_call=True`
+- **Batch mode** uses an interval-driven state machine: `store-batch-cursor` + `store-batch-phase` advance through upload → process (polled) → mask → verify per file; `batch_tick` callback drives transitions on each `dcc.Interval` tick
 
 ---
 
@@ -136,6 +149,23 @@ with patch("app.main._apply_masking_sync", return_value=b"%PDF-1.4 fake %%EOF"):
 - `_create_pdf_with_widgets(spec)` → creates PDF with AcroForm text widgets; returns `(pdf_bytes, {field_name: fitz.Rect})`
 - `_widget_values(result_bytes)` → returns `{field_name: field_value}` from first page — use to assert widget masking
 - `_mock_widget(field_value, x0, ...)` → duck-type widget with `.field_value` and `.rect` — use for `_resolve_component_replacement` unit tests
+
+---
+
+## Documentation Maintenance
+
+Three slash commands are available to help keep docs in sync (run them before committing):
+- `/update-docs` — updates CLAUDE.md, TODO.md, and MEMORY.md
+- `/update-readme` — updates README files and `docs/`
+- `/update-docstrings` — updates inline docstrings in changed Python files
+
+Before every commit, update these three files to keep them in sync:
+
+| File | Audience | Contains | Update when |
+|---|---|---|---|
+| **CLAUDE.md** | Team + AI | Architecture, conventions, constraints, test/deploy instructions | Conventions or architecture change |
+| **TODO.md** | Team + AI | Open bugs and planned features only | Work starts, completes, or new issues found |
+| **MEMORY.md** | AI only (`.claude/`) | Current branch state, test count, what's implemented — things not derivable from the other two | End of every session |
 
 ---
 

@@ -243,6 +243,12 @@ class ClaudeVisionService:
         field_definitions: List[Dict],
         ocr_data: Dict
     ) -> str:
+        """Build the vision LLM prompt for entity extraction on a single page.
+
+        Uses full verbose word format (indented JSON, unabbreviated keys) unlike
+        the OpenAI service — Claude's rate limits make per-page concurrency low
+        enough that prompt size is less critical here.
+        """
         fields_text = "\n".join([
             f"- **{field['name']}**: {field['description']}"
             for field in field_definitions
@@ -387,6 +393,14 @@ Begin analysis:"""
         ocr_data: Dict,  # noqa: ARG002 — kept for API compatibility
         page_number: int = 1
     ) -> List[Dict]:
+        """Parse Claude JSON response into canonical occurrences-format entity list.
+
+        Strips optional code fences, validates required fields, converts compact
+        bbox arrays [[x,y,w,h]] to dicts via _merge_same_line_bboxes, and
+        discards occurrences with no valid bounding boxes. Returns [] on parse error
+        rather than raising (Claude errors are non-fatal; page is skipped).
+        `ocr_data` is unused but kept so all vision services share the same signature.
+        """
         try:
             json_text = response_text.strip()
 

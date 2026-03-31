@@ -97,6 +97,12 @@ class MaskingModel(mlflow.pyfunc.PythonModel):
         logger.info("MaskingModel ready")
 
     def predict(self, context, model_input: pd.DataFrame) -> pd.DataFrame:
+        """MLflow PyFunc entry point. Masks one session per input row.
+
+        Each row must have `session_id` and `entities_to_mask` (JSON string).
+        Returns a DataFrame with columns: session_id, status, entities_masked,
+        and error_message (only present on error rows).
+        """
         results = []
         for idx, row in model_input.iterrows():
             try:
@@ -116,6 +122,12 @@ class MaskingModel(mlflow.pyfunc.PythonModel):
     # ------------------------------------------------------------------
 
     def _process_masking(self, row: pd.Series) -> Dict[str, Any]:
+        """Orchestrate fetch → mask → write for a single session row.
+
+        Deserialises `entities_to_mask` from JSON string if needed, fetches the
+        original file from UC, applies masking, and writes masked.pdf back to UC.
+        Returns a result dict with session_id, status, and entities_masked count.
+        """
         session_id = row["session_id"]
         entities_to_mask = row["entities_to_mask"]
 
@@ -138,6 +150,13 @@ class MaskingModel(mlflow.pyfunc.PythonModel):
         }
 
     def _apply_masking(self, file_bytes: bytes, ext: str, entities: List[Dict]) -> bytes:
+        """Dispatch to PDF or image masking and return masked bytes as PDF.
+
+        PDFs are masked natively via PyMuPDF. Images (PNG/JPG) are masked via PIL
+        then wrapped in a single-page PDF — output is always PDF regardless of input
+        format (see TODO #3 for planned format-preserving output).
+        Raises ValueError for unsupported file types.
+        """
         if ext == ".pdf":
             return self.masking_service.apply_pdf_masks(file_bytes, entities)
 

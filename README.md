@@ -50,9 +50,12 @@ See [docs/deployment.md](docs/deployment.md) for CI/CD pipeline details.
 
 ```
 privasee/
+├── .claude/commands/        Shared Claude Code skills (/update-docs, /update-readme, /update-docstrings)
 ├── .github/workflows/       CI/CD pipelines
 ├── frontend_dash/           Dash frontend (primary UI)
 │   ├── app.py               Entry point — deployable via rsconnect deploy dash
+│   ├── assets/              Static assets (custom.css)
+│   ├── README.md
 │   └── requirements.txt
 ├── frontend/                Legacy React + Vite app (not actively deployed)
 ├── backend/

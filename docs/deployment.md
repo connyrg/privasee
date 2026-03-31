@@ -112,12 +112,12 @@ In the Databricks UI (Serving → your endpoint → Edit endpoint → Environmen
 
 #### 1. Register the model
 
-Run `databricks/notebooks/register_model.py` selecting `MaskingModel`. Register it
-under a separate name (e.g. `privasee_masking`) in Unity Catalog.
+Run `databricks/notebooks/register_masking_model.ipynb` in your Databricks workspace.
+Register it under a separate name (e.g. `privasee_masking`) in Unity Catalog.
 
 #### 2. Deploy the endpoint
 
-Run `databricks/notebooks/deploy_endpoint.py` with the masking model name and version.
+Run `databricks/notebooks/deploy_masking_endpoint.py` with the masking model name and version.
 
 #### 3. Configure endpoint environment variables
 
