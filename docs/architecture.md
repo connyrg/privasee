@@ -47,7 +47,7 @@ in PDFs and images.  Three independently deployable components communicate over 
 - Fetches PDF content server-side and returns `data:` URIs for iframe display (avoids cross-origin routing issues on Posit Connect)
 - Supports two processing modes:
   - **Single document** — upload → review entities → generate masked PDF → compare
-  - **Batch** — upload multiple PDFs → automatic upload/process/mask/verify per file → results table with masking scores
+  - **Batch** — upload multiple PDFs → automatic upload/process/mask (with built-in verification) per file → results table with occurrence-level masking scores
 
 ### Backend (`backend/`)
 - FastAPI application deployed to Posit Connect
@@ -64,8 +64,7 @@ Key API endpoints:
 | `GET` | `/api/health` | Health check |
 | `POST` | `/api/upload` | Upload a document, create a session |
 | `POST` | `/api/process` | Extract entities via Databricks |
-| `POST` | `/api/approve-and-mask` | Apply redactions via Databricks |
-| `POST` | `/api/sessions/{id}/verify` | Verify masking by extracting text from masked PDF |
+| `POST` | `/api/approve-and-mask` | Apply redactions via Databricks; in batch mode also returns occurrence-level masking scores |
 | `GET` | `/api/sessions/{id}` | Get session metadata |
 | `DELETE` | `/api/sessions/{id}` | Delete session and all UC artefacts |
 | `GET` | `/api/files/{folder}/{filename}` | Serve original or masked PDF |
@@ -88,10 +87,11 @@ Two MLflow PyFunc models, each deployed to its own Model Serving endpoint:
 - Writes `entities.json` (merged entities + intermediate debugging results) to the UC session directory
 
 **MaskingModel** (`masking_model.py`)
-- Receives `session_id` + approved entities from the backend
+- Receives `session_id` + approved entities from the backend; accepts optional `run_verification` flag
 - Fetches `original{ext}` from the UC volume
 - Applies redactions using PyMuPDF (black out, fake data replacement, entity label)
 - Writes `masked.pdf` back to the UC volume
+- When `run_verification=True` (batch mode): re-OCRs the masked output using hybrid approach — PyMuPDF text extraction for digital PDF pages, Azure Document Intelligence for scanned pages — and returns `occurrences_total`, `occurrences_masked`, `score`
 
 ### Shared Storage — Unity Catalog Volume
 - Path configured via `UC_VOLUME_PATH` environment variable
@@ -127,17 +127,15 @@ Two MLflow PyFunc models, each deployed to its own Model Serving endpoint:
 The Dash frontend iterates the single-document flow automatically per file:
 
 1. For each uploaded PDF, the frontend calls upload → process → approve-and-mask in sequence
-2. After masking, the frontend calls `POST /api/sessions/{id}/verify`:
-   - Backend fetches `masked.pdf` from UC and extracts its text layer (PyMuPDF)
-   - Checks case-insensitively whether each entity's original text still appears
-   - Returns a masking score (0–100) and per-entity verification result
-3. Results are collected into a summary table with colour-coded verdicts:
+2. The approve-and-mask call includes `run_verification=True`; the Masking model re-OCRs the masked output and returns occurrence-level counts:
+   - Digital PDF pages: PyMuPDF text extraction on the masked page
+   - Scanned pages / image originals: render to PNG → Azure Document Intelligence re-OCR
+   - Scanned pages without ADI credentials: treated as masked (safe fallback; score is optimistic)
+3. Results are collected into a summary table (File | Entities | Occurrences Found | Occurrences Masked | Score | Status | Download) with colour-coded score verdicts:
    - ≥ 90%: Excellent
    - 70–89%: Review recommended
    - < 70%: Masking incomplete
 4. "Process Another Batch" resets the batch state and deletes all session artefacts from UC
-
-> Note: `verify` uses text extraction, so it returns score = 100 for scanned (image-only) PDFs regardless of actual redaction quality.
 
 ## Key Design Decisions
 

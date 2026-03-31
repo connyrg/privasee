@@ -121,11 +121,21 @@ Run `databricks/notebooks/deploy_masking_endpoint.py` with the masking model nam
 
 #### 3. Configure endpoint environment variables
 
-| Variable | Description |
-|---|---|
-| `DATABRICKS_HOST` | Workspace URL |
-| `DATABRICKS_TOKEN` | Service principal token with Files API read/write access to UC volume |
-| `UC_VOLUME_PATH` | Same value as the backend |
+| Variable | Required | Description |
+|---|---|---|
+| `DATABRICKS_HOST` | Yes | Workspace URL |
+| `DATABRICKS_TOKEN` | Yes | Service principal token with Files API read/write access to UC volume |
+| `UC_VOLUME_PATH` | Yes | Same value as the backend |
+| `ADI_TENANT_ID` | For scanned PDFs | Azure tenant ID for ADI OAuth |
+| `ADI_CLIENT_ID` | For scanned PDFs | OAuth client ID for Azure Document Intelligence |
+| `ADI_CLIENT_SECRET` | For scanned PDFs | OAuth client secret for Azure Document Intelligence |
+| `ADI_ENDPOINT` | For scanned PDFs | APIM endpoint URL for Azure Document Intelligence |
+| `ADI_APPSPACE_ID` | For scanned PDFs | AppSpace ID (default: `A-007100`) |
+| `ADI_MODEL_ID` | For scanned PDFs | Document Intelligence model ID (default: `prebuilt-layout`) |
+
+The ADI variables are only needed when batch mode verification is used on scanned PDFs.
+Without them, `run_verification=True` requests will treat scanned pages as fully masked
+(score reported as 100% for those pages) rather than re-OCR'ing them.
 
 #### 4. Update after a model version bump
 

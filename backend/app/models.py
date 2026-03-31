@@ -198,6 +198,10 @@ class ApprovalRequest(BaseModel):
     approved_entity_ids: List[str]
     # Optional entities with user-edited replacement_text
     updated_entities: Optional[List[EntityUpdate]] = None
+    # When True the Databricks masking model re-OCRs the masked output and
+    # returns occurrence-level masking counts.  Batch mode sets this to True;
+    # single-file mode leaves it False to avoid the extra ADI latency.
+    run_verification: bool = False
 
 
 class ApprovalResponse(BaseModel):
@@ -208,6 +212,10 @@ class ApprovalResponse(BaseModel):
     masked_pdf_url: str
     masked_image_url: Optional[str] = None
     entities_masked: int
+    # Populated only when run_verification=True was requested
+    occurrences_total: Optional[int] = None
+    occurrences_masked: Optional[int] = None
+    verify_score: Optional[float] = None
     message: str = "Masked PDF generated successfully"
 
 
@@ -280,31 +288,6 @@ class SystemTemplateSummary(BaseModel):
 class SystemTemplateDetail(SystemTemplateSummary):
     """Full system template with field definitions, returned by GET /api/templates/{key}."""
     field_definitions: List[FieldDefinition]
-
-
-# ---------------------------------------------------------------------------
-# Verify
-# ---------------------------------------------------------------------------
-
-class EntityVerifyResult(BaseModel):
-    """Verification result for a single entity."""
-    id: str
-    original_text: str
-    masked: bool
-
-
-class VerifyRequest(BaseModel):
-    """Request body for POST /api/sessions/{session_id}/verify."""
-    entities: List[Entity]
-
-
-class VerifyResponse(BaseModel):
-    """Response from POST /api/sessions/{session_id}/verify."""
-    session_id: str
-    score: float = Field(..., ge=0.0, le=100.0, description="Masking score 0–100")
-    masked_count: int
-    total: int
-    entities: List[EntityVerifyResult]
 
 
 # ---------------------------------------------------------------------------

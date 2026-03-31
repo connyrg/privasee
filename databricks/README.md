@@ -81,7 +81,7 @@ POST /invocations  (session_id, field_definitions)
 ### Masking
 
 ```
-POST /invocations  (session_id, entities_to_mask)
+POST /invocations  (session_id, entities_to_mask, run_verification)
     │
     ├─ Fetch original{ext} from UC volume via Files REST API
     │
@@ -91,7 +91,22 @@ POST /invocations  (session_id, entities_to_mask)
     │
     ├─ Write masked.pdf to UC volume via Files REST API
     │
-    └─ Return {session_id, status: "complete", entities_masked: N}
+    ├─ [run_verification=true only] Verify masking quality via re-OCR
+    │   ├─ Classify pages from ORIGINAL PDF text layer (not masked output —
+    │   │   avoids false-positive "digital" from replacement text written by
+    │   │   Fake Data / Entity Label strategies on scanned pages)
+    │   │
+    │   ├─ Digital pages (text layer ≥ 50 chars): PyMuPDF text extraction
+    │   │   on masked page, check occurrence text absent
+    │   │
+    │   └─ Scanned pages / image originals:
+    │       ├─ ADI available → render masked page to PNG → ADI re-OCR →
+    │       │   check occurrence text absent in OCR result
+    │       └─ ADI unavailable → treat page as masked (score = 100% for
+    │           that page; set ADI vars on endpoint to enable real verify)
+    │
+    └─ Return {session_id, status, entities_masked
+               [, occurrences_total, occurrences_masked, score]}
 ```
 
 ## MLflow Interface
@@ -171,7 +186,8 @@ replacement slice for each occurrence.
   "dataframe_records": [
     {
       "session_id": "uuid-string",
-      "entities_to_mask": "[{\"id\": \"entity-uuid\", \"entity_type\": \"Full Name\", \"original_text\": \"John Doe\", \"replacement_text\": \"Jane Smith\", \"strategy\": \"Fake Data\", \"approved\": true, \"occurrences\": [{\"page_number\": 1, \"original_text\": \"John Doe\", \"bounding_boxes\": [[0.1, 0.2, 0.3, 0.05]]}]}]"
+      "entities_to_mask": "[{\"id\": \"entity-uuid\", \"entity_type\": \"Full Name\", \"original_text\": \"John Doe\", \"replacement_text\": \"Jane Smith\", \"strategy\": \"Fake Data\", \"approved\": true, \"occurrences\": [{\"page_number\": 1, \"original_text\": \"John Doe\", \"bounding_boxes\": [[0.1, 0.2, 0.3, 0.05]]}]}]",
+      "run_verification": false
     }
   ]
 }
@@ -180,7 +196,13 @@ replacement slice for each occurrence.
 `entities_to_mask` is a **JSON string** (not a nested object) containing the list of
 approved entities. Only entities with `approved: true` are redacted.
 
+`run_verification` (optional, default `false`) — when `true`, the model re-OCRs the
+masked output and returns occurrence-level masking counts. Set to `true` by the backend
+for batch mode; `false` for single-file mode to avoid the extra ADI latency.
+
 #### Output (MLflow predictions format)
+
+Without verification (`run_verification=false`):
 
 ```json
 {
@@ -193,6 +215,27 @@ approved entities. Only entities with `approved: true` are redacted.
   ]
 }
 ```
+
+With verification (`run_verification=true`):
+
+```json
+{
+  "predictions": [
+    {
+      "session_id": "uuid-string",
+      "status": "complete",
+      "entities_masked": 5,
+      "occurrences_total": 8,
+      "occurrences_masked": 7,
+      "score": 87.5
+    }
+  ]
+}
+```
+
+`score` is `occurrences_masked / occurrences_total * 100`. Scanned pages without ADI
+credentials count all their occurrences as masked, so `score` may be optimistic when
+ADI env vars are not set on the endpoint.
 
 ## Environment Variables
 
@@ -238,11 +281,21 @@ approved entities. Only entities with `approved: true` are redacted.
 
 ### Masking endpoint
 
-| Variable | Description |
-|---|---|
-| `DATABRICKS_HOST` | Workspace URL |
-| `DATABRICKS_TOKEN` | Service principal token with Files API read/write access |
-| `UC_VOLUME_PATH` | UC volume base path (must match Document Intelligence endpoint) |
+| Variable | Required | Description |
+|---|---|---|
+| `DATABRICKS_HOST` | Yes | Workspace URL |
+| `DATABRICKS_TOKEN` | Yes | Service principal token with Files API read/write access |
+| `UC_VOLUME_PATH` | Yes | UC volume base path (must match Document Intelligence endpoint) |
+| `ADI_TENANT_ID` | For scanned PDFs | Azure tenant ID for ADI OAuth |
+| `ADI_CLIENT_ID` | For scanned PDFs | OAuth client ID for Azure Document Intelligence |
+| `ADI_CLIENT_SECRET` | For scanned PDFs | OAuth client secret for Azure Document Intelligence |
+| `ADI_ENDPOINT` | For scanned PDFs | APIM endpoint URL for Azure Document Intelligence |
+| `ADI_APPSPACE_ID` | For scanned PDFs | AppSpace ID (default: `A-007100`) |
+| `ADI_MODEL_ID` | For scanned PDFs | Document Intelligence model ID (default: `prebuilt-layout`; deployed as `prebuilt-read`) |
+
+The ADI variables are only required for batch-mode verification on scanned PDFs
+(`run_verification=true`). Without them, scanned pages are treated as masked (safe
+fallback) but `score` will be artificially 100% for those pages.
 
 ## UC Volume Layout
 

@@ -20,7 +20,15 @@
 # MAGIC 5. Provides endpoint URL for integration
 # MAGIC
 # MAGIC ## How the Model Works
-# MAGIC The model expects a `session_id` and `field_definitions` as input. It fetches the original document from the UC volume using the session_id, processes it through OCR and vision AI, and returns detected entities with bounding boxes.
+# MAGIC The model expects a `session_id`, `entities_to_mask` (JSON string), and optional
+# MAGIC `run_verification` (bool, default `false`) as input. It fetches the original document
+# MAGIC from UC, applies redactions, writes `masked.pdf` back to UC, and optionally re-OCRs
+# MAGIC the masked output to compute an occurrence-level masking score.
+# MAGIC
+# MAGIC When `run_verification=true` and the document contains scanned pages, the ADI
+# MAGIC credentials below are required. Without them, scanned pages are treated as masked
+# MAGIC (safe fallback) and the returned `score` will be 100% for those pages — a warning
+# MAGIC is logged to the endpoint logs.
 # MAGIC
 # MAGIC ## Previous Step
 # MAGIC Run `register_model.py` to register the model first.
@@ -94,8 +102,12 @@ print(f"   Vision Provider: {VISION_PROVIDER}")
 # MAGIC %md
 # MAGIC ## Configure Endpoint Environment Variables
 # MAGIC
-# MAGIC The endpoint needs access to Azure credentials via Databricks secrets.
 # MAGIC Update the secret scope and key names to match your configuration.
+# MAGIC
+# MAGIC **Required:** `DATABRICKS_HOST`, `DATABRICKS_TOKEN`, `UC_VOLUME_PATH`
+# MAGIC
+# MAGIC **For scanned PDF verification:** ADI credentials below. Without them, scanned
+# MAGIC pages are treated as masked (safe fallback) and a warning is logged.
 
 # COMMAND ----------
 
@@ -113,6 +125,12 @@ print("✅ Workspace client initialized")
 # COMMAND ----------
 
 # Environment variables for the endpoint
+#
+# ADI vars are required for scanned-PDF verification (run_verification=true in batch mode).
+# Without them, scanned pages are assumed masked and score is reported as 100% for those
+# pages. A warning is logged to endpoint logs when this fallback is active.
+#
+# Use the same secret scope and literal values as deploy_endpoint.py (Document Intelligence).
 
 env_vars = {
     "ENABLE_MLFLOW_TRACING": True,
@@ -120,6 +138,14 @@ env_vars = {
     "UC_VOLUME_PATH": UC_VOLUME_PATH,
     "DATABRICKS_HOST": "https://suncorp-dev.cloud.databricks.com/",
     "DATABRICKS_TOKEN": f"{{{{secrets/Conny.GUNADI@suncorp.com.au/DATABRICKS_TOKEN_DEV}}}}",
+    # Azure Document Intelligence — required for scanned PDF verification
+    "ADI_TENANT_ID":      "1356bcf3-c075-43d5-a54c-ba71df07ff70",
+    "ADI_CLIENT_ID":      f"{{{{secrets/apim_00010_1/client_id}}}}",
+    "ADI_CLIENT_SECRET":  f"{{{{secrets/apim_00010_1/client_secret}}}}",
+    "ADI_API_APP_ID_URI": "api://aeddc053-d47f-4352-9977-4313e0625905",
+    "ADI_ENDPOINT":       "https://apim-nonprod-idp.azure-api.net/documentintelligence/documentModels/{model}:analyze",
+    "ADI_APPSPACE_ID":    "A-007100",
+    "ADI_MODEL_ID":       "prebuilt-read",
 }
 
 print(f"\n📋 Environment variables:")

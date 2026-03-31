@@ -86,6 +86,10 @@ async def test_approve_and_mask_returns_masked_pdf_url(
     assert "masked" in body["masked_pdf_url"]
     assert "original_pdf_url" in body
     assert body["entities_masked"] == 1
+    # Verification fields are None in mock mode (run_verification=False by default)
+    assert body["occurrences_total"] is None
+    assert body["occurrences_masked"] is None
+    assert body["verify_score"] is None
 
 
 @pytest.mark.integration

@@ -76,7 +76,15 @@ Concurrent per-page calls frequently hit 429 errors.
 
 ---
 
-### 5. Improvement to Batch mode result table
+### ~~5. Improvement to Batch mode result table~~ ✅ Fixed
 
-**Description:** Currently the result table only contains # of entities, # of entities masked, and accuracy percentage. We need to have # of entities, # of occurences, # of occurences masked, and accuracy percentage
-**Expected:** Output format and image quality mirror the original upload.
+**Area:** Databricks model — `masking_model.py`; Backend — `app/main.py`, `app/models.py`; Frontend — `frontend_dash/app.py`
+**Fixed in:** `feat/llm-bbox-extraction`
+
+**What was done:** Moved verification from a separate `/api/sessions/{id}/verify` backend endpoint into the Masking Databricks model itself. The masking model now accepts `run_verification` (bool, default `false`); in batch mode the frontend sends `true` and the model runs a two-pass hybrid re-OCR on the masked output (PyMuPDF text extraction for digital PDF pages, Azure Document Intelligence for scanned pages). Returns `occurrences_total`, `occurrences_masked`, and `score`. The batch results table now shows File | Entities | Occurrences Found | Occurrences Masked | Score | Status | Download.
+
+**Key design choices:**
+- Page classification uses the ORIGINAL file's text layer (not masked output) to avoid false "digital" classification from `insert_text()` replacement text on scanned pages
+- Two-pass `ThreadPoolExecutor` pattern mirrors `OCRService._process_pdf` — fitz doc closed before concurrent ADI calls
+- Scanned pages without ADI credentials are treated as masked (safe fallback) with a warning log
+- Single-file mode leaves `run_verification=False` to avoid ADI latency

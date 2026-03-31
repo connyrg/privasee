@@ -46,7 +46,6 @@ from app.models import (
     DatabricksProcessRequest,
     DatabricksProcessResponse,
     Entity,
-    EntityVerifyResult,
     Occurrence,
     ErrorResponse,
     FieldDefinition,
@@ -59,8 +58,6 @@ from app.models import (
     SystemTemplateDetail,
     SystemTemplateSummary,
     UploadResponse,
-    VerifyRequest,
-    VerifyResponse,
 )
 from app.session_manager import UCSessionManager
 
@@ -657,7 +654,9 @@ async def approve_and_mask(request: ApprovalRequest):
     4. Applies any replacement-text overrides the user made in the ReviewTable.
     5. Delegates masking to the Databricks MaskingModel endpoint, which writes
        masked.pdf back to UC directly.
-    6. Updates the session status to "completed".
+    6. When request.run_verification is True, the Masking model also re-OCRs
+       the masked output and returns occurrences_total, occurrences_masked, score.
+    7. Updates the session status to "completed".
     """
     sm = _require_session_manager()
     t0 = time.monotonic()
@@ -793,6 +792,8 @@ async def approve_and_mask(request: ApprovalRequest):
             ),
         )
 
+    masking_result: Dict[str, Any] = {}
+
     if MOCK_DATABRICKS and not DATABRICKS_MASKING_ENDPOINT:
         # Local dev / test mode: skip real masking, just update status.
         logger.info("Mock mode: skipping masking for session %s", request.session_id)
@@ -805,6 +806,7 @@ async def approve_and_mask(request: ApprovalRequest):
                 {
                     "session_id": request.session_id,
                     "entities_to_mask": json.dumps(entities_to_mask),
+                    "run_verification": request.run_verification,
                 }
             ]
         }
@@ -819,6 +821,10 @@ async def approve_and_mask(request: ApprovalRequest):
                     },
                 )
                 resp.raise_for_status()
+                raw = resp.json()
+                predictions = raw.get("predictions")
+                record = predictions[0] if (predictions and isinstance(predictions, list)) else raw
+                masking_result = record if isinstance(record, dict) else {}
         except httpx.TimeoutException:
             audit_logger.error("MASK_FAILURE session=%s reason=timeout", request.session_id)
             raise HTTPException(
@@ -880,6 +886,9 @@ async def approve_and_mask(request: ApprovalRequest):
         original_pdf_url=f"/api/files/uploads/{request.session_id}{original_ext}",
         masked_pdf_url=f"/api/files/output/{request.session_id}_masked.pdf",
         entities_masked=len(entities_to_mask),
+        occurrences_total=masking_result.get("occurrences_total") if masking_result else None,
+        occurrences_masked=masking_result.get("occurrences_masked") if masking_result else None,
+        verify_score=masking_result.get("score") if masking_result else None,
         message="Masked PDF generated successfully",
     )
 
@@ -1098,80 +1107,6 @@ async def delete_session(session_id: str):
 
     logger.info("Deleted session %s", session_id)
     audit_logger.info("DELETE session=%s", session_id)
-
-
-# ---------------------------------------------------------------------------
-# Verify masking
-# ---------------------------------------------------------------------------
-
-@app.post("/api/sessions/{session_id}/verify", response_model=VerifyResponse)
-async def verify_session(session_id: str, request: VerifyRequest):
-    """
-    Verify that entities were successfully masked in the output PDF.
-
-    Retrieves masked.pdf from UC storage, extracts its text layer using
-    PyMuPDF, and checks case-insensitively whether each entity's
-    original_text still appears in the extracted text.
-
-    Note: image-only (scanned) PDFs have no text layer, so all entities
-    will appear as masked regardless of actual redaction quality.
-    """
-    sm = _require_session_manager()
-
-    try:
-        pdf_bytes = await asyncio.to_thread(sm.get_file, session_id, "masked.pdf")
-    except FileNotFoundError:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Masked PDF not found for session: {session_id}",
-        )
-    except Exception as exc:
-        logger.error("get_file(%s, masked.pdf) failed: %s", session_id, exc, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Failed to retrieve masked PDF from storage.",
-        )
-
-    import fitz  # noqa: PLC0415 — deferred to avoid top-level cost
-    try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        extracted_text = "".join(page.get_text() for page in doc)
-        doc.close()
-    except Exception as exc:
-        logger.error("Text extraction failed for session %s: %s", session_id, exc, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to extract text from masked PDF.",
-        )
-
-    extracted_lower = extracted_text.lower()
-    results: List[EntityVerifyResult] = []
-    for entity in request.entities:
-        texts_to_check = {entity.original_text.lower()}
-        if entity.occurrences:
-            for occ in entity.occurrences:
-                if occ.original_text:
-                    texts_to_check.add(occ.original_text.lower())
-        masked = not any(t in extracted_lower for t in texts_to_check)
-        results.append(EntityVerifyResult(
-            id=entity.id,
-            original_text=entity.original_text,
-            masked=masked,
-        ))
-
-    total = len(results)
-    masked_count = sum(1 for r in results if r.masked)
-    score = round((masked_count / total * 100) if total > 0 else 100.0, 1)
-
-    logger.info("Verify session %s: %d/%d masked (score=%.1f)", session_id, masked_count, total, score)
-
-    return VerifyResponse(
-        session_id=session_id,
-        score=score,
-        masked_count=masked_count,
-        total=total,
-        entities=results,
-    )
 
 
 # ---------------------------------------------------------------------------

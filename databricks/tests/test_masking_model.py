@@ -9,6 +9,7 @@ Covers:
 2. predict — successful PDF masking, JSON string input, image path, error handling
 3. _apply_masking — unsupported file type raises ValueError
 4. _write_masked_file — PUT request to UC Files API
+5. _verify_masking — occurrence counting, digital vs scanned routing, ADI unavailable
 """
 
 import io
@@ -16,7 +17,8 @@ import json
 import os
 import sys
 import unittest
-from unittest.mock import MagicMock, Mock, patch
+from contextlib import contextmanager
+from unittest.mock import MagicMock, Mock, patch, call
 
 import pandas as pd
 
@@ -62,11 +64,23 @@ class TestLoadContext(unittest.TestCase):
     def _make_model(self) -> MaskingModel:
         return MaskingModel()
 
+    def _load_context_mocked_modules(self):
+        """sys.modules patches for the two relative imports inside load_context.
+
+        load_context does `from .masking_service import MaskingService` and
+        `from .ocr_service import OCRService` lazily.  Neither submodule has
+        been imported at test-collection time, so patch() can't resolve them by
+        dotted name — we inject them directly into sys.modules instead.
+        """
+        return patch.dict(sys.modules, {
+            "databricks.model.masking_service": MagicMock(),
+            "databricks.model.ocr_service": MagicMock(),
+        })
+
     def test_load_context_succeeds_with_valid_env(self):
-        with patch("databricks.model.masking_service.MaskingService"):
-            with patch.dict(os.environ, _VALID_ENV):
-                model = self._make_model()
-                model.load_context(context=None)
+        with self._load_context_mocked_modules(), patch.dict(os.environ, _VALID_ENV):
+            model = self._make_model()
+            model.load_context(context=None)
 
         self.assertEqual(model.uc_volume_path, "/Volumes/cat/schema/sessions")
         self.assertEqual(model.databricks_host, "https://test.databricks.com")
@@ -75,39 +89,35 @@ class TestLoadContext(unittest.TestCase):
     def test_load_context_strips_trailing_slash(self):
         env = {**_VALID_ENV, "UC_VOLUME_PATH": "/Volumes/cat/schema/sessions/",
                "DATABRICKS_HOST": "https://test.databricks.com/"}
-        with patch("databricks.model.masking_service.MaskingService"):
-            with patch.dict(os.environ, env):
-                model = self._make_model()
-                model.load_context(context=None)
+        with self._load_context_mocked_modules(), patch.dict(os.environ, env):
+            model = self._make_model()
+            model.load_context(context=None)
 
         self.assertFalse(model.uc_volume_path.endswith("/"))
         self.assertFalse(model.databricks_host.endswith("/"))
 
     def test_load_context_raises_without_uc_volume_path(self):
         env = {k: v for k, v in _VALID_ENV.items() if k != "UC_VOLUME_PATH"}
-        with patch("databricks.model.masking_service.MaskingService"):
-            with patch.dict(os.environ, env, clear=True):
-                model = self._make_model()
-                with self.assertRaises(ValueError) as ctx:
-                    model.load_context(context=None)
+        with self._load_context_mocked_modules(), patch.dict(os.environ, env, clear=True):
+            model = self._make_model()
+            with self.assertRaises(ValueError) as ctx:
+                model.load_context(context=None)
         self.assertIn("UC_VOLUME_PATH", str(ctx.exception))
 
     def test_load_context_raises_without_databricks_host(self):
         env = {k: v for k, v in _VALID_ENV.items() if k != "DATABRICKS_HOST"}
-        with patch("databricks.model.masking_service.MaskingService"):
-            with patch.dict(os.environ, env, clear=True):
-                model = self._make_model()
-                with self.assertRaises(ValueError) as ctx:
-                    model.load_context(context=None)
+        with self._load_context_mocked_modules(), patch.dict(os.environ, env, clear=True):
+            model = self._make_model()
+            with self.assertRaises(ValueError) as ctx:
+                model.load_context(context=None)
         self.assertIn("DATABRICKS_HOST", str(ctx.exception))
 
     def test_load_context_raises_without_databricks_token(self):
         env = {k: v for k, v in _VALID_ENV.items() if k != "DATABRICKS_TOKEN"}
-        with patch("databricks.model.masking_service.MaskingService"):
-            with patch.dict(os.environ, env, clear=True):
-                model = self._make_model()
-                with self.assertRaises(ValueError) as ctx:
-                    model.load_context(context=None)
+        with self._load_context_mocked_modules(), patch.dict(os.environ, env, clear=True):
+            model = self._make_model()
+            with self.assertRaises(ValueError) as ctx:
+                model.load_context(context=None)
         self.assertIn("DATABRICKS_TOKEN", str(ctx.exception))
 
 
@@ -122,6 +132,7 @@ class TestPredictSuccess(unittest.TestCase):
         model = MaskingModel()
         model.masking_service = Mock()
         model.masking_service.apply_pdf_masks.return_value = _FAKE_PDF
+        model.ocr_service = Mock()
         model.uc_volume_path = "/Volumes/cat/schema/sessions"
         model.databricks_host = "https://test.databricks.com"
         model.databricks_token = "test-token"
@@ -140,6 +151,9 @@ class TestPredictSuccess(unittest.TestCase):
                 "strategy": "Fake Data",
                 "approved": True,
                 "page_number": 1,
+                "occurrences": [
+                    {"page_number": 1, "original_text": "John Smith", "bounding_boxes": [[0.05, 0.08, 0.2, 0.025]]},
+                ],
             }
         ]
 
@@ -219,6 +233,39 @@ class TestPredictSuccess(unittest.TestCase):
 
         self.assertEqual(result.iloc[0]["status"], "complete")
 
+    def test_predict_with_run_verification_includes_verify_fields(self):
+        """When run_verification=True the result includes occurrences_total/masked/score."""
+        model = self._make_ready_model()
+        model._verify_masking = Mock(return_value={
+            "occurrences_total": 2,
+            "occurrences_masked": 2,
+            "score": 100.0,
+        })
+        df = pd.DataFrame([{
+            "session_id": "sess-verify",
+            "entities_to_mask": self._sample_entities(),
+            "run_verification": True,
+        }])
+        result = model.predict(context=None, model_input=df)
+
+        row = result.iloc[0]
+        self.assertEqual(row["status"], "complete")
+        self.assertEqual(row["occurrences_total"], 2)
+        self.assertEqual(row["occurrences_masked"], 2)
+        self.assertEqual(row["score"], 100.0)
+        model._verify_masking.assert_called_once()
+
+    def test_predict_without_run_verification_skips_verify(self):
+        """When run_verification is absent/False, _verify_masking is not called."""
+        model = self._make_ready_model()
+        model._verify_masking = Mock()
+        df = pd.DataFrame([{
+            "session_id": "sess-no-verify",
+            "entities_to_mask": self._sample_entities(),
+        }])
+        model.predict(context=None, model_input=df)
+        model._verify_masking.assert_not_called()
+
 
 # ===========================================================================
 # Group 3 — predict (error paths)
@@ -230,6 +277,7 @@ class TestPredictErrors(unittest.TestCase):
         model = MaskingModel()
         model.masking_service = Mock()
         model.masking_service.apply_pdf_masks.return_value = _FAKE_PDF
+        model.ocr_service = Mock()
         model.uc_volume_path = "/Volumes/cat/schema/sessions"
         model.databricks_host = "https://test.databricks.com"
         model.databricks_token = "test-token"
@@ -240,7 +288,8 @@ class TestPredictErrors(unittest.TestCase):
     def _sample_entities(self) -> list:
         return [{"id": "e1", "entity_type": "Full Name", "original_text": "John",
                  "replacement_text": "Jane", "bounding_box": [0.05, 0.08, 0.2, 0.025],
-                 "strategy": "Fake Data", "approved": True, "page_number": 1}]
+                 "strategy": "Fake Data", "approved": True, "page_number": 1,
+                 "occurrences": [{"page_number": 1, "original_text": "John", "bounding_boxes": []}]}]
 
     def test_predict_returns_error_row_on_fetch_failure(self):
         model = self._make_ready_model()
@@ -346,6 +395,210 @@ class TestWriteMaskedFile(unittest.TestCase):
             model._write_masked_file("sess-bytes", b"my-pdf-data")
 
             self.assertEqual(mock_put.call_args[1]["data"], b"my-pdf-data")
+
+
+# ===========================================================================
+# Group 6 — _verify_masking
+# ===========================================================================
+
+def _make_verify_model() -> MaskingModel:
+    """Return a MaskingModel ready for _verify_masking tests."""
+    model = MaskingModel()
+    model.masking_service = Mock()
+    model.ocr_service = Mock()
+    model.ocr_service.adi_available = False
+    # Mirror the real OCRService constant so _verify_masking classification is correct.
+    model.ocr_service.MIN_TEXT_LENGTH_FOR_DIGITAL = 50
+    model.ocr_service.RENDER_ZOOM_FACTOR = 2.0
+    model.ocr_service._adi_max_concurrent = 5
+    return model
+
+
+def _make_fitz_page(text: str = "", is_pdf: bool = True):
+    """Return a mock fitz page whose get_text() returns the given text."""
+    page = MagicMock()
+    page.get_text.return_value = text
+    pixmap = MagicMock()
+    pixmap.tobytes.return_value = b"fake-png"
+    page.get_pixmap.return_value = pixmap
+    return page
+
+
+def _make_fitz_doc(pages):
+    """Return a mock fitz document containing the given page mocks."""
+    doc = MagicMock()
+    doc.__len__ = Mock(return_value=len(pages))
+    doc.__iter__ = Mock(return_value=iter(pages))
+    doc.__getitem__ = Mock(side_effect=lambda i: pages[i])
+    doc.close = Mock()
+    return doc
+
+
+@contextmanager
+def _mock_fitz_ctx(open_side_effect=None, open_return_value=None):
+    """Context manager that injects a mock fitz module into sys.modules.
+
+    _verify_masking does `import fitz` locally — patching sys.modules is the
+    correct way to intercept a deferred (inside-function) import.
+    """
+    mock_fitz = MagicMock()
+    mock_fitz.Matrix = MagicMock(return_value=MagicMock())
+    if open_side_effect is not None:
+        mock_fitz.open.side_effect = open_side_effect
+    elif open_return_value is not None:
+        mock_fitz.open.return_value = open_return_value
+    with patch.dict(sys.modules, {"fitz": mock_fitz}):
+        yield mock_fitz
+
+
+class TestVerifyMasking(unittest.TestCase):
+
+    def _make_entities(self, occurrences_per_entity):
+        """Build entity list from [(page_num, text), ...] per entity."""
+        return [
+            {
+                "id": f"e{i}",
+                "entity_type": "Full Name",
+                "original_text": text,
+                "occurrences": [{"page_number": pg, "original_text": text, "bounding_boxes": []}],
+            }
+            for i, (pg, text) in enumerate(occurrences_per_entity)
+        ]
+
+    # Use text > MIN_DIGITAL_TEXT_LENGTH (50 chars) so pages are classified as
+    # "digital" — the extraction path we're actually testing here.
+    _DIGITAL_TEXT = "This is a digital PDF page with plenty of text content for detection."
+
+    def test_all_occurrences_masked_score_100(self):
+        """Score is 100 when none of the original texts appear in the masked output."""
+        model = _make_verify_model()
+        entities = self._make_entities([(1, "John Smith")])
+
+        orig_page = _make_fitz_page(text=self._DIGITAL_TEXT + " John Smith")
+        masked_page = _make_fitz_page(text=self._DIGITAL_TEXT + " redacted")
+
+        with _mock_fitz_ctx(open_side_effect=[
+            _make_fitz_doc([orig_page]),
+            _make_fitz_doc([masked_page]),
+        ]):
+            result = model._verify_masking(b"orig", ".pdf", b"masked", entities)
+
+        self.assertEqual(result["occurrences_total"], 1)
+        self.assertEqual(result["occurrences_masked"], 1)
+        self.assertEqual(result["score"], 100.0)
+
+    def test_no_occurrences_masked_score_0(self):
+        """Score is 0 when original text still appears in masked output."""
+        model = _make_verify_model()
+        entities = self._make_entities([(1, "John Smith")])
+
+        orig_page = _make_fitz_page(text=self._DIGITAL_TEXT + " John Smith")
+        masked_page = _make_fitz_page(text=self._DIGITAL_TEXT + " John Smith still here")
+
+        with _mock_fitz_ctx(open_side_effect=[
+            _make_fitz_doc([orig_page]),
+            _make_fitz_doc([masked_page]),
+        ]):
+            result = model._verify_masking(b"orig", ".pdf", b"masked", entities)
+
+        self.assertEqual(result["occurrences_total"], 1)
+        self.assertEqual(result["occurrences_masked"], 0)
+        self.assertEqual(result["score"], 0.0)
+
+    def test_empty_entities_returns_score_100(self):
+        """No occurrences → score 100 (nothing to mask)."""
+        model = _make_verify_model()
+        result = model._verify_masking(b"orig", ".pdf", b"masked", [])
+        self.assertEqual(result["occurrences_total"], 0)
+        self.assertEqual(result["occurrences_masked"], 0)
+        self.assertEqual(result["score"], 100.0)
+
+    def test_scanned_page_without_adi_treated_as_masked(self):
+        """When ADI is unavailable, scanned pages are assumed fully masked."""
+        model = _make_verify_model()
+        model.ocr_service.adi_available = False
+        entities = self._make_entities([(1, "John Smith")])
+
+        # Original page has no text → classified as scanned
+        orig_page = _make_fitz_page(text="")
+        masked_page = _make_fitz_page(text="John Smith")  # would fail if we OCR'd it
+
+        with _mock_fitz_ctx(open_side_effect=[
+            _make_fitz_doc([orig_page]),
+            _make_fitz_doc([masked_page]),
+        ]):
+            result = model._verify_masking(b"orig", ".pdf", b"masked", entities)
+
+        # Cannot verify scanned page without ADI → treated as masked
+        self.assertEqual(result["occurrences_masked"], 1)
+        self.assertEqual(result["score"], 100.0)
+
+    def test_scanned_page_with_adi_uses_ocr_result(self):
+        """Scanned pages are re-OCR'd via ADI when available; result drives masked count."""
+        model = _make_verify_model()
+        model.ocr_service.adi_available = True
+        model.ocr_service._get_adi_token = Mock(return_value="tok")
+        # ADI returns text that does NOT contain the original → masked
+        model.ocr_service._ocr_with_adi = Mock(return_value={"text": "Some other text", "words": []})
+        entities = self._make_entities([(1, "John Smith")])
+
+        # Original page has no text → classified as scanned
+        orig_page = _make_fitz_page(text="")
+        masked_page = _make_fitz_page(text="")  # get_text() irrelevant for scanned
+
+        with _mock_fitz_ctx(open_side_effect=[
+            _make_fitz_doc([orig_page]),
+            _make_fitz_doc([masked_page]),
+        ]):
+            result = model._verify_masking(b"orig", ".pdf", b"masked", entities)
+
+        model.ocr_service._ocr_with_adi.assert_called_once()
+        self.assertEqual(result["occurrences_masked"], 1)
+
+    def test_image_original_treats_all_pages_as_scanned(self):
+        """Non-PDF originals (images) always route masked pages through ADI or treat as masked."""
+        model = _make_verify_model()
+        model.ocr_service.adi_available = False
+        entities = self._make_entities([(1, "John Smith")])
+
+        masked_page = _make_fitz_page(text="John Smith")
+
+        # For image originals, only one fitz.open call (the masked PDF)
+        with _mock_fitz_ctx(open_return_value=_make_fitz_doc([masked_page])):
+            result = model._verify_masking(b"orig", ".png", b"masked", entities)
+
+        # ADI not available → scanned page treated as masked
+        self.assertEqual(result["occurrences_masked"], 1)
+
+    def test_partial_masking_score(self):
+        """50% score when one of two occurrences still present."""
+        model = _make_verify_model()
+        entities = [
+            {
+                "id": "e1",
+                "entity_type": "Full Name",
+                "original_text": "John Smith",
+                "occurrences": [
+                    {"page_number": 1, "original_text": "John Smith", "bounding_boxes": []},
+                    {"page_number": 2, "original_text": "John Smith", "bounding_boxes": []},
+                ],
+            }
+        ]
+
+        orig_page1 = _make_fitz_page(text=self._DIGITAL_TEXT + " John Smith page one")
+        orig_page2 = _make_fitz_page(text=self._DIGITAL_TEXT + " John Smith page two")
+        masked_page1 = _make_fitz_page(text=self._DIGITAL_TEXT + " redacted page one")   # masked
+        masked_page2 = _make_fitz_page(text=self._DIGITAL_TEXT + " John Smith page two") # not masked
+
+        with _mock_fitz_ctx(open_side_effect=[
+            _make_fitz_doc([orig_page1, orig_page2]),
+            _make_fitz_doc([masked_page1, masked_page2]),
+        ]):
+            result = model._verify_masking(b"orig", ".pdf", b"masked", entities)
+
+        self.assertEqual(result["occurrences_total"], 2)
+        self.assertEqual(result["occurrences_masked"], 1)
+        self.assertEqual(result["score"], 50.0)
 
 
 if __name__ == "__main__":

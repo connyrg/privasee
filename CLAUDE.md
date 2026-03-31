@@ -39,8 +39,7 @@ Accessed via Databricks Files REST API (`/api/2.0/fs/files`).
 1. `POST /api/upload` → backend creates session in UC
 2. `POST /api/process` → backend calls Document Intelligence endpoint with `session_id` + `field_definitions`; model fetches document from UC, runs OCR + vision AI, writes `entities.json`
 3. User reviews entities in UI
-4. `POST /api/approve-and-mask` → backend calls Masking endpoint; model reads `original`, applies redactions, writes `masked.pdf`
-5. `POST /api/sessions/{id}/verify` → text extraction check on `masked.pdf`
+4. `POST /api/approve-and-mask` → backend calls Masking endpoint; model reads `original`, applies redactions, writes `masked.pdf`; in batch mode (`run_verification=True`) the model also re-OCRs the masked output and returns `occurrences_total`, `occurrences_masked`, `score`
 
 ---
 
@@ -110,7 +109,7 @@ python -m pytest tests/ -v
 - PDF display uses `data:application/pdf;base64,...` URIs fetched server-side
 - Download links use `download="filename.pdf"` attribute, no `target="_blank"`
 - Multiple callbacks write to `config-status` — `refresh_config_list` is the primary owner (no `allow_duplicate`); all others use `allow_duplicate=True` with `prevent_initial_call=True`
-- **Batch mode** uses an interval-driven state machine: `store-batch-cursor` + `store-batch-phase` advance through upload → process (polled) → mask → verify per file; `batch_tick` callback drives transitions on each `dcc.Interval` tick
+- **Batch mode** uses an interval-driven state machine: `store-batch-cursor` + `store-batch-phase` advance through upload → process (polled) → masking_run per file; `batch_tick` callback drives transitions on each `dcc.Interval` tick. Verification (`run_verification=True`) is bundled into the masking_run phase — no separate verify step
 
 ---
 
@@ -149,6 +148,8 @@ with patch("app.main._apply_masking_sync", return_value=b"%PDF-1.4 fake %%EOF"):
 - `_create_pdf_with_widgets(spec)` → creates PDF with AcroForm text widgets; returns `(pdf_bytes, {field_name: fitz.Rect})`
 - `_widget_values(result_bytes)` → returns `{field_name: field_value}` from first page — use to assert widget masking
 - `_mock_widget(field_value, x0, ...)` → duck-type widget with `.field_value` and `.rect` — use for `_resolve_component_replacement` unit tests
+- `_make_verify_model()` → `MaskingModel` with mocked `MaskingService`/`OCRService` pre-configured for `_verify_masking` tests; sets `adi_available=False`, `MIN_TEXT_LENGTH_FOR_DIGITAL=50`, `RENDER_ZOOM_FACTOR=2.0`, `_adi_max_concurrent=5`
+- `_mock_fitz_ctx(...)` → context manager using `patch.dict(sys.modules, {"fitz": mock_fitz})` — required because `fitz` is imported locally inside `_verify_masking` (deferred import), so `patch("databricks.model.masking_model.fitz")` fails
 
 ---
 
