@@ -119,6 +119,7 @@ python -m pytest tests/ -v
 - **Databricks model serving timeout** is 120s (separate from nginx timeout above)
 - **Posit Connect** controls `requests_pathname_prefix` — don't set it in app code
 - **`asyncio.run()` corrupts the Databricks Serverless event loop** — use `ThreadPoolExecutor` for blocking I/O inside async model serving code instead
+- **MLflow model signature enforced by Databricks Model Serving** — columns not declared in `input_schema` are silently dropped before `predict()` is called. The masking model signature (`register_masking_model.ipynb`) must include `run_verification` (boolean, optional) in `input_schema` and `occurrences_total`, `occurrences_masked`, `score` in `output_schema`. Re-register a new model version after any signature change.
 
 ---
 

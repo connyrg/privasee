@@ -76,6 +76,20 @@ Concurrent per-page calls frequently hit 429 errors.
 
 ---
 
+### 6. MLflow tracing for Document Intelligence model serving
+**Area:** Databricks model — `document_intelligence.py` and supporting services
+**Description:** Add MLflow tracing to capture spans for the key pipeline stages so latency and errors are visible in the Databricks UI without reading logs.
+**Expected:** Each invocation produces a trace with child spans for: OCR (per page), vision entity extraction (per page), entity merging, and UC file I/O. Errors and slow calls are surfaced in the Experiments / Traces view.
+**Approach options:**
+- `mlflow.tracing` auto-tracing via `@mlflow.trace` decorator on key methods
+- Manual `with mlflow.start_span(...)` blocks for finer-grained control
+- `mlflow.openai.autolog()` / `mlflow.anthropic.autolog()` to capture LLM call details automatically
+**Open questions:**
+- Does Databricks Model Serving propagate the MLflow run context needed for tracing, or does it need to be initialised explicitly in `load_context`?
+- Which granularity is most useful — per-page spans or just top-level pipeline stages?
+
+---
+
 ### ~~5. Improvement to Batch mode result table~~ ✅ Fixed
 
 **Area:** Databricks model — `masking_model.py`; Backend — `app/main.py`, `app/models.py`; Frontend — `frontend_dash/app.py`
